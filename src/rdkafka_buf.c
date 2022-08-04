@@ -398,7 +398,7 @@ int rd_kafka_buf_retry (rd_kafka_broker_t *rkb, rd_kafka_buf_t *rkbuf) {
 /**
  * @brief Handle RD_KAFKA_OP_RECV_BUF.
  */
-void rd_kafka_buf_handle_op (rd_kafka_op_t *rko, rd_kafka_resp_err_t err) {
+rd_bool_t rd_kafka_buf_handle_op(rd_kafka_op_t *rko, rd_kafka_resp_err_t err) {
         rd_kafka_buf_t *request, *response;
         rd_kafka_t *rk;
 
@@ -418,10 +418,11 @@ void rd_kafka_buf_handle_op (rd_kafka_op_t *rko, rd_kafka_resp_err_t err) {
 		request->rkbuf_replyq.version = version;
 	}
 
-	if (!request->rkbuf_cb) {
-		rd_kafka_buf_destroy(request);
-		return;
-	}
+        if (!request->rkbuf_cb) {
+                rd_bool_t executed;
+                rd_kafka_buf_destroy3(request, executed);
+                return executed;
+        }
 
         /* Let buf_callback() do destroy()s */
         response = request->rkbuf_response; /* May be NULL */
@@ -432,7 +433,7 @@ void rd_kafka_buf_handle_op (rd_kafka_op_t *rko, rd_kafka_resp_err_t err) {
                 rk = request->rkbuf_rkb->rkb_rk;
         }
 
-        rd_kafka_buf_callback(rk, request->rkbuf_rkb, err, response, request);
+        return rd_kafka_buf_callback(rk, request->rkbuf_rkb, err, response, request);
 }
 
 
@@ -450,7 +451,7 @@ void rd_kafka_buf_handle_op (rd_kafka_op_t *rko, rd_kafka_resp_err_t err) {
  * The decision to retry, and the call to buf_retry(), is delegated
  * to the buffer's response callback.
  */
-void rd_kafka_buf_callback (rd_kafka_t *rk,
+rd_bool_t rd_kafka_buf_callback (rd_kafka_t *rk,
 			    rd_kafka_broker_t *rkb, rd_kafka_resp_err_t err,
                             rd_kafka_buf_t *response, rd_kafka_buf_t *request){
 
@@ -487,17 +488,21 @@ void rd_kafka_buf_callback (rd_kafka_t *rk,
 
 	        rd_kafka_replyq_enq(&request->rkbuf_replyq, rko, 0);
 
-		rd_kafka_buf_destroy(request); /* from keep above */
-		return;
+                rd_bool_t executed;
+		rd_kafka_buf_destroy3(request, executed); /* from keep above */
+		return executed;
         }
 
         if (request->rkbuf_cb)
                 request->rkbuf_cb(rk, rkb, err, response, request,
                                   request->rkbuf_opaque);
 
-        rd_kafka_buf_destroy(request);
+        rd_bool_t executed;
+        rd_kafka_buf_destroy3(request, executed);
 	if (response)
 		rd_kafka_buf_destroy(response);
+
+        return executed;
 }
 
 

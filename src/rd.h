@@ -365,6 +365,15 @@ static RD_INLINE RD_UNUSED int rd_refcnt_get (rd_refcnt_t *R) {
                 DESTROY_CALL;                                   \
         } while (0)
 
+#define rd_refcnt_destroywrapper3(REFCNT, EXECUTED, DESTROY_CALL)              \
+        do {                                                                   \
+                EXECUTED = rd_false;                                           \
+                if (rd_refcnt_sub(REFCNT) > 0)                                 \
+                        break;                                                 \
+                EXECUTED = rd_true;                                            \
+                DESTROY_CALL;                                                  \
+        } while (0)
+
 #if ENABLE_REFCNT_DEBUG
 #define rd_refcnt_add_fl(FUNC,LINE,R)                                   \
         (                                                               \

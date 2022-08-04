@@ -2071,6 +2071,9 @@ rd_ts_t rd_kafka_toppar_fetch_decide (rd_kafka_toppar_t *rktp,
                 reason = "fetch backed off";
                 ts_backoff = rktp->rktp_ts_fetch_backoff;
                 should_fetch = 0;
+        } else if (rd_atomic64_get(&rk_total_message_mem) > rd_atomic64_get(&rk_total_message_mem_limit)) {
+                reason = "mem usage exceeds limit";
+                should_fetch = 0;
         }
 
  done:

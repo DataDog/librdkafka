@@ -275,8 +275,19 @@ void rd_kafka_op_destroy (rd_kafka_op_t *rko) {
 	case RD_KAFKA_OP_FETCH:
 		rd_kafka_msg_destroy(NULL, &rko->rko_u.fetch.rkm);
 		/* Decrease refcount on rkbuf to eventually rd_free shared buf*/
-		if (rko->rko_u.fetch.rkbuf)
-			rd_kafka_buf_handle_op(rko, RD_KAFKA_RESP_ERR__DESTROY);
+		if (rko->rko_u.fetch.rkbuf) {
+                        size_t buff_size = rko->rko_u.fetch.rkbuf->rkbuf_totlen;
+                        rd_kafka_buf_t* fetch_buff = rko->rko_u.fetch.rkbuf;
+                        rd_bool_t buff_freed = rd_kafka_buf_handle_op(rko, RD_KAFKA_RESP_ERR__DESTROY);
+                        if (buff_freed) {
+                                int64_t mem_usage = rd_atomic64_sub(&rk_total_message_mem, buff_size);
+                                if (mem_usage < 0) {
+                                        rd_atomic64_add(&rk_invalid_total_message_mem_cnt, 1);
+                                        rd_rkb_log(rko->rko_rktp->rktp_broker, LOG_CRIT, "BUFQ", 
+                                                "Invalid total mem usage %lld", mem_usage);
+                                }
+                        }
+                }
 
 		break;
 

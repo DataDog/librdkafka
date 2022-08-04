@@ -109,6 +109,12 @@ typedef struct rd_kafka_lwtopic_s rd_kafka_lwtopic_t;
 #define RD_KAFKA_OFFSET_IS_LOGICAL(OFF)  ((OFF) < 0)
 
 
+extern rd_atomic64_t rk_total_message_mem;
+extern rd_atomic64_t rk_total_message_mem_limit;
+extern rd_atomic64_t rk_invalid_total_message_mem_cnt;
+extern rd_atomic32_t rd_num_wait_space_threads;
+
+
 
 
 /**
@@ -912,7 +918,47 @@ void rd_kafka_log0(const rd_kafka_conf_t *conf,
                 }                                              \
         } while (0)
 
+/*
+        Wait for available memory space before allocating the expected memory size.
+        We use compare-and-swap (CAS) to register the memory one thread wants to allocate. CAS only
+        succeed if the total memory usage is still the same when checking. If another thread
+        already register its expected memory usage, the current thread needs check for the total
+        memory usage again.
+*/
+inline rd_bool_t rd_wait_mem_space(expected_size)  {
+        int64_t current_total_mem_usage;
+        rd_bool_t counted = rd_false;
+        int32_t wait_time = 0;
+        rd_bool_t succeeded = rd_true;
+        do {
+                /* if the total memory usage is too high, we need to wait */
+                current_total_mem_usage = rd_atomic64_get(&rk_total_message_mem);
+                while(unlikely(current_total_mem_usage + (expected_size) >
+                        rd_atomic64_get(&rk_total_message_mem_limit))) {
+                        if (counted == rd_false) {
+                                counted = rd_true;
+                                rd_atomic32_add(&rd_num_wait_space_threads, 1);
+                        }
+                        if (unlikely(wait_time >= 10)) {
+                                succeeded = rd_false;
+                                break;
+                        }
+                        usleep((1000 * 100) << wait_time);
+                        wait_time++;
+                        current_total_mem_usage = rd_atomic64_get(&rk_total_message_mem);
+                }
+                if (succeeded == rd_false) {
+                        break;
+                }
+        } while(rd_atomic64_cas(&rk_total_message_mem, current_total_mem_usage,
+                current_total_mem_usage + (expected_size)) == rd_false);
+        if (counted == rd_true) {
+                rd_atomic32_sub(&rd_num_wait_space_threads, 1);
+        }
+        return succeeded;
+}
 
+#define rd_restore_total_mem_usage(expected_size)  rd_atomic64_sub(&rk_total_message_mem, expected_size)
 
 extern rd_kafka_resp_err_t RD_TLS rd_kafka_last_error_code;
 

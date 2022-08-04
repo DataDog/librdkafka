@@ -63,6 +63,9 @@ librdkafka.so.1 librdkafka1 #MINVER#
  rd_kafka_flush@Base 0.9.2
  rd_kafka_get_debug_contexts@Base 0.9.0
  rd_kafka_get_err_descs@Base 0.9.1
+ rd_kafka_get_invalid_total_message_mem_cnt@Base 1.8.2
+ rd_kafka_get_num_wait_space_threads@Base 1.8.2
+ rd_kafka_get_total_message_mem@Base 1.8.2
  rd_kafka_get_watermark_offsets@Base 0.9.1
  rd_kafka_group_list_destroy@Base 0.9.1
  rd_kafka_last_error@Base 0.9.1
@@ -102,6 +105,7 @@ librdkafka.so.1 librdkafka1 #MINVER#
  rd_kafka_seek@Base 0.9.0
  rd_kafka_set_log_level@Base 0.8.0
  rd_kafka_set_logger@Base 0.8.0
+ rd_kafka_set_total_memory_limit@Base 1.8.2
  rd_kafka_subscribe@Base 0.9.0
  rd_kafka_subscription@Base 0.9.0
  rd_kafka_thread_cnt@Base 0.8.0
