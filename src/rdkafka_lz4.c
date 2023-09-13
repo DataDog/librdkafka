@@ -225,13 +225,17 @@ rd_kafka_lz4_decompress (rd_kafka_broker_t *rkb, int proper_hc, int64_t Offset,
 
         /* Allocate output buffer, we increase this later if needed,
          * but hopefully not. */
-        out = rd_malloc(estimated_uncompressed_size);
-        if (!out) {
+        rd_bool_t succeeded = rd_wait_mem_space(estimated_uncompressed_size);
+        if (succeeded == rd_false || !(out = rd_malloc(estimated_uncompressed_size))) {
                 rd_rkb_log(rkb, LOG_WARNING, "LZ4DEC",
                            "Unable to allocate decompression "
                            "buffer of %"PRIusz" bytes: %s",
                            estimated_uncompressed_size, rd_strerror(errno));
                 err = RD_KAFKA_RESP_ERR__CRIT_SYS_RESOURCE;
+                if (succeeded == rd_true) {
+                        /* already increase the total mem, then we need to restore it */
+                        rd_restore_total_mem_usage(estimated_uncompressed_size);
+                }
                 goto done;
         }
 
@@ -253,6 +257,7 @@ rd_kafka_lz4_decompress (rd_kafka_broker_t *rkb, int proper_hc, int64_t Offset,
                                    proper_hc ? "proper":"legacy",
                                    Offset, in_of, inlen,  LZ4F_getErrorName(r));
                         err = RD_KAFKA_RESP_ERR__BAD_COMPRESSION;
+                        rd_restore_total_mem_usage(outlen);
                         goto done;
                 }
 
@@ -272,13 +277,15 @@ rd_kafka_lz4_decompress (rd_kafka_broker_t *rkb, int proper_hc, int64_t Offset,
                         size_t extra = RD_MAX(outlen * 3 / 4, 1024);
 
                         rd_atomic64_add(&rkb->rkb_c.zbuf_grow, 1);
+                        rd_bool_t succeeded = rd_wait_mem_space(extra);
 
-                        if (!(tmp = rd_realloc(out, outlen + extra))) {
+                        if (succeeded == rd_false || !(tmp = rd_realloc(out, outlen + extra))) {
                                 rd_rkb_log(rkb, LOG_WARNING, "LZ4DEC",
                                            "Unable to grow decompression "
                                            "buffer to %"PRIusz"+%"PRIusz" bytes: %s",
                                            outlen, extra,rd_strerror(errno));
                                 err = RD_KAFKA_RESP_ERR__CRIT_SYS_RESOURCE;
+                                rd_restore_total_mem_usage(outlen);
                                 goto done;
                         }
                         out = tmp;
@@ -295,11 +302,13 @@ rd_kafka_lz4_decompress (rd_kafka_broker_t *rkb, int proper_hc, int64_t Offset,
                            proper_hc ? "proper":"legacy",
                            Offset, inlen-in_of, inlen);
                 err = RD_KAFKA_RESP_ERR__BAD_MSG;
+                rd_restore_total_mem_usage(outlen);
                 goto done;
         }
 
         *outbuf = out;
         *outlenp = out_of;
+        rd_restore_total_mem_usage(outlen - out_of);
 
  done:
         code = LZ4F_freeDecompressionContext(dctx);

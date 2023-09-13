@@ -28,6 +28,7 @@
 
 #include "rd.h"
 #include "rdgz.h"
+#include "rdkafka_int.h"
 
 #include <zlib.h>
 
@@ -96,7 +97,8 @@ void *rd_gz_decompress (const void *compressed, int compressed_len,
 
 		if (pass == 1) {
 			*decompressed_lenp = strm.total_out;
-			if (!(decompressed = rd_malloc((size_t)(*decompressed_lenp)+1))) {
+			rd_bool_t succeeded = rd_wait_mem_space(*decompressed_lenp);
+			if (succeeded == rd_false || !(decompressed = rd_malloc((size_t)(*decompressed_lenp)+1))) {
 				inflateEnd(&strm);
 				return NULL;
 			}

@@ -5665,11 +5665,11 @@ rd_kafka_broker_t *rd_kafka_broker_add (rd_kafka_t *rk,
 		rd_kafka_broker_unlock(rkb);
 
                 rd_kafka_log(rk, LOG_CRIT, "THREAD",
-                             "Unable to create broker thread");
+                             "Unable to create broker thread %d", rd_kafka_thread_cnt());
 
 		/* Send ERR op back to application for processing. */
 		rd_kafka_op_err(rk, RD_KAFKA_RESP_ERR__CRIT_SYS_RESOURCE,
-				"Unable to create broker thread");
+				"Unable to create broker thread %d", rd_kafka_thread_cnt());
 
 		rd_free(rkb);
 

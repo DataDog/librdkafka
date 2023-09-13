@@ -358,8 +358,8 @@ rd_kafka_msgset_reader_decompress (rd_kafka_msgset_reader_t *msetr,
                         }
 
                         /* Allocate output buffer for uncompressed data */
-                        iov.iov_base = rd_malloc(iov.iov_len);
-                        if (unlikely(!iov.iov_base)) {
+                        rd_bool_t succeeded = rd_wait_mem_space(iov.iov_len);
+                        if (succeeded == rd_false || unlikely(!(iov.iov_base = rd_malloc(iov.iov_len)))) {
                                 rd_rkb_dbg(msetr->msetr_rkb, MSG, "SNAPPY",
                                            "Failed to allocate Snappy "
                                            "decompress buffer of size %"PRIusz
@@ -383,6 +383,7 @@ rd_kafka_msgset_reader_decompress (rd_kafka_msgset_reader_t *msetr,
                                            Offset, inlen,
                                            rd_strerror(-r/*negative errno*/));
                                 rd_free(iov.iov_base);
+                                rd_restore_total_mem_usage(iov.iov_len);
                                 err = RD_KAFKA_RESP_ERR__BAD_COMPRESSION;
                                 goto err;
                         }
@@ -1165,6 +1166,10 @@ rd_kafka_msgset_reader_v2 (rd_kafka_msgset_reader_t *msetr) {
         err = rkbuf->rkbuf_err;
         /* FALLTHRU */
  err:
+        if (err == RD_KAFKA_RESP_ERR__BAD_COMPRESSION) {
+                // skip the bad compression, e.g., message is too big
+                msetr->msetr_next_offset = LastOffset + 1;
+        }
         msetr->msetr_v2_hdr = NULL;
         return err;
 }

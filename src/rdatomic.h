@@ -29,6 +29,7 @@
 #define _RDATOMIC_H_
 
 #include "tinycthread.h"
+#include "rdtypes.h"
 
 typedef struct {
 	int32_t val;
@@ -215,6 +216,15 @@ static RD_INLINE int64_t RD_UNUSED rd_atomic64_set(rd_atomic64_t *ra, int64_t v)
 #else
 	return ra->val = v; // FIXME
 #endif
+}
+
+
+static RD_INLINE rd_bool_t RD_UNUSED rd_atomic64_cas(rd_atomic64_t *ra, int64_t expected, int64_t v) {
+    return __atomic_compare_exchange_n(&ra->val, &expected, v, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
+}
+
+static RD_INLINE rd_bool_t RD_UNUSED rd_atomic32_cas(rd_atomic32_t *ra, int32_t expected, int32_t v) {
+    return __atomic_compare_exchange_n(&ra->val, &expected, v, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
 }
 
 #endif /* _RDATOMIC_H_ */

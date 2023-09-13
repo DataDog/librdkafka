@@ -78,6 +78,12 @@ static once_flag rd_kafka_global_srand_once = ONCE_FLAG_INIT;
 mtx_t rd_kafka_global_lock;
 int rd_kafka_global_cnt;
 
+rd_atomic64_t rk_total_message_mem;
+rd_bool_t mem_limit_init = rd_false;
+rd_atomic64_t rk_total_message_mem_limit;
+rd_atomic64_t rk_invalid_total_message_mem_cnt;
+rd_atomic32_t rd_num_wait_space_threads;
+
 
 /**
  * Last API error code, per thread.
@@ -140,6 +146,14 @@ static void rd_kafka_global_init0 (void) {
          * object has been created. */
         rd_kafka_ssl_init();
 #endif
+        rd_atomic64_init(&rk_total_message_mem, 0);
+        if (mem_limit_init == rd_false) {
+                mem_limit_init = rd_true;
+                rd_atomic64_init(&rk_total_message_mem_limit, 1024L * 1024 * 1024 * 1024);
+        }
+
+        rd_atomic64_init(&rk_invalid_total_message_mem_cnt, 0);
+        rd_atomic32_init(&rd_num_wait_space_threads, 0);
 }
 
 /**
@@ -149,6 +163,26 @@ void rd_kafka_global_init (void) {
         call_once(&rd_kafka_global_init_once, rd_kafka_global_init0);
 }
 
+void rd_kafka_set_total_memory_limit(int64_t total_message_mem_limit) {
+        if (mem_limit_init == rd_false) {
+                mem_limit_init = rd_true;
+                rd_atomic64_init(&rk_total_message_mem_limit, 1024L * 1024 * 1024 * 1024);
+        }
+        rd_atomic64_set(&rk_total_message_mem_limit, total_message_mem_limit);
+        // printf("Setting total mem limit %ld\n", rd_atomic64_get(&rk_total_message_mem_limit));
+}
+
+int64_t rd_kafka_get_invalid_total_message_mem_cnt() {
+        return rd_atomic64_get(&rk_invalid_total_message_mem_cnt);
+}
+
+int64_t rd_kafka_get_total_message_mem() {
+        return rd_atomic64_get(&rk_total_message_mem);
+}
+
+int32_t rd_kafka_get_num_wait_space_threads() {
+        return rd_atomic32_get(&rd_num_wait_space_threads);
+}
 
 /**
  * @brief Seed the PRNG with current_time.milliseconds
@@ -2150,6 +2184,7 @@ rd_kafka_t *rd_kafka_new (rd_kafka_type_t type, rd_kafka_conf_t *app_conf,
 
 	rk->rk_type = type;
         rk->rk_ts_created = rd_clock();
+        // printf("Total mem limit %ld\n", rd_atomic64_get(&rk_total_message_mem_limit));
 
         /* Struct-copy the config object. */
 	rk->rk_conf = *conf;

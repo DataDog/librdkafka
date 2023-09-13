@@ -857,6 +857,9 @@ rd_kafka_buf_set_abs_timeout0 (rd_kafka_buf_t *rkbuf, int timeout_ms,
 #define rd_kafka_buf_destroy(rkbuf)                                     \
         rd_refcnt_destroywrapper(&(rkbuf)->rkbuf_refcnt,                \
                                  rd_kafka_buf_destroy_final(rkbuf))
+#define rd_kafka_buf_destroy3(rkbuf, executed)                          \
+        rd_refcnt_destroywrapper3(&(rkbuf)->rkbuf_refcnt, executed,     \
+                                 rd_kafka_buf_destroy_final(rkbuf))
 
 void rd_kafka_buf_destroy_final (rd_kafka_buf_t *rkbuf);
 void rd_kafka_buf_push0 (rd_kafka_buf_t *rkbuf, const void *buf, size_t len,
@@ -892,8 +895,8 @@ void rd_kafka_bufq_dump (rd_kafka_broker_t *rkb, const char *fac,
 
 int rd_kafka_buf_retry (rd_kafka_broker_t *rkb, rd_kafka_buf_t *rkbuf);
 
-void rd_kafka_buf_handle_op (rd_kafka_op_t *rko, rd_kafka_resp_err_t err);
-void rd_kafka_buf_callback (rd_kafka_t *rk,
+rd_bool_t rd_kafka_buf_handle_op (rd_kafka_op_t *rko, rd_kafka_resp_err_t err);
+rd_bool_t rd_kafka_buf_callback (rd_kafka_t *rk,
 			    rd_kafka_broker_t *rkb, rd_kafka_resp_err_t err,
                             rd_kafka_buf_t *response, rd_kafka_buf_t *request);
 

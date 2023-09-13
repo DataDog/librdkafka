@@ -65,9 +65,9 @@ rd_kafka_zstd_decompress (rd_kafka_broker_t *rkb,
                (unsigned long long)rkb->rkb_rk->rk_conf.recv_max_msg_size) {
                 size_t ret;
                 char *decompressed;
+                rd_bool_t succeeded = rd_wait_mem_space(out_bufsize);
 
-                decompressed = rd_malloc((size_t)out_bufsize);
-                if (!decompressed) {
+                if (succeeded == rd_false || !(decompressed = rd_malloc((size_t)out_bufsize))) {
                         rd_rkb_dbg(rkb, MSG, "ZSTD",
                                    "Unable to allocate output buffer "
                                    "(%llu bytes for %"PRIusz
@@ -76,22 +76,39 @@ rd_kafka_zstd_decompress (rd_kafka_broker_t *rkb,
                         return RD_KAFKA_RESP_ERR__CRIT_SYS_RESOURCE;
                 }
 
-
                 ret = ZSTD_decompress(decompressed, (size_t)out_bufsize,
                                       inbuf, inlen);
+
                 if (!ZSTD_isError(ret)) {
                         *outlenp = ret;
-                        *outbuf = decompressed;
+                        *outbuf  = decompressed;
+                        /* readjust memory usage because we might not have used the entire buffer */
+                        rd_restore_total_mem_usage(out_bufsize - ret);
+                        /* shrink buffer size if the used part is significant */
+                        if (out_bufsize - ret > 20 * 1024 * 1024) {
+                                rd_realloc(decompressed, ret + 1);
+                        }
                         return RD_KAFKA_RESP_ERR_NO_ERROR;
                 }
 
                 rd_free(decompressed);
+                /* restore the memory usage because we need to try again */
+                rd_restore_total_mem_usage(out_bufsize);
 
                 /* Check if the destination size is too small */
                 if (ZSTD_getErrorCode(ret) == ZSTD_error_dstSize_tooSmall) {
 
+                        // if this is maximum buffer that we can have
+                        if (out_bufsize == (unsigned long long)rkb->rkb_rk->rk_conf.recv_max_msg_size) {
+                                break;
+                        }
+
                         /* Grow quadratically */
                         out_bufsize += RD_MAX(out_bufsize * 2, 4000);
+
+                        if (out_bufsize > (unsigned long long)rkb->rkb_rk->rk_conf.recv_max_msg_size) {
+                                out_bufsize = (unsigned long long)rkb->rkb_rk->rk_conf.recv_max_msg_size;
+                        }
 
                         rd_atomic64_add(&rkb->rkb_c.zbuf_grow, 1);
 

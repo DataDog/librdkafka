@@ -179,6 +179,18 @@ int rd_kafka_version(void);
 RD_EXPORT
 const char *rd_kafka_version_str (void);
 
+RD_EXPORT
+void rd_kafka_set_total_memory_limit (int64_t total_message_mem_limit);
+
+RD_EXPORT
+int64_t rd_kafka_get_invalid_total_message_mem_cnt(void);
+
+RD_EXPORT
+int64_t rd_kafka_get_total_message_mem(void);
+
+RD_EXPORT
+int rd_kafka_get_num_wait_space_threads(void);
+
 /**@}*/
 
 
