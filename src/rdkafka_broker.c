@@ -4260,6 +4260,7 @@ static int rd_kafka_broker_produce_toppars(rd_kafka_broker_t *rkb,
                  rkb->rkb_active_toppar_next);
 
         if (multi_batch_request && !rd_list_empty(&batch_bufq)) {
+                rd_rkb_log(rkb, LOG_ERR, "XXXXXXXXXXXXXX");
                 rd_kafka_MultiBatchProduceRequest(rkb, pid, &batch_bufq);
         }
         rd_list_destroy(&batch_bufq);
