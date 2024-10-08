@@ -3389,6 +3389,7 @@ rd_kafka_broker_op_serve(rd_kafka_broker_t *rkb, rd_kafka_op_t *rko) {
                 rkb->rkb_toppar_cnt++;
                 rd_kafka_broker_unlock(rkb);
                 rktp->rktp_broker = rkb;
+                rktp->rktp_broker_id = rkb->rkb_nodeid;
                 rd_assert(!rktp->rktp_msgq_wakeup_q);
                 rktp->rktp_msgq_wakeup_q = rd_kafka_q_keep(rkb->rkb_ops);
                 rd_kafka_broker_keep(rkb);
@@ -3490,6 +3491,7 @@ rd_kafka_broker_op_serve(rd_kafka_broker_t *rkb, rd_kafka_op_t *rko) {
                         rktp->rktp_msgq_wakeup_q = NULL;
                 }
                 rktp->rktp_broker = NULL;
+                rktp->rktp_broker_id = -1;
 
                 rd_assert(rktp->rktp_flags & RD_KAFKA_TOPPAR_F_ON_RKB);
                 rktp->rktp_flags &= ~RD_KAFKA_TOPPAR_F_ON_RKB;
