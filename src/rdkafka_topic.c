@@ -605,9 +605,6 @@ int rd_kafka_toppar_broker_update(rd_kafka_toppar_t *rktp,
                                   int32_t broker_id,
                                   rd_kafka_broker_t *rkb,
                                   const char *reason) {
-
-        rktp->rktp_broker_id = broker_id;
-
         if (!rkb) {
                 int had_broker = rktp->rktp_broker ? 1 : 0;
                 rd_kafka_toppar_broker_delegate(rktp, NULL);
@@ -615,7 +612,7 @@ int rd_kafka_toppar_broker_update(rd_kafka_toppar_t *rktp,
         }
 
         if (rktp->rktp_broker) {
-                if (rktp->rktp_broker == rkb) {
+                if (rktp->rktp_broker == rkb && !rktp->rktp_next_broker) {
                         /* No change in broker */
                         return 0;
                 }
