@@ -366,6 +366,9 @@ struct rd_kafka_broker_s { /* rd_kafka_broker_t */
 
         /** > 0 if this broker thread is terminating */
         rd_atomic32_t termination_in_progress;
+
+        /* Track the last valid pid used when generating produce requests. */
+        rd_kafka_pid_t rkb_produce_pid;
 };
 
 #define rd_kafka_broker_keep(rkb) rd_refcnt_add(&(rkb)->rkb_refcnt)
@@ -374,6 +377,17 @@ struct rd_kafka_broker_s { /* rd_kafka_broker_t */
 #define rd_kafka_broker_lock(rkb)   mtx_lock(&(rkb)->rkb_lock)
 #define rd_kafka_broker_unlock(rkb) mtx_unlock(&(rkb)->rkb_lock)
 
+/**
+ * @returns the number of requests that may be enqueued before
+ *          queue.backpressure.threshold is reached.
+ */
+
+static RD_INLINE unsigned int
+rd_kafka_broker_outbufs_space(rd_kafka_broker_t *rkb) {
+        int r = rkb->rkb_rk->rk_conf.queue_backpressure_thres -
+                rd_atomic32_get(&rkb->rkb_outbufs.rkbq_cnt);
+        return r < 0 ? 0 : (unsigned int)r;
+}
 
 /**
  * @brief Locks broker, acquires the states, unlocks, and returns

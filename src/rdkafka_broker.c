@@ -93,6 +93,77 @@ const char *rd_kafka_secproto_names[] = {
     [RD_KAFKA_PROTO_SASL_SSL]       = "sasl_ssl",
     NULL};
 
+typedef struct produce_batch_s {
+        int batch_initialized;
+        TAILQ_HEAD(, rd_kafka_toppar_s) batch_toppars;
+        rd_kafka_produce_calculator_t batch_calculator;
+} produce_batch_t;
+
+/* These rd_kafka_broker_produce_batch_* functions are helpers
+* for delaying the construction of a message batch until the
+* counts of messages, partitions, and topics are known 
+*/
+static void
+rd_kafka_broker_produce_batch_init(produce_batch_t *batch, rd_kafka_broker_t *rkb) {
+        TAILQ_INIT(*batch->batch_toppars);
+        rd_kafka_produce_calculator_init(&batch->batch_calculator, rkb);
+
+        if (rd_kafka_broker_outbufs_space(rkb) > 0)
+                batch->batch_initialized = 1;
+}
+
+static int
+rd_kafka_broker_produce_batch_try_init(produce_batch_t *batch,
+                                     rd_kafka_broker_t *rkb) {
+        if (batch->batch_initialized)
+                return 1;
+        
+        rd_kafka_broker_produce_batch_init(batch, rkb);
+        return batch->batch_initialized;
+}
+
+static int
+rd_kafka_broker_produce_batch_append(produce_batch_t *batch,
+                                        rd_kafka_toppar_t *rktp) {
+        if (unlikely(!batch->batch_initialized))
+                return 0;
+        
+        TAILQ_INSERT_TAIL(&batch->batch_toppars, rktp, rktp_batch_link);
+        return rd_kafka_produce_calculator_add(&batch->batch_calculator, rktp);
+}
+
+static int
+rd_kafka_broker_produce_batch_send(produce_batch_t *batch,
+                                        rd_kafka_broker_t *rkb) {
+        rd_kafka_toppar_t *rktp;
+        rd_kafka_produce_ctx_t ctx;
+
+        if (unlikely(!batch->batch_initialized))
+                return 0;
+        
+        if (unlikely(TAILQ_FIRST(&batch->batch_toppars) == NULL))
+                return 0;
+
+        // TODO(xvandish): this func doesn't exist yet.
+        if (unlikely(!rd_kafka_ProduceRequest_init(
+                        &ctx, rkb,
+                        rkb->rkb_produce_pid,
+                        batch->batch_calc.rkpca_topic_cnt,
+                        batch->batch_calc.rkpca_partition_cnt,
+                        batch->batch_calc.rkpca_message_cnt,
+                        batch->batch_calc.rkpca_message_size,
+                        batch->batch_calc.rkpca_request_req_acks,
+                        batch->batch_calc.rkpca_request_timeout_ms))) {
+                return 0;
+        }
+
+        TAILQ_FOREACH(rktp, &batch->batch_toppars, rktp_batch_link) {
+                if (unlikely(!rd_kafkaProduceRequest_append(&ctx, rktp)))
+                        break;
+        }
+
+        return rd_kafka_ProduceRequest_finalize(&ctx);
+}
 
 /**
  * @returns true for logical brokers (e.g., coordinators) without an address set
@@ -776,7 +847,6 @@ void rd_kafka_broker_conn_closed(rd_kafka_broker_t *rkb,
 
 /**
  * @brief Purge requests in \p rkbq matching request \p ApiKey
- *        and partition \p rktp.
  *
  * @warning ApiKey must be RD_KAFKAP_Produce
  *
@@ -784,10 +854,9 @@ void rd_kafka_broker_conn_closed(rd_kafka_broker_t *rkb,
  *
  * @locality broker thread
  */
-static int rd_kafka_broker_bufq_purge_by_toppar(rd_kafka_broker_t *rkb,
+static int rd_kafka_broker_bufq_purge(rd_kafka_broker_t *rkb,
                                                 rd_kafka_bufq_t *rkbq,
                                                 int64_t ApiKey,
-                                                rd_kafka_toppar_t *rktp,
                                                 rd_kafka_resp_err_t err) {
         rd_kafka_buf_t *rkbuf, *tmp;
         int cnt = 0;
@@ -797,7 +866,6 @@ static int rd_kafka_broker_bufq_purge_by_toppar(rd_kafka_broker_t *rkb,
         TAILQ_FOREACH_SAFE(rkbuf, &rkbq->rkbq_bufs, rkbuf_link, tmp) {
 
                 if (rkbuf->rkbuf_reqhdr.ApiKey != ApiKey ||
-                    rkbuf->rkbuf_u.Produce.batch.rktp != rktp ||
                     /* Skip partially sent buffers and let them transmit.
                      * The alternative would be to kill the connection here,
                      * which is more drastic and costly. */
@@ -3370,15 +3438,6 @@ rd_kafka_broker_op_serve(rd_kafka_broker_t *rkb, rd_kafka_op_t *rko) {
                 /* Remove from fetcher list */
                 rd_kafka_toppar_fetch_decide(rktp, rkb, 1 /*force remove*/);
 
-                if (rkb->rkb_rk->rk_type == RD_KAFKA_PRODUCER) {
-                        /* Purge any ProduceRequests for this toppar
-                         * in the output queue. */
-                        rd_kafka_broker_bufq_purge_by_toppar(
-                            rkb, &rkb->rkb_outbufs, RD_KAFKAP_Produce, rktp,
-                            RD_KAFKA_RESP_ERR__RETRY);
-                }
-
-
                 rd_kafka_toppar_lock(rktp);
 
                 rd_rkb_dbg(rkb, BROKER | RD_KAFKA_DBG_TOPIC, "TOPBRK",
@@ -3810,19 +3869,6 @@ static void rd_kafka_broker_internal_serve(rd_kafka_broker_t *rkb,
 }
 
 
-/**
- * @returns the number of requests that may be enqueued before
- *          queue.backpressure.threshold is reached.
- */
-
-static RD_INLINE unsigned int
-rd_kafka_broker_outbufs_space(rd_kafka_broker_t *rkb) {
-        int r = rkb->rkb_rk->rk_conf.queue_backpressure_thres -
-                rd_atomic32_get(&rkb->rkb_outbufs.rkbq_cnt);
-        return r < 0 ? 0 : (unsigned int)r;
-}
-
-
 
 /**
  * @brief Update \p *next_wakeup_ptr to \p maybe_next_wakeup if it is sooner.
@@ -3869,11 +3915,10 @@ static int rd_kafka_toppar_producer_serve(rd_kafka_broker_t *rkb,
         int r;
         rd_kafka_msg_t *rkm;
         int move_cnt = 0;
-        int max_requests;
-        int reqcnt;
         int inflight              = 0;
         uint64_t epoch_base_msgid = 0;
         rd_bool_t batch_ready     = rd_false;
+        int produce_enabled = 1;
 
         /* By limiting the number of not-yet-sent buffers (rkb_outbufs) we
          * provide a backpressure mechanism to the producer loop
@@ -3881,7 +3926,8 @@ static int rd_kafka_toppar_producer_serve(rd_kafka_broker_t *rkb,
          * increase throughput.
          * This comes at no latency cost since there are already
          * buffers enqueued waiting for transmission. */
-        max_requests = rd_kafka_broker_outbufs_space(rkb);
+        if (rd_kafka_broker_outbufs_space(rkb) == 0)
+                produce_enabled = 0;
 
         rd_kafka_toppar_lock(rktp);
 
@@ -3933,21 +3979,21 @@ static int rd_kafka_toppar_producer_serve(rd_kafka_broker_t *rkb,
 
         if (unlikely(!may_send)) {
                 /* Sends prohibited on the broker or instance level */
-                max_requests = 0;
+                produce_enabled = 0;
         } else if (unlikely(rd_kafka_fatal_error_code(rkb->rkb_rk))) {
                 /* Fatal error has been raised, don't produce. */
-                max_requests = 0;
+                produce_enabled = 0;
         } else if (unlikely(RD_KAFKA_TOPPAR_IS_PAUSED(rktp))) {
                 /* Partition is paused */
-                max_requests = 0;
+                produce_enabled = 0;
         } else if (unlikely(rd_kafka_is_transactional(rkb->rkb_rk) &&
                             !rd_kafka_txn_toppar_may_send_msg(rktp))) {
                 /* Partition not registered in transaction yet */
-                max_requests = 0;
-        } else if (max_requests > 0) {
+                produce_enabled = 0;
+        } else if (produce_enabled > 0) {
                 /* Move messages from locked partition produce queue
                  * to broker-local xmit queue. */
-                if ((move_cnt = rktp->rktp_msgq.rkmq_msg_cnt) > 0) {
+                if ((move_cnt = rd_kafka_msgq_len(&rktp->rktp_msgq)) > 0) {
 
                         rd_kafka_msgq_insert_msgq(
                             &rktp->rktp_xmit_msgq, &rktp->rktp_msgq,
@@ -3976,32 +4022,6 @@ static int rd_kafka_toppar_producer_serve(rd_kafka_broker_t *rkb,
 
 
         if (rd_kafka_is_idempotent(rkb->rkb_rk)) {
-                /* Update the partition's cached PID, and reset the
-                 * base msg sequence if necessary */
-                rd_bool_t did_purge = rd_false;
-
-                if (unlikely(!rd_kafka_pid_eq(pid, rktp->rktp_eos.pid))) {
-                        /* Flush any ProduceRequests for this partition in the
-                         * output buffer queue to speed up recovery. */
-                        rd_kafka_broker_bufq_purge_by_toppar(
-                            rkb, &rkb->rkb_outbufs, RD_KAFKAP_Produce, rktp,
-                            RD_KAFKA_RESP_ERR__RETRY);
-                        did_purge = rd_true;
-
-                        if (rd_kafka_pid_valid(rktp->rktp_eos.pid))
-                                rd_rkb_dbg(
-                                    rkb, QUEUE, "TOPPAR",
-                                    "%.*s [%" PRId32
-                                    "] PID has changed: "
-                                    "must drain requests for all "
-                                    "partitions before resuming reset "
-                                    "of PID",
-                                    RD_KAFKAP_STR_PR(rktp->rktp_rkt->rkt_topic),
-                                    rktp->rktp_partition);
-                }
-
-                inflight = rd_atomic32_get(&rktp->rktp_msgs_inflight);
-
                 if (unlikely(rktp->rktp_eos.wait_drain)) {
                         if (inflight) {
                                 /* Waiting for in-flight requests to
@@ -4042,19 +4062,14 @@ static int rd_kafka_toppar_producer_serve(rd_kafka_broker_t *rkb,
 
                         rktp->rktp_eos.wait_drain = rd_false;
                 }
-
-                /* Limit the number of in-flight requests (per partition)
-                 * to the broker's sequence de-duplication window. */
-                max_requests = RD_MIN(max_requests,
-                                      RD_KAFKA_IDEMP_MAX_INFLIGHT - inflight);
         }
 
 
         /* Check if allowed to create and enqueue a ProduceRequest */
-        if (max_requests <= 0)
+        if (!produce_enabled)
                 return 0;
 
-        r = rktp->rktp_xmit_msgq.rkmq_msg_cnt;
+        r = rd_kafka_msgq_len(&rktp->rktp_xmit_msgq);
         if (r == 0)
                 return 0;
 
@@ -4109,54 +4124,21 @@ static int rd_kafka_toppar_producer_serve(rd_kafka_broker_t *rkb,
                  * to expire. */
                 return 0;
         }
-
-        /* Send Produce requests for this toppar, honouring the
-         * queue backpressure threshold. */
-        for (reqcnt = 0; reqcnt < max_requests; reqcnt++) {
-                r = rd_kafka_ProduceRequest(rkb, rktp, pid, epoch_base_msgid);
-                if (likely(r > 0))
-                        cnt += r;
-                else
-                        break;
-        }
-
-        /* Update the allowed wake-up time based on remaining messages
-         * in the queue. */
-        if (cnt > 0) {
-                rd_kafka_toppar_lock(rktp);
-                batch_ready = rd_kafka_msgq_allow_wakeup_at(
-                    &rktp->rktp_msgq, &rktp->rktp_xmit_msgq, next_wakeup, now,
-                    flushing ? 1 : rkb->rkb_rk->rk_conf.buffering_max_us,
-                    /* Batch message count threshold */
-                    rkb->rkb_rk->rk_conf.batch_num_messages,
-                    /* Batch total size threshold */
-                    rkb->rkb_rk->rk_conf.batch_size);
-                rd_kafka_toppar_unlock(rktp);
-        }
-
-        return cnt;
+        return 1;
 }
 
-
-
-/**
- * @brief Produce from all toppars assigned to this broker.
- *
- * @param next_wakeup is updated if the next IO/ops timeout should be
- *                    less than the input value (i.e., sooner).
- *
- * @returns the total number of messages produced.
- */
 static int rd_kafka_broker_produce_toppars(rd_kafka_broker_t *rkb,
                                            rd_ts_t now,
                                            rd_ts_t *next_wakeup,
                                            rd_bool_t do_timeout_scan) {
-        rd_kafka_toppar_t *rktp;
-        int cnt                 = 0;
+        rd_kafka_toppar_t *rktp, *rktp_next_start;
         rd_ts_t ret_next_wakeup = *next_wakeup;
         rd_kafka_pid_t pid      = RD_KAFKA_PID_INITIALIZER;
         rd_bool_t may_send      = rd_true;
         rd_bool_t flushing      = rd_false;
+        produce_batch_t batch;
+        int xmit_msg_cnt = 0;
+        int total_msg_cnt = 0;
 
         /* Round-robin serve each toppar. */
         rktp = rkb->rkb_active_toppar_next;
@@ -4166,6 +4148,25 @@ static int rd_kafka_broker_produce_toppars(rd_kafka_broker_t *rkb,
         if (rd_kafka_is_idempotent(rkb->rkb_rk)) {
                 /* Idempotent producer: get a copy of the current pid. */
                 pid = rd_kafka_idemp_get_pid(rkb->rkb_rk);
+
+                /* If pid changed since the last time messages were produced,
+                * then cancel all pending produce requests which have not
+                * yet been sent */
+               if (!rd_kafka_pid_valid(pid) ||
+                   !rd_kafka_pid_eq(pid, rkb->rkb_producer_pid)) {
+                        rd_rkb_dbg(rkb, PRODUCER, "PIDCHANGE",
+                                   "Producer PID changed from "
+                                   "%s to %s: purging %d pending "
+                                   "Produce request(s)",
+                                   rd_kafka_pid_str(&rkb->rkb_producer_pid),
+                                   rd_kafka_pid_str(&pid),
+                                   (int)rd_kafka_bufq_cnt(&rkb->rkb_outbufs));
+
+                        /* Purge pending Produce requests */
+                        rd_kafka_broker_bufq_purge(
+                            rkb, &rkb->rkb_outbufs, RD_KAFKAP_Produce,
+                            RD_KAFKA_RESP_ERR__RETRY);
+                }
 
                 /* If we don't have a valid pid, or the transaction state
                  * prohibits sending messages, return immedatiely,
@@ -4180,17 +4181,39 @@ static int rd_kafka_broker_produce_toppars(rd_kafka_broker_t *rkb,
 
                 if (!may_send && !do_timeout_scan)
                         return 0;
+
+                /* Cache current producer pid */
+                rkb->rkb_producer_pid = pid;
         }
+
+        rktp_next_start = NULL;
 
         flushing = may_send && rd_atomic32_get(&rkb->rkb_rk->rk_flushing) > 0;
 
         do {
                 rd_ts_t this_next_wakeup = ret_next_wakeup;
 
-                /* Try producing toppar */
-                cnt += rd_kafka_toppar_producer_serve(
-                    rkb, rktp, pid, now, &this_next_wakeup, do_timeout_scan,
-                    may_send, flushing);
+                /* Check if the toppar needs to produce */
+                if (rd_kafka_toppar_producer_serve(rkb, rktp, pid, now, &this_next_wakeup, do_timeout_scan, may_send, flushing)) {
+                        total_msg_cnt += rd_kafka_msgq_len(&rktp->rktp_xmit_msgq);
+
+                        /* More than one message set cannot currently be added
+                        * to a single request since there will not be enough
+                        * information to find the correct messages in the
+                        * produce response.
+                        * When a batch completes, try to add messages again
+                        * for the same toppar if messages remain.
+                        */
+                       while(rd_kafka_broker_produce_batch_try_init(&batch, rkb)) {
+                        if (rd_kafka_broker_produce_batch_append(&batch, rktp))
+                                break;
+                        
+                        xmit_msg_cnt += rd_kafka_broker_produce_batch_send(&batch, rkb);
+                        memset(&batch, 0, sizeof(batch));
+
+                        rktp_next_start = rktp;
+                       }
+                }
 
                 rd_kafka_set_next_wakeup(&ret_next_wakeup, this_next_wakeup);
 
@@ -4198,14 +4221,28 @@ static int rd_kafka_broker_produce_toppars(rd_kafka_broker_t *rkb,
                                            rktp_activelink)) !=
                  rkb->rkb_active_toppar_next);
 
-        /* Update next starting toppar to produce in round-robin list. */
+        /* Update next starting toppar to produce in round-robin list.
+        * but give preference to the next toppar that had messages to send. */
         rd_kafka_broker_active_toppar_next(
             rkb,
+            (rktp_next_start && rktp_next_start !=
+                        rkb->rkb_active_toppar_next) ? rktp_next_start :
             CIRCLEQ_LOOP_NEXT(&rkb->rkb_active_toppars, rktp, rktp_activelink));
+
+
+        /* send the last batch if necessary */
+        if (batch.batch_initialized)
+                xmit_msg_cnt += rd_kafka_broker_produce_batch_send(&batch, rkb);
+
+        /* Wake up immediately if there is still data ready
+        * to be send and there is capacity to do so. */
+       if ((xmit_msg_cnt < total_msg_cnt) &&
+           rd_kafka_broker_outbufs_space(rkb) > 0)
+               ret_next_wakeup = now;
 
         *next_wakeup = ret_next_wakeup;
 
-        return cnt;
+        return xmit_msg_cnt;
 }
 
 /**
@@ -4957,6 +4994,9 @@ rd_kafka_broker_t *rd_kafka_broker_add(rd_kafka_t *rk,
 
         rd_atomic64_init(&rkb->rkb_c.ts_send, 0);
         rd_atomic64_init(&rkb->rkb_c.ts_recv, 0);
+
+        rd_kafka_pid_t pid = RD_KAFKA_PID_INITIALIZER;
+        rkb->rkb_produce_pid = pid;
 
         /* ApiVersion fallback interval */
         if (rkb->rkb_rk->rk_conf.api_version_request) {

@@ -58,6 +58,139 @@ void rd_kafka_aborted_txns_add(rd_kafka_aborted_txns_t *aborted_txns,
                                int64_t first_offset);
 
 
+struct rd_kafka_produce_calculator_s {
+        /* Counts used to estimate payload size */
+        int rkpca_topic_cnt;
+        int rkcpa_partition_cnt;
+        int rkpca_message_cnt;
+        size_t rkpca_message_size;
+
+        /* Topic specific configurations
+         * All topics in a batch must share the same settings.
+         */
+        int rkpca_request_required_acks;
+        int rkpca_request_timeout_ms;
+
+        /* Cached header sizes */
+        size_t rkpca_produce_header_size;
+        size_t rkpca_topic_header_size;
+        size_t rkpca_partition_header_size;
+        size_t rkpca_message_set_header_size;
+        size_t rkpca_message_overhead;
+
+        /* Track previous topic added to check if changed */
+        rd_kafka_topic_t *rkpca_rkt_prev;
+};
+
+/* Context used to store data while constructing a produce batch.
+ * The resulting batch will be written into a buffer created in
+ * rd_kafka_produce_ctx_init, and returned in rd_kafka_produce_ctx_finalize.
+ * Toppars are added using rd_kafka_produce_ctx_append_toppar and must
+ * conform to the settings passed into the init method or appending will fail.
+ */
+struct rd_kafka_produce_ctx_s {
+        rd_kafka_broker_t *rkpc_rkb;
+
+        /* User variables set in rd_kafka_produce_ctx init */
+        int rkpc_topic_max;     /* Max topics which can be added to batch. */
+        int rkpc_partition_max; /* Max partitions which can be added to batch.
+                                 */
+        int rkpc_message_max; /* Max partitions which can be added to batch. */
+        size_t rkpc_message_bytes_size; /* Max message bytes which can be added
+                                           to batch. */
+        void *rkpc_opaque; /* User data associated with the request. */
+
+        /* Produce batch option. All topics/partitions must share these options
+         */
+        int rkpc_request_required_acks;
+        int rkpc_request_timeout_ms;
+
+        /* Options set by rd_kafka_produce_request_select_caps in
+         * rd_kafka_produce_ctx_init. */
+        int rkpc_api_version;
+        int rkpc_msg_version;
+        int rkpc_features;
+
+        /* Counts of topics / partitions / messages written to a produce batch.
+         */
+        int rkpc_appended_topic_cnt;
+        int rkpc_appended_partition_cnt;
+        int rkpc_appended_message_cnt;
+        size_t rkpc_appended_message_bytes;
+
+        /* As msgs added to a batch, this is the earliest timeout found */
+        rd_ts_t rkpc_first_msg_timout;
+
+        /* The offset of topic count in the batch header. This will be updated
+         * to reflect the actual topic count when finalizing the batch
+         */
+        size_t rkpc_topic_cnt_offset;
+
+        /* The last topic appended to the batch. Used when appending partitions
+        to know when a new topic header is needed
+        */
+        rd_kafka_topic_t *rkpc_active_topic;
+
+        /* The offset of the partition count within a topic header. This will be
+        updated
+        * to the actual partition count when a partition for a different topic
+        is added or when finalizing the batch.
+        */
+        size_t rkpc_active_topic_partition_cnt_offset;
+
+        /* Count of partitions appended for the current topic.
+         * Used to update the count at the offset above
+         */
+        int rkpc_active_topic_partition_cnt;
+
+        /* Track whether the previous append call was a partial write. In that
+         * case, no more messages can be added to the batch, so the context must
+         * be finalized.
+         */
+        int rkpc_full;
+
+        /* The buffer used when writing */
+        rd_kafka_buf_t *rkpc_buf;
+
+        /* Idemptotent producer's current ProducerID */
+        rd_kafka_pid_t rkpc_pid;
+
+        /* Active toppar first message information */
+        struct {
+                uint64_t msgid;
+                int32_t first_seq;
+        } rkpc_active_firstmsg;
+};
+
+/**
+ * @name Multiple message set produce request handling
+ *
+ * These functions are for packing multiple message sets into a single produce
+ * request.
+ */
+
+void rd_kafka_produce_calculator_init(rd_kafka_produce_calculator_t *rkpca,
+                                      rd_kafka_broker_t,
+                                      *rkb);
+
+int rd_kafka_produce_calculator_add(rd_kafka_produce_calculator_t *rkpca,
+                                    rd_kafka_toppar_t *rktp);
+int rd_kafka_produce_ctx_init(rd_kafka_produce_ctx_t *rkpc,
+                              rd_kafka_broker_t *rkb,
+                              int topic_max,
+                              int partition_max,
+                              int message_max,
+                              size_t message_bytes_size,
+                              int request_required_acks,
+                              int request_timeout_ms,
+                              rd_kafka_pid_t pid,
+                              void *opaque);
+int rd_kafka_produce_ctx_append_toppar(rd_kafka_produce_ctx_t *rkpc,
+                                       rd_kafka_toppar_t *rktp,
+                                       int *appended_msg_cnt,
+                                       size_t *appended_msg_bytes);
+rd_kafka_buf_t *rd_kafka_produce_ctx_finalize(rd_kafka_produce_ctx_t *rkpc);
+
 /**
  * @name MessageSet writers
  */
@@ -94,5 +227,7 @@ rd_kafka_resp_err_t rd_kafka_snappy_compress_slice(rd_kafka_broker_t *rkb,
 #endif
 
 int unittest_aborted_txns(void);
+
+
 
 #endif /* _RDKAFKA_MSGSET_H_ */

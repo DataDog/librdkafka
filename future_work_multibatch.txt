@@ -1,0 +1,81 @@
+Future Work Ideas for Multibatch
+================================
+
+1. Smarter Toppar Selection
+---------------------------
+- **Two-phase selection**: keep the existing round-robin pass over active partitions to guarantee liveness. Record each ready toppar, its queued bytes, and time since last send in a temporary array (struct `{rktp, backlog_bytes, age}`), then fill each multi-partition request by choosing the highest-pressure entries from that recorded list. Because every toppar participates in the RR scan, the fairness properties are preserved while the second phase can sort/filter purely in O(n log n).
+- **Deficit round robin**: give each partition a deficit counter that increases with backlog (bytes/messages) and is consumed when we batch that partition. Quiet partitions accumulate deficit and eventually go first; busy partitions spend their credits quickly but also regain them as their backlog grows. The counters can be stored on the toppar object and updated atomically from the broker thread.
+- **Age-adjusted scoring**: compute `score = backlog_bytes + α * (now - last_sent)` (or a similar function that includes linger age). The age term ensures that even small queues are eventually promoted if they’ve been waiting long enough. Reset `last_sent` when we send for the partition so the score reflects both volume and waiting time.
+- Implementation detail: have `rd_kafka_toppar_producer_serve()` emit the score/deficit alongside the toppar pointer (e.g., by extending the struct we queue in `produce_batch_t`) so the batch builder doesn’t need to re-lock partitions or re-read queues just to rank them.
+
+2. Adaptive Batch Tuning
+------------------------
+- Borrow TCP Vegas-style congestion control: monitor request RTTs and queue backpressure to expand or contract `produce.request.max.partitions` dynamically per broker. We can treat the number of partitions per request as the Vegas window size, increasing when RTT stays close to baseline and decreasing when it inflates.
+- Track per-request partition counts, payload sizes, and success/retry rates to auto-tune batching aggressiveness when the cluster is healthy vs. congested. Feed those metrics into a simple controller (e.g., AIMD) so tuning decisions are automated but bounded.
+
+3. Topic-Level Grouping Improvements
+------------------------------------
+- Sort ready partitions by `(required_acks, request_timeout_ms, topic)` before building a request so we maximize the chance of fitting more partitions per request despite config differences. Maintaining small sorted buckets keyed by that tuple allows O(log n) insertion while the builder simply walks each bucket.
+- Consider grouping by compression codec/common features to avoid toggling compression state mid-request. For example, keep separate queues for LZ4 vs ZSTD topics so the builder can emit homogeneous segments and reuse compression state.
+
+4. Hot Partition Handling
+-------------------------
+- Allow multiple message sets from the same toppar in a single request when that toppar dominates the backlog, rather than limiting to one batch per partition. This requires segment metadata (see item 7) but cuts syscall overhead dramatically for skewed topics.
+- Use “linger age” so partitions with nearly expired batches get priority even if their backlog is small. A simple rule like “if `now - oldest_msg_ts > linger_ms * β` push this partition to the front” prevents long-tail latency spikes.
+
+5. Metrics & Visualization
+--------------------------
+- Emit metrics for average partitions per request, fill ratio, bytes per request, and time spent waiting in the batcher to inform tuning and detect regressions. These can piggyback on existing stats intervals.
+- Surface logging hooks (e.g., debug-level dump of partition ids per request when a flag is set) to trace which partitions end up together in a request when debugging skewed workloads.
+
+6. Transactional Awareness
+--------------------------
+- For transactional producers, prefer batching partitions registered in the same transaction to minimize control-plane chatter and reduce `AddPartitionsToTxn` pressure. We can query the transactional state to see which partitions are already in the txn and bias the scheduler towards them.
+
+These ideas build on the rewritten multibatch infrastructure and can be tackled incrementally once the base implementation is stable.
+
+7. Multiple Segments per Hot Partition
+--------------------------------------
+- Current upstream batching still limits each partition to a single contiguous message set per request because the response bookkeeping only tracks one entry per `(topic, partition)`. Any additional data from that partition must go into a new request.
+- Extend the request metadata to keep a list of segments for each partition (e.g., `{msg_count, byte_count, base_msgid/base_seq, msgqueue_cursor}` tuples). The response parser can then iterate segment-by-segment and apply offsets/errors to each slice.
+- With segment tracking in place, allow the batch builder to append additional chunks from the same partition when it still has backlog and request space remains. That keeps wire utilization high for skewed workloads, improves compression, and avoids repeated request setup costs for the hot partition.
+- Guard with configurable limits (max segments per partition, age thresholds) to avoid unbounded memory growth or head-of-line blocking.
+
+8. Request Builder Efficiency
+-----------------------------
+- Pool per-request metadata (CRC hash tables, segment arrays) so we reuse allocations across requests instead of malloc/free each time. A simple freelist keyed by “max partitions per request” is enough.
+- Pre-size `rd_kafka_buf_t` using the calculator’s estimates to avoid buffer growth and extra copies; if we do need to grow, record that fact so future estimates adjust accordingly.
+
+9. Zero-Copy Message Moves
+--------------------------
+- Enhance the builder to write directly from each `rktp_xmit_msgq` into the request buffer, avoiding intermediate queue concat/restore steps. This becomes more important when multiple segments per partition are allowed, but requires iterator-style APIs so serialization can stop exactly when size limits are hit.
+- Keep lightweight descriptors (`{msg_ptr, bytes_written}`) per segment instead of moving rd_kafka_msg_t objects between queues so delivery reports and retries still know which messages belong to the in-flight request.
+
+10. Batch Packing Heuristics
+----------------------------
+- Add a configurable “overfill” allowance (e.g., up to 5% beyond `message.max.bytes`) to keep requests dense when only small partitions remain. Enforce a hard cap at broker limits to stay protocol-compliant.
+- Introduce compression-aware packing by tracking effective compression ratios per topic/partition and using them to predict post-compression size; only pack partitions together if the predicted size stays within limits.
+
+11. Latency vs Throughput Modes
+-------------------------------
+- Provide a mode or heuristic that biases the builder towards age (low latency) or size (high throughput). Adjust linger behaviour and partition selection accordingly, e.g., by capping per-request wait time when in latency mode or raising `linger.ms`/partition caps when in throughput mode.
+
+12. Backpressure-Aware Scaling
+------------------------------
+- Monitor broker in-flight counts and throttle `produce.request.max.partitions` dynamically: shrink when the broker is saturated to reduce retries, expand when there’s headroom. This can piggyback on `rkb_outbufs_space()` and the observed retry rate.
+
+13. SIMD / Fast Copy Optimizations
+----------------------------------
+- Use optimized memcpy/rd_memcpy or SIMD intrinsics when copying topic/partition headers to shave CPU cycles in the hot loop. Even a modest improvement matters because these copies happen for every partition in every request.
+
+14. Metadata Caching
+--------------------
+- Cache per-topic config tuples (`required_acks`, `request_timeout_ms`, `compression`, `compression_level`) inside the calculator so we minimize repeated lookups while assembling a batch. This also provides a single place to detect mismatches when deciding whether two partitions can share a request.
+
+15. Code Structure & Cleanliness
+--------------------------------
+- Separate batching policy from request encoding: keep the scheduler/selector logic in its own module so we can swap heuristics without touching serialization. This makes it easier to experiment with new policies.
+- Replace bespoke CRC-based lookup tables with clearer data structures (vectors/maps keyed by toppar index) to simplify reasoning and debugging. With segment metadata, a simple `rd_vector_t` of descriptors is easier to maintain.
+- Add dedicated unit tests for the calculator, scheduler, and response matcher to avoid relying solely on integration tests. Unit coverage will keep future refactors safer.
+- Document the batching invariants in-code (e.g., comments or assertions about max partitions, per-topic settings) to make maintenance easier and catch regressions early.
+- Ensure logging uses standard `rd_rkb_dbg`/`rd_kafka_log` helpers instead of ad-hoc `printf` statements so log levels and formatting stay consistent.

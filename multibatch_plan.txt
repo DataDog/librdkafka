@@ -1,0 +1,65 @@
+Multibatch Reimplementation Plan
+================================
+
+1. Configuration Surface
+------------------------
+- Add `produce.request.max.partitions` to `src/rdkafka_conf.c`/`.h` with upstream defaults and document it in `CONFIGURATION.md`.
+- Remove the old `multibatch` field from `rd_kafka_conf_s` and any references.
+- Add a simple unit/integration test (e.g., extend `tests/0012-produce_consume.c`) to verify invalid values are rejected and the default shows up in `rd_kafka_conf_dump()` output.
+
+2. Request Construction Infrastructure
+--------------------------------------
+- Reintroduce request-building helpers based on the upstream PR:
+  * Implement `rd_kafka_produce_calculator_t` helpers in `src/rdkafka_msgset_writer.c` to pre-compute topic/partition/message counts, enforce `produce.request.max.partitions`, `batch_size`, etc.
+  * Add a multi-partition `rd_kafka_produce_ctx_t` (or equivalent) in the same file that allocates a single `rkbuf`, encodes multiple topic/partition sections directly, and carries per-partition metadata (base msgid/seq) so idempotent producers can be supported.
+- Ensure the writer understands flexible Produce versions and today’s `rd_kafka_msgbatch_t` layout. Make it cooperate with the existing msgset writer and compression pipeline rather than copying encoded batches.
+
+3. Broker-Side Batching
+-----------------------
+- In `src/rdkafka_broker.c`, add a `produce_batch_t` that collects toppars until the builder says the request is full.
+- When appending a partition, enforce:
+  * shared topic-level settings (`required_acks`, `request_timeout_ms`),
+  * partition-count cap from `produce.request.max.partitions`.
+- Hook `rd_kafka_broker_produce_toppars()` so it tries to append the current toppar to the batch, flushing and sending when full or when a full round through active toppars completes.
+- Keep idempotent producers disabled until the request builder captures per-partition sequence info; once it does, remove that guard.
+
+4. Request/Response Plumbing
+-----------------------------
+- Replace the existing single-partition `rd_kafka_ProduceRequest()` implementation in `src/rdkafka_request.c` with one that consumes the broker batch context and writes a multi-topic request using the new helpers.
+- Update `rd_kafka_handle_Produce_parse()` to iterate over all topics/partitions in the reply, matching them to stored metadata (similar to upstream `rd_kafka_produce_req_ctx_t`).
+- Update `rd_kafka_handle_Produce()` to pull each partition’s messages from the combined request queue, decrement `rktp_msgs_inflight`, and call `rd_kafka_msgbatch_handle_Produce_result()` with the correct offsets/errors.
+- Keep the existing per-partition retry/error handling semantics (idempotent seq updates, transactional checks, etc.).
+
+5. Cleanup & Tests
+------------------
+- Remove the earlier MultiBatch scaffolding (`rd_kafka_MultiBatchProduceRequest()`, temporary `rd_list` handling, etc.) once the new path works.
+- Extend tests:
+  * multi-partition batching (non-idempotent and idempotent),
+  * flexible-version/tag handling,
+  * per-topic setting mismatches and partition-cap behaviour.
+- Run the existing producer + EOS test suites (`tests/00*`, `rdkafka_performance` produce mode) at each stage.
+
+Implementation Order
+--------------------
+1. Config addition + docs → run basic config tests (0012).
+2. Add calculator/context helpers (unused) → unit tests for estimation logic if feasible.
+3. Integrate broker batching with helpers (still limited to current behaviour initially) → run producer tests.
+4. Replace request/response handling to use new builders → run full producer/EOS suites, fix regressions.
+5. Remove legacy MultiBatch code, enable the new feature (set sensible default for `produce.request.max.partitions`), rerun full CI/test matrix.
+
+
+Other useful knobs ---
+1. (Removed) Feature Toggle / Compatibility Switch – multibatch will remain permanently enabled to avoid the
+    maintenance and testing burden of two code paths. Rolling back now requires reverting the feature.
+  2. Per-Partition Segment Cap – once we support multiple segments per partition in a single request, add something
+     like produce.request.max.segments.per.partition (default 1). This keeps memory bounded and lets power users
+     experiment with higher caps for hot partitions.
+  3. Overfill Allowance – a percentage that controls how close we allow requests to get to message.max.bytes (e.g.,
+     produce.request.overfill.percent, default 0). Users running very large messages might keep it at zero, while
+     throughput‑focused users could tolerate a 5% overshoot to improve packing.
+  4. Latency Bias – a knob to tilt the scheduler toward age or size, such as produce.request.latency.bias (0.0–1.0).
+     Applications that can tolerate latency set it low (size‑heavy), while latency‑sensitive apps set it high to
+     flush sooner.
+  5. Hot-Partition Limit – even before full multi-segment support, expose a cap on how many partitions from the same
+     topic can appear in one request (e.g., produce.request.max.partitions.per.topic). This prevents one topic from
+     completely filling multi-part requests when users prefer cross-topic mixing.

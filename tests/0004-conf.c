@@ -506,6 +506,7 @@ int main_0004_conf(int argc, char **argv) {
         rd_kafka_topic_conf_t *ignore_topic_conf, *tconf, *tconf2;
         char errstr[512];
         rd_kafka_resp_err_t err;
+        rd_kafka_conf_res_t res;
         const char **arr_orig, **arr_dup;
         size_t cnt_orig, cnt_dup;
         int i;
@@ -531,6 +532,8 @@ int main_0004_conf(int argc, char **argv) {
 #endif
             "client.dns.lookup",
             "resolve_canonical_bootstrap_servers_only",
+            "produce.request.max.partitions",
+            "42",
             NULL};
         static const char *tconfs[] = {"request.required.acks",
                                        "-1", /* int */
@@ -541,6 +544,27 @@ int main_0004_conf(int argc, char **argv) {
                                        "offset.store.path",
                                        "my/path", /* string */
                                        NULL};
+
+        /* Sanity-check validation for multibatch partition cap */
+        {
+                rd_kafka_conf_t *tmp = rd_kafka_conf_new();
+
+                res = rd_kafka_conf_set(tmp, "produce.request.max.partitions",
+                                        "0", errstr, sizeof(errstr));
+                TEST_ASSERT(res == RD_KAFKA_CONF_INVALID,
+                            "expected produce.request.max.partitions=0 "
+                            "to be rejected, not %d (%s)",
+                            res, errstr);
+
+                res = rd_kafka_conf_set(tmp, "produce.request.max.partitions",
+                                        "42", errstr, sizeof(errstr));
+                TEST_ASSERT(res == RD_KAFKA_CONF_OK,
+                            "expected produce.request.max.partitions "
+                            "to accept valid values: %d (%s)",
+                            res, errstr);
+
+                rd_kafka_conf_destroy(tmp);
+        }
 
         test_conf_init(&ignore_conf, &ignore_topic_conf, 10);
         rd_kafka_conf_destroy(ignore_conf);
