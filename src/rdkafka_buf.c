@@ -54,12 +54,21 @@ void rd_kafka_buf_destroy_final(rd_kafka_buf_t *rkbuf) {
 
         case RD_KAFKAP_Produce:
                 //TODO(xvandish): Update if we need to update batch destruction
+                fprintf(stderr, "[BUF_DESTROY] Destroying Produce buffer %p, rkbuf_batch.rktp=%p\n",
+                        (void*)rkbuf, (void*)rkbuf->rkbuf_batch.rktp);
+                fflush(stderr);
                 rd_kafka_msgbatch_destroy(&rkbuf->rkbuf_batch);
+                fprintf(stderr, "[BUF_DESTROY] msgbatch_destroy completed for buffer %p\n", (void*)rkbuf);
+                fflush(stderr);
                 break;
         }
 
+        fprintf(stderr, "[BUF_DESTROY_FINAL] Buffer %p: checking response\n", (void*)rkbuf);
+        fflush(stderr);
         if (rkbuf->rkbuf_response)
                 rd_kafka_buf_destroy(rkbuf->rkbuf_response);
+        fprintf(stderr, "[BUF_DESTROY_FINAL] Buffer %p: response destroyed\n", (void*)rkbuf);
+        fflush(stderr);
 
         if (rkbuf->rkbuf_make_opaque && rkbuf->rkbuf_free_make_opaque_cb)
                 rkbuf->rkbuf_free_make_opaque_cb(rkbuf->rkbuf_make_opaque);
@@ -67,17 +76,26 @@ void rd_kafka_buf_destroy_final(rd_kafka_buf_t *rkbuf) {
         rd_kafka_replyq_destroy(&rkbuf->rkbuf_replyq);
         rd_kafka_replyq_destroy(&rkbuf->rkbuf_orig_replyq);
 
+        fprintf(stderr, "[BUF_DESTROY_FINAL] Buffer %p: destroying rd_buf\n", (void*)rkbuf);
+        fflush(stderr);
         rd_buf_destroy(&rkbuf->rkbuf_buf);
+        fprintf(stderr, "[BUF_DESTROY_FINAL] Buffer %p: rd_buf destroyed\n", (void*)rkbuf);
+        fflush(stderr);
 
         if (rkbuf->rkbuf_rktp_vers)
                 rd_list_destroy(rkbuf->rkbuf_rktp_vers);
 
         if (rkbuf->rkbuf_rkb)
                 rd_kafka_broker_destroy(rkbuf->rkbuf_rkb);
-
         rd_refcnt_destroy(&rkbuf->rkbuf_refcnt);
+        fprintf(stderr, "[BUF_DESTROY_FINAL] Buffer %p: refcnt destroyed\n", (void*)rkbuf);
+        fflush(stderr);
 
+        fprintf(stderr, "[BUF_DESTROY_FINAL] Buffer %p: freeing buffer memory\n", (void*)rkbuf);
+        fflush(stderr);
         rd_free(rkbuf);
+        fprintf(stderr, "[BUF_DESTROY_FINAL] Buffer %p: freed\n", (void*)rkbuf);
+        fflush(stderr);
 }
 
 

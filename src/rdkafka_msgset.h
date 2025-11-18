@@ -158,7 +158,7 @@ struct rd_kafka_produce_ctx_s {
         /* Active toppar first message information */
         struct {
                 uint64_t msgid;
-                int32_t first_seq;
+                int32_t seq;
         } rkpc_active_firstmsg;
 };
 

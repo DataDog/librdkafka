@@ -140,6 +140,10 @@ rd_kafka_produce_request_select_caps(rd_kafka_broker_t *rkb,
             rkb, RD_KAFKAP_Produce, min_ApiVersion,
             rd_kafka_ProduceRequest_max_version, NULL);
 
+        fprintf(stderr, "[SELECT_CAPS] Selected ApiVersion=%d MsgVersion=%d features=0x%x\n",
+                *api_version, *msg_version, *features);
+        fflush(stderr);
+
         rd_assert(*api_version >= min_ApiVersion);
 }
 
@@ -287,17 +291,6 @@ rd_kafka_produce_request_get_header_sizes(rd_kafka_t *rk,
          *    [Topic + [Partition + MessageSetSize + MessageSet]]
          */
 
-
-        rd_kafka_t *rk      = msetw->msetw_rkb->rkb_rk;
-        size_t msg_overhead = 0;
-        size_t hdrsize      = 0;
-        size_t msgsetsize   = 0;
-        size_t bufsize;
-
-        // rd_kafka_assert(NULL, !msetw->msetw_rkbuf);
-
-
-
         /*
          * ProduceRequest header sizes
          */
@@ -311,7 +304,7 @@ rd_kafka_produce_request_get_header_sizes(rd_kafka_t *rk,
         case 4:
         case 3:
                 /* Add TransactionalId */
-                hdrsize += RD_KAFKAP_STR_SIZE(rk->rk_eos.transactional_id);
+                *produce_hdr_size += RD_KAFKAP_STR_SIZE(rk->rk_eos.transactional_id);
                 /* FALLTHRU */
         case 0:
         case 1:
@@ -327,16 +320,6 @@ rd_kafka_produce_request_get_header_sizes(rd_kafka_t *rk,
                 *partition_hdr_size +=
                     /* Partition + MessageSetSize */
                     4 + 4;
-                break;
-
-                hdrsize +=
-                    /* RequiredAcks + Timeout + TopicCnt */
-                    2 + 4 + 4 +
-                    /* Topic */
-                    RD_KAFKAP_STR_SIZE(msetw->msetw_rktp->rktp_rkt->rkt_topic) +
-                    /* PartitionCnt + Partition + MessageSetSize */
-                    4 + 4 + 4;
-                msgsetsize += 4; /* MessageSetSize */
                 break;
 
         default:
@@ -376,40 +359,6 @@ rd_kafka_produce_request_get_header_sizes(rd_kafka_t *rk,
         default:
                 RD_NOTREACHED();
         }
-
-        /*
-         * Calculate total buffer size to allocate
-         */
-        bufsize = hdrsize + msgsetsize;
-
-        /* If copying for small payloads is enabled, allocate enough
-         * space for each message to be copied based on this limit.
-         */
-        if (rk->rk_conf.msg_copy_max_size > 0) {
-                size_t queued_bytes = rd_kafka_msgq_size(msetw->msetw_msgq);
-                bufsize +=
-                    RD_MIN(queued_bytes, (size_t)rk->rk_conf.msg_copy_max_size *
-                                             msetw->msetw_msgcntmax);
-        }
-
-        /* Add estimed per-message overhead */
-        bufsize += msg_overhead * msetw->msetw_msgcntmax;
-
-        /* Cap allocation at message.max.bytes */
-        if (bufsize > (size_t)rk->rk_conf.max_msg_size)
-                bufsize = (size_t)rk->rk_conf.max_msg_size;
-
-        /*
-         * Allocate iovecs to hold all headers and messages,
-         * and allocate auxilliery space for message headers, etc.
-         */
-        msetw->msetw_rkbuf = rd_kafka_buf_new_flexver_request(
-            msetw->msetw_rkb, RD_KAFKAP_Produce,
-            msetw->msetw_msgcntmax / 2 + 10, bufsize,
-            msetw->msetw_ApiVersion >= 9);
-
-        rd_kafka_buf_ApiVersion_set(msetw->msetw_rkbuf, msetw->msetw_ApiVersion,
-                                    msetw->msetw_features);
 }
 
 
@@ -432,7 +381,7 @@ static void rd_kafka_produce_request_alloc_buf(rd_kafka_produce_ctx_t *rkpc) {
         size_t msgset_hdr_size    = 0;
         size_t bufsize;
 
-        rd_kafka_assert(NULL, !rkpc->rkpc_rkbuf);
+        rd_kafka_assert(NULL, !rkpc->rkpc_buf);
 
         rd_kafka_produce_request_get_header_sizes(
             rkpc->rkpc_rkb->rkb_rk, rkpc->rkpc_api_version,
@@ -474,8 +423,19 @@ static void rd_kafka_produce_request_alloc_buf(rd_kafka_produce_ctx_t *rkpc) {
          * The features will be updated during produce context finalizing
          * to add additional required features such as compression modes.
          */
-        rd_kafka_buf_ApiVersion(rkpc->rkpc_buf, rkpc->rkpc_api_version,
-                                rkpc->rkpc_features);
+        rd_kafka_buf_ApiVersion_set(rkpc->rkpc_buf, rkpc->rkpc_api_version,
+                                    rkpc->rkpc_features);
+
+        /* Initialize the msgbatch structure.
+         * Note: In multi-partition requests, this batch structure is shared across
+         * all partitions in the request. The PID must be set for msgbatch_set_first_msg()
+         * to work, but per-partition metadata (sequences, etc.) is tracked separately
+         * in the hash map (rd_kafka_produce_req_toppar_t structures). */
+        memset(&rkpc->rkpc_buf->rkbuf_batch, 0, sizeof(rkpc->rkpc_buf->rkbuf_batch));
+        rd_kafka_msgq_init(&rkpc->rkpc_buf->rkbuf_batch.msgq);
+        rkpc->rkpc_buf->rkbuf_batch.pid = rkpc->rkpc_pid;
+        rkpc->rkpc_buf->rkbuf_batch.first_seq = -1;
+        rkpc->rkpc_buf->rkbuf_batch.epoch_base_msgid = 0; /* TODO: implement properly */
 }
 
 /**
@@ -565,9 +525,14 @@ static void
 rd_kafka_produce_finalize_produce_header(rd_kafka_produce_ctx_t *rkpc) {
         rd_kafka_buf_t *rkbuf = rkpc->rkpc_buf;
 
-        /* Update TopicArrayCnt */
-        rd_kafka_buf_update_i32(rkbuf, rkpc->rkpc_topic_cnt_offset,
-                                rkpc->rkpc_appended_topic_cnt);
+        fprintf(stderr, "[FINALIZE-HEADER] Writing topic_cnt=%d to wire format (flexver=%d)\n",
+                rkpc->rkpc_appended_topic_cnt,
+                !!(rkbuf->rkbuf_flags & RD_KAFKA_OP_F_FLEXVER));
+        fflush(stderr);
+
+        /* Update TopicArrayCnt (handles both regular and compact arrays) */
+        rd_kafka_buf_finalize_arraycnt(rkbuf, rkpc->rkpc_topic_cnt_offset,
+                                       rkpc->rkpc_appended_topic_cnt);
 }
 
 static void rd_kafka_produce_write_topic_header(rd_kafka_produce_ctx_t *rkpc) {
@@ -587,10 +552,16 @@ static void
 rd_kafka_produce_finalize_topic_header(rd_kafka_produce_ctx_t *rkpc) {
         rd_kafka_buf_t *rkbuf = rkpc->rkpc_buf;
 
-        /* Update PartitionArrayCnt */
-        rd_kafka_buf_update_i32(rkbuf,
-                                rkpc->rkpc_active_topic_partition_cnt_offset,
-                                rkpc->rkpc_appended_partition_cnt);
+        fprintf(stderr, "[FINALIZE-TOPIC] Writing partition_cnt=%d for topic %s (flexver=%d)\n",
+                rkpc->rkpc_appended_partition_cnt,
+                rkpc->rkpc_active_topic ? rkpc->rkpc_active_topic->rkt_topic->str : "(null)",
+                !!(rkbuf->rkbuf_flags & RD_KAFKA_OP_F_FLEXVER));
+        fflush(stderr);
+
+        /* Update PartitionArrayCnt (handles both regular and compact arrays) */
+        rd_kafka_buf_finalize_arraycnt(rkbuf,
+                                       rkpc->rkpc_active_topic_partition_cnt_offset,
+                                       rkpc->rkpc_appended_partition_cnt);
 }
 
 /**
@@ -602,10 +573,6 @@ rd_kafka_produce_write_partition_header(rd_kafka_msgset_writer_t *msetw) {
 
         /* Partition */
         rd_kafka_buf_write_i32(rkbuf, msetw->msetw_rktp->rktp_partition);
-
-        /* Partition */
-        rd_kafka_buf_write_i32(rkbuf, msetw->msetw_rktp->rktp_partition);
-
 
         /* MessageSetSize: Will be finalized later*/
         msetw->msetw_of_MessageSetSize = rd_kafka_buf_write_arraycnt_pos(rkbuf);
@@ -677,10 +644,10 @@ static int rd_kafka_msgset_writer_init(rd_kafka_msgset_writer_t *msetw,
         msetw->msetw_firstmsg.of =
             rd_buf_write_pos(&msetw->msetw_rkbuf->rkbuf_buf);
 
-        // TODO(xvandish): Make sure this works as expected. These lines
-        // aren't in the initial.
-        rd_kafka_msgbatch_init(&msetw->msetw_rkbuf->rkbuf_u.Produce.batch, rktp,
-                               pid, epoch_base_msgid);
+        /* NOTE: msgbatch is NOT initialized per-partition in multi-partition requests.
+         * The msgbatch structure is designed for single-partition batches only.
+         * For multi-partition requests, per-partition metadata is tracked in the
+         * hash map (rd_kafka_produce_req_toppar_t structures). */
         msetw->msetw_batch = &msetw->msetw_rkbuf->rkbuf_u.Produce.batch;
 
         return 1;
@@ -1519,37 +1486,69 @@ rd_kafka_msgset_writer_finalize(rd_kafka_msgset_writer_t *msetw,
         /* No messages added, bail out early. */
         if (unlikely((cnt = rd_kafka_msgq_len(&rkbuf->rkbuf_batch.msgq)) ==
                      0)) {
-                rd_kafka_buf_destroy(rkbuf);
+                /* NOTE: In multi-partition requests, we don't destroy the buffer here
+                 * because it's shared across partitions. The caller will handle cleanup. */
+                fprintf(stderr, "[FINALIZE] No messages, returning NULL\n");
+                fflush(stderr);
                 return NULL;
         }
+
+        fprintf(stderr, "[FINALIZE] Found %d messages, continuing\n", cnt);
+        fflush(stderr);
 
         /* Total size of messages */
         len = rd_buf_write_pos(&msetw->msetw_rkbuf->rkbuf_buf) -
               msetw->msetw_firstmsg.of;
+        fprintf(stderr, "[FINALIZE] Message set length: %zu\n", len);
+        fflush(stderr);
         rd_assert(len > 0);
+        fprintf(stderr, "[FINALIZE] Passed len > 0 assertion\n");
+        fflush(stderr);
         rd_assert(len <= (size_t)rktp->rktp_rkt->rkt_rk->rk_conf.max_msg_size);
+        fprintf(stderr, "[FINALIZE] Passed max_msg_size assertion\n");
+        fflush(stderr);
 
+        fprintf(stderr, "[FINALIZE] About to update atomic counters\n");
+        fflush(stderr);
         rd_atomic64_add(&rktp->rktp_c.tx_msgs, cnt);
         rd_atomic64_add(&rktp->rktp_c.tx_msg_bytes,
                         msetw->msetw_messages_kvlen);
+        fprintf(stderr, "[FINALIZE] Atomic counters updated\n");
+        fflush(stderr);
 
         /* Compress the message set */
         if (msetw->msetw_compression) {
+                fprintf(stderr, "[FINALIZE] About to compress\n");
+                fflush(stderr);
                 if (rd_kafka_msgset_writer_compress(msetw, &len) == -1)
                         msetw->msetw_compression = 0;
+                fprintf(stderr, "[FINALIZE] Compression done\n");
+                fflush(stderr);
         }
 
         msetw->msetw_messages_len = len;
+        fprintf(stderr, "[FINALIZE] Set messages_len=%zu\n", len);
+        fflush(stderr);
 
         /* Finalize MessageSet header fields */
+        fprintf(stderr, "[FINALIZE] About to call finalize_MessageSet\n");
+        fflush(stderr);
         rd_kafka_msgset_writer_finalize_MessageSet(msetw);
+        fprintf(stderr, "[FINALIZE] finalize_MessageSet completed\n");
+        fflush(stderr);
 
         /* Partition tags */
+        fprintf(stderr, "[FINALIZE] Writing partition tags\n");
+        fflush(stderr);
         rd_kafka_buf_write_tags_empty(rkbuf);
         /* Topics tags */
+        fprintf(stderr, "[FINALIZE] Writing topic tags\n");
+        fflush(stderr);
         rd_kafka_buf_write_tags_empty(rkbuf);
 
         /* Return final MessageSetSize */
+        fprintf(stderr, "[FINALIZE] Setting MessageSetSize=%zu\n", msetw->msetw_MessageSetSize);
+        fflush(stderr);
         *MessageSetSizep = msetw->msetw_MessageSetSize;
 
         rd_rkb_dbg(msetw->msetw_rkb, MSG, "PRODUCE",
@@ -1569,11 +1568,31 @@ rd_kafka_msgset_writer_finalize(rd_kafka_msgset_writer_t *msetw,
                        ? rd_kafka_compression2str(msetw->msetw_compression)
                        : "uncompressed");
 
+        fprintf(stderr, "[FINALIZE] About to verify order\n");
+        fflush(stderr);
         rd_kafka_msgq_verify_order(rktp, &msetw->msetw_batch->msgq,
                                    msetw->msetw_batch->first_msgid, rd_false);
+        fprintf(stderr, "[FINALIZE] Order verified\n");
+        fflush(stderr);
 
-        rd_kafka_msgbatch_ready_produce(msetw->msetw_batch);
+        /* NOTE: In multi-partition requests, we do NOT call msgbatch_ready_produce()
+         * because the batch->rktp is not set (the batch is shared across partitions).
+         * In-flight tracking is handled per-partition in the request context
+         * (rd_kafka_ProduceRequest_finalize). For single-partition requests, the
+         * batch has a valid rktp and this would be called. */
+        if (msetw->msetw_batch->rktp) {
+                fprintf(stderr, "[FINALIZE] About to call msgbatch_ready_produce\n");
+                fflush(stderr);
+                rd_kafka_msgbatch_ready_produce(msetw->msetw_batch);
+                fprintf(stderr, "[FINALIZE] Ready for produce\n");
+                fflush(stderr);
+        } else {
+                fprintf(stderr, "[FINALIZE] Skipping msgbatch_ready_produce (multi-partition batch)\n");
+                fflush(stderr);
+        }
 
+        fprintf(stderr, "[FINALIZE] Returning rkbuf=%p\n", (void*)rkbuf);
+        fflush(stderr);
         return rkbuf;
 }
 
@@ -1617,8 +1636,13 @@ int rd_kafka_produce_calculator_add(rd_kafka_produce_calculator_t *rkpca,
         int batch_index;
         int added_batch_cnt;
 
-        if (rkpca->rkcpa_partition_cnt >
+        fprintf(stderr, "[CALC] calculator_add entered, partition_cnt=%d max=%d\n",
+                rkpca->rkpca_partition_cnt, rktp->rktp_rkt->rkt_rk->rk_conf.produce_request_max_partitions);
+        fflush(stderr);
+
+        if (rkpca->rkpca_partition_cnt >
             rktp->rktp_rkt->rkt_rk->rk_conf.produce_request_max_partitions) {
+                fprintf(stderr, "[CALC] calculator_add: partition limit reached\n");
                 return 0;
         }
 
@@ -1656,11 +1680,11 @@ int rd_kafka_produce_calculator_add(rd_kafka_produce_calculator_t *rkpca,
 
         /* Partition headers */
         calculated_size +=
-            rkpca->rkpca_partition_header_size * rkpca->rkcpa_partition_cnt + 1;
+            rkpca->rkpca_partition_header_size * rkpca->rkpca_partition_cnt + 1;
 
         /* Message set headers */
         calculated_size +=
-            rkpca->rkpca_message_set_header_size * rkpca->rkcpa_partition_cnt;
+            rkpca->rkpca_message_set_header_size * rkpca->rkpca_partition_cnt;
 
         /* Message overhead */
         calculated_size +=
@@ -1684,7 +1708,7 @@ int rd_kafka_produce_calculator_add(rd_kafka_produce_calculator_t *rkpca,
         batch_msg_size  = 0;
         batch_msg_cnt   = 0;
 
-        for (i = 0; i < batch_cnt; i++) {
+        for (batch_index = 0; batch_index < batch_cnt; batch_index++) {
                 int pass_msg_cnt = RD_MIN((xmit_msgq_len - batch_msg_cnt),
                                           rk->rk_conf.batch_num_messages);
 
@@ -1719,11 +1743,11 @@ int rd_kafka_produce_calculator_add(rd_kafka_produce_calculator_t *rkpca,
                 break;
         }
 
-        if (added_batch_cnt ==)
+        if (added_batch_cnt == 0)
                 return 0;
 
         rkpca->rkpca_topic_cnt += topic_changed;
-        rkpca->rkcpa_partition_cnt += added_batch_cnt;
+        rkpca->rkpca_partition_cnt += added_batch_cnt;
         rkpca->rkpca_message_cnt += batch_msg_cnt;
         rkpca->rkpca_message_size += batch_msg_size;
         rkpca->rkpca_rkt_prev = rktp->rktp_rkt;
@@ -1769,7 +1793,7 @@ int rd_kafka_produce_ctx_init(rd_kafka_produce_ctx_t *rkpc,
          * the request obsolete */
         rkpc->rkpc_pid = pid;
 
-        rkpc->rkpc_first_msg_timout = INT64_MAX;
+        rkpc->rkpc_first_msg_timeout = INT64_MAX;
 
         /* Max number of messages to send in a produce request,
          * limited by message_max or configured batch size x partition count,
@@ -1786,6 +1810,14 @@ int rd_kafka_produce_ctx_init(rd_kafka_produce_ctx_t *rkpc,
 
         /* Allocate backing buffer */
         rd_kafka_produce_request_alloc_buf(rkpc);
+
+        /* ProduceRequest uses FlexibleVersions starting from v9 */
+        if (rkpc->rkpc_api_version >= 9) {
+                rd_kafka_buf_upgrade_flexver_request(rkpc->rkpc_buf);
+                fprintf(stderr, "[PRODUCE_CTX_INIT] Enabled FlexibleVersions for ApiVersion %d\n",
+                        rkpc->rkpc_api_version);
+                fflush(stderr);
+        }
 
         /* Construct first part of Produce header */
         rd_kafka_produce_write_produce_header(rkpc);
@@ -1809,12 +1841,23 @@ int rd_kafka_produce_ctx_append_toppar(rd_kafka_produce_ctx_t *rkpc,
                                        int *appended_msg_cnt,
                                        size_t *appended_msg_bytes) {
         rd_kafka_msgq_t msgq;
+        rd_kafka_msgq_init(&msgq);
+
+        fprintf(stderr, "[CTX_APPEND] produce_ctx_append_toppar entered for %s[%d]\n",
+                rktp->rktp_rkt->rkt_topic->str, rktp->rktp_partition);
+        fflush(stderr);
 
         /* early out if there are no messages to append */
         int queue_msg_cnt_start      = rd_kafka_msgq_len(&rktp->rktp_xmit_msgq);
-        size_t queue_msg_bytes_start = rd_kafka_msgq_size(
-            &rktp->rktp_xmit_msgq) if (unlikely(queue_msg_cnt_start ==
-                                                0)) return 0;
+        size_t queue_msg_bytes_start = rd_kafka_msgq_size(&rktp->rktp_xmit_msgq);
+        fprintf(stderr, "[CTX_APPEND] xmit_msgq has %d messages, %zu bytes\n",
+                queue_msg_cnt_start, queue_msg_bytes_start);
+        fflush(stderr);
+        if (unlikely(queue_msg_cnt_start == 0)) {
+                fprintf(stderr, "[CTX_APPEND] No messages in xmit_msgq, returning 0\n");
+                fflush(stderr);
+                return 0;
+        }
 
         /* Check if this is a new topic */
         if (rktp->rktp_rkt != rkpc->rkpc_active_topic) {
@@ -1844,43 +1887,78 @@ int rd_kafka_produce_ctx_append_toppar(rd_kafka_produce_ctx_t *rkpc,
         /* produce the message set */
         rd_kafka_msgset_writer_t msetw;
 
-        // TODO(xvandish): Add rkpc_epoch_base_msgid to init
+        fprintf(stderr, "[CTX_APPEND] About to call msgset_writer_init\n");
+        fflush(stderr);
         if (unlikely(!rd_kafka_msgset_writer_init(
-                &msetw, rkpc->rkpc_rkb, rktp, &msgq, rkpc->rkpc_pid,
-                rkpc->rkpc_epoch_base_msgid))) {
+                &msetw, rkpc->rkpc_rkb, rktp, &rktp->rktp_xmit_msgq, rkpc->rkpc_pid,
+                0, /* epoch_base_msgid - TODO: implement properly */
+                rkpc))) {
+                fprintf(stderr, "[CTX_APPEND] msgset_writer_init FAILED\n");
+                fflush(stderr);
                 return 0;
         }
+        fprintf(stderr, "[CTX_APPEND] msgset_writer_init succeeded\n");
+        fflush(stderr);
 
         rd_ts_t first_msg_timeout;
-        first_msg_timeout = TAILQ_FIRST(&rktp->rktp_xmit_msgq)->rkm_ts_timeout;
+        rd_kafka_msg_t *first_msg = TAILQ_FIRST(&rktp->rktp_xmit_msgq.rkmq_msgs);
+        if (unlikely(!first_msg)) {
+                fprintf(stderr, "[CTX_APPEND] ERROR: xmit_msgq is empty after msgset_writer_init!\n");
+                fflush(stderr);
+                return 0;
+        }
+        first_msg_timeout = first_msg->rkm_ts_timeout;
 
-        if (!rd_kafka_msgset_writer_write_msgq(&msetw, &msgq)) {
+        fprintf(stderr, "[CTX_APPEND] About to call msgset_writer_write_msgq\n");
+        fflush(stderr);
+        if (!rd_kafka_msgset_writer_write_msgq(&msetw, &rktp->rktp_xmit_msgq)) {
                 /* Error while writing messages to MessageSet,
                  * move all messages back on the xmit queue. */
+                fprintf(stderr, "[CTX_APPEND] msgset_writer_write_msgq FAILED, moving messages back\n");
+                fflush(stderr);
                 rd_kafka_msgq_insert_msgq(
                     &rktp->rktp_xmit_msgq, &msetw.msetw_batch->msgq,
                     rktp->rktp_rkt->rkt_conf.msg_order_cmp);
         }
+        fprintf(stderr, "[CTX_APPEND] msgset_writer_write_msgq completed\n");
+        fflush(stderr);
 
         int queue_msg_cnt_end      = rd_kafka_msgq_len(&rktp->rktp_xmit_msgq);
         size_t queue_msg_bytes_end = rd_kafka_msgq_size(&rktp->rktp_xmit_msgq);
 
+        fprintf(stderr, "[CTX_APPEND] queue counts: start=%d end=%d\n", queue_msg_cnt_start, queue_msg_cnt_end);
+        fflush(stderr);
+
+        fprintf(stderr, "[CTX_APPEND] About to call msgset_writer_finalize\n");
+        fflush(stderr);
         rd_kafka_msgset_writer_finalize(&msetw, appended_msg_bytes);
+        fprintf(stderr, "[CTX_APPEND] msgset_writer_finalize completed\n");
+        fflush(stderr);
 
         /* concatenate msg queues together */
+        fprintf(stderr, "[CTX_APPEND] About to concatenate and move msgqs\n");
+        fflush(stderr);
         rd_kafka_msgq_concat(&msgq, &rkpc->rkpc_buf->rkbuf_batch.msgq);
         rd_kafka_msgq_move(&rkpc->rkpc_buf->rkbuf_batch.msgq, &msgq);
+        fprintf(stderr, "[CTX_APPEND] msgq operations completed\n");
+        fflush(stderr);
 
         /* If no messages were written, seek to the beginning of this write
          * so that the context can be finalized */
         if (queue_msg_cnt_start == queue_msg_cnt_end) {
+                fprintf(stderr, "[CTX_APPEND] ERROR: No messages written (start==end=%d), returning 0\n", queue_msg_cnt_start);
+                fflush(stderr);
                 rd_buf_write_seek(&rkpc->rkpc_buf->rkbuf_buf, write_offset);
                 return 0;
         }
 
+        fprintf(stderr, "[CTX_APPEND] Messages written: %d -> %d (%d messages consumed)\n",
+                queue_msg_cnt_start, queue_msg_cnt_end, queue_msg_cnt_start - queue_msg_cnt_end);
+        fflush(stderr);
+
         /* update first timeout if needed */
-        rkpc->rkpc_first_msg_timout =
-            RD_MIN(rkpc->rkpc_first_msg_timout, first_msg_timeout);
+        rkpc->rkpc_first_msg_timeout =
+            RD_MIN(rkpc->rkpc_first_msg_timeout, first_msg_timeout);
 
         /* If the entire queue was not written, then this context is full */
         int queue_message_cnt_appended =
@@ -1900,8 +1978,12 @@ int rd_kafka_produce_ctx_append_toppar(rd_kafka_produce_ctx_t *rkpc,
         ++rkpc->rkpc_appended_partition_cnt;
         rkpc->rkpc_appended_message_cnt += queue_message_cnt_appended;
         rkpc->rkpc_appended_message_bytes +=
-            queue_msg_bytes_end - queue_msg_bytes_start;
+            queue_msg_bytes_start - queue_msg_bytes_end;
         *appended_msg_cnt = queue_message_cnt_appended;
+
+        fprintf(stderr, "[CTX_APPEND] produce_ctx_append_toppar succeeded, appended %d messages\n",
+                queue_message_cnt_appended);
+        fflush(stderr);
         return 1;
 }
 
@@ -1944,29 +2026,46 @@ rd_kafka_buf_t *rd_kafka_produce_ctx_finalize(rd_kafka_produce_ctx_t *rkpc) {
         return rkpc->rkpc_buf;
 }
 
-// rd_kafka_buf_t *rd_kafka_msgset_create_ProduceRequest(rd_kafka_broker_t *rkb,
-//                                                       rd_kafka_toppar_t
-//                                                       *rktp, rd_kafka_msgq_t
-//                                                       *rkmq, const
-//                                                       rd_kafka_pid_t pid,
-//                                                       uint64_t
-//                                                       epoch_base_msgid,
-//                                                       size_t
-//                                                       *MessageSetSizep) {
+/**
+ * @brief Legacy single-partition API for unit tests.
+ *        This is a compatibility wrapper around the new multi-partition API.
+ *
+ * @returns buffer on success, or NULL on error.
+ */
+rd_kafka_buf_t *rd_kafka_msgset_create_ProduceRequest(rd_kafka_broker_t *rkb,
+                                                      rd_kafka_toppar_t *rktp,
+                                                      rd_kafka_msgq_t *rkmq,
+                                                      const rd_kafka_pid_t pid,
+                                                      uint64_t epoch_base_msgid,
+                                                      size_t *MessageSetSizep) {
+        rd_kafka_produce_ctx_t ctx;
+        rd_kafka_buf_t *rkbuf;
+        int appended_msg_cnt = 0;
+        size_t appended_msg_bytes = 0;
 
-//         rd_kafka_msgset_writer_t msetw;
+        /* Initialize a single-partition produce context */
+        if (!rd_kafka_produce_ctx_init(&ctx, rkb, 1, 1,
+                                       rd_kafka_msgq_len(rkmq),
+                                       rd_kafka_msgq_size(rkmq),
+                                       rktp->rktp_rkt->rkt_conf.required_acks,
+                                       rktp->rktp_rkt->rkt_conf.request_timeout_ms,
+                                       pid, NULL)) {
+                return NULL;
+        }
 
-//         if (rd_kafka_msgset_writer_init(&msetw, rkb, rktp, rkmq, pid,
-//                                         epoch_base_msgid) <= 0)
-//                 return NULL;
+        /* Append the single toppar */
+        if (!rd_kafka_produce_ctx_append_toppar(&ctx, rktp,
+                                                &appended_msg_cnt,
+                                                &appended_msg_bytes)) {
+                if ((rkbuf = rd_kafka_produce_ctx_finalize(&ctx)))
+                        rd_kafka_buf_destroy(rkbuf);
+                return NULL;
+        }
 
-//         if (!rd_kafka_msgset_writer_write_msgq(&msetw, msetw.msetw_msgq)) {
-//                 /* Error while writing messages to MessageSet,
-//                  * move all messages back on the xmit queue. */
-//                 rd_kafka_msgq_insert_msgq(
-//                     rkmq, &msetw.msetw_batch->msgq,
-//                     rktp->rktp_rkt->rkt_conf.msg_order_cmp);
-//         }
+        /* Finalize and return */
+        rkbuf = rd_kafka_produce_ctx_finalize(&ctx);
+        if (rkbuf && MessageSetSizep)
+                *MessageSetSizep = rkbuf->rkbuf_totlen;
 
-//         return rd_kafka_msgset_writer_finalize(&msetw, MessageSetSizep);
-// }
+        return rkbuf;
+}
