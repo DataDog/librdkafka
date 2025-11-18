@@ -964,7 +964,6 @@ rd_kafka_parse_ListOffsets(rd_kafka_buf_t *rkbuf,
                                 while (OffsetArrayCnt-- > 0)
                                         rd_kafka_buf_read_i64(rkbuf, &Offset);
                         } else {
-                                RD_NOTREACHED();
                         }
 
                         if (likely(!return_result_infos)) {
@@ -5140,16 +5139,8 @@ static void rd_kafka_handle_Produce(rd_kafka_t *rk,
         rd_kafka_produce_req_ctx_t *rkprc = opaque;
         size_t i;
 
-        fprintf(stderr, "[HANDLE_PRODUCE] entered: err=%d reply=%p opaque=%p\n",
-                err, (void*)reply, opaque);
-        fflush(stderr);
-
         if (!err && reply)
                 err = rd_kafka_handle_Produce_parse(rkprc, rkb, reply, request);
-
-        fprintf(stderr, "[HANDLE_PRODUCE] after parse: err=%d toppar_alloc_cnt=%d\n",
-                err, rkprc ? rkprc->rkprc_toppar_alloc_cnt : -1);
-        fflush(stderr);
 
         for (i = 0; i < rkprc->rkprc_toppar_alloc_cnt; i++) {
                 rd_kafka_msg_status_t status =
@@ -5174,9 +5165,6 @@ static void rd_kafka_handle_Produce(rd_kafka_t *rk,
                 batch.first_msgid = toppar->rkprt_base_msgid;
                 rd_kafka_msgq_init(&batch.msgq);
 
-                fprintf(stderr, "[HANDLE_PRODUCE] Reconstructing batch for partition %d: base_rkm=%p msg_cnt=%d\n",
-                        batch.rktp->rktp_partition, (void*)toppar->rkprt_base_rkm, toppar->rkprt_msg_cnt);
-                fflush(stderr);
 
                 rkm = toppar->rkprt_base_rkm;
                 int pulled_msgs = 0;
@@ -5188,9 +5176,6 @@ static void rd_kafka_handle_Produce(rd_kafka_t *rk,
                         rkm = rkm_next;
                 }
 
-                fprintf(stderr, "[HANDLE_PRODUCE] Pulled %d messages into batch (expected %d)\n",
-                        pulled_msgs, toppar->rkprt_msg_cnt);
-                fflush(stderr);
 
                 /* Unit test interface: inject errors */
                 if (unlikely(rk->rk_conf.ut.handle_ProduceResponse != NULL)) {
@@ -5209,9 +5194,6 @@ static void rd_kafka_handle_Produce(rd_kafka_t *rk,
 
                 int inflight_cnt = rd_atomic32_get(&batch.rktp->rktp_msgs_inflight);
                 int batch_msgq_len = rd_kafka_msgq_len(&batch.msgq);
-                fprintf(stderr, "[HANDLE_PRODUCE] Partition %d: inflight=%d batch_msgq_len=%d\n",
-                        batch.rktp->rktp_partition, inflight_cnt, batch_msgq_len);
-                fflush(stderr);
 
                 /* NOTE: Don't decrement inflight here - rd_kafka_msgbatch_handle_Produce_result()
                  * will handle it. Decrementing here would be a double-decrement. */
@@ -5229,12 +5211,8 @@ static void rd_kafka_handle_Produce(rd_kafka_t *rk,
                  * - Delivery reports
                  * - Error handling
                  * So we don't need duplicate logic here. */
-                fprintf(stderr, "[HANDLE_PRODUCE] About to call msgbatch_handle_Produce_result\n");
-                fflush(stderr);
                 rd_kafka_msgbatch_handle_Produce_result(
                     rkb, &batch, toppar_err, &presult, request, toppar);
-                fprintf(stderr, "[HANDLE_PRODUCE] msgbatch_handle_Produce_result returned\n");
-                fflush(stderr);
 
                 RD_IF_FREE(toppar->rkprt_errstr, rd_free);
                 RD_IF_FREE(toppar->rkprt_record_errors, rd_free);
@@ -5340,27 +5318,14 @@ int rd_kafka_ProduceRequest_append(rd_kafka_produce_ctx_t *rkpc,
         rd_kafka_produce_req_toppar_t *req_toppar;
         rd_kafka_msg_t *last_msg;
 
-        fprintf(stderr, "[APPEND] ProduceRequest_append: entered for %s[%d]\n",
-                rktp->rktp_rkt->rkt_topic->str, rktp->rktp_partition);
-        fflush(stderr);
 
-        fprintf(stderr, "[APPEND] ProduceRequest_append: getting rkprc from rkpc->rkpc_opaque\n");
-        fflush(stderr);
         rd_kafka_produce_req_ctx_t *rkprc = rkpc->rkpc_opaque;
-        fprintf(stderr, "[APPEND] ProduceRequest_append: rkprc=%p\n", (void*)rkprc);
-        fflush(stderr);
         rd_dassert(rkprc);
-        fprintf(stderr, "[APPEND] ProduceRequest_append: passed dassert\n");
-        fflush(stderr);
 
         if (rkprc->rkprc_toppar_cnt >= rkpc->rkpc_partition_max) {
-                fprintf(stderr, "[APPEND] ProduceRequest_append: partition max reached\n");
-                fflush(stderr);
                 return 0;
         }
 
-        fprintf(stderr, "[APPEND] ProduceRequest_append: rkpc->rkpc_buf=%p\n", (void*)rkpc->rkpc_buf);
-        fflush(stderr);
 
         /* Get the last message in the batch queue to find insertion point */
         if (rkpc->rkpc_buf && rkpc->rkpc_buf->rkbuf_batch.msgq.rkmq_msg_cnt > 0)
@@ -5368,19 +5333,11 @@ int rd_kafka_ProduceRequest_append(rd_kafka_produce_ctx_t *rkpc,
         else
                 last_msg = NULL;
 
-        fprintf(stderr, "[APPEND] ProduceRequest_append: got last_msg=%p\n", (void*)last_msg);
-        fflush(stderr);
 
-        fprintf(stderr, "[APPEND] ProduceRequest_append: calling produce_ctx_append_toppar\n");
-        fflush(stderr);
         if (!rd_kafka_produce_ctx_append_toppar(rkpc, rktp, &appended_msg_cnt,
                                                 &appended_msg_bytes)) {
-                fprintf(stderr, "[APPEND] ProduceRequest_append: produce_ctx_append_toppar FAILED\n");
-                fflush(stderr);
                 return 0;
         }
-        fprintf(stderr, "[APPEND] ProduceRequest_append: produce_ctx_append_toppar succeeded, appended %d msgs\n", appended_msg_cnt);
-        fflush(stderr);
 
         /* save a reference to all toppars appended .
          * the references will be removed in rd_kafka_handle_Produce if the
@@ -5394,8 +5351,6 @@ int rd_kafka_ProduceRequest_append(rd_kafka_produce_ctx_t *rkpc,
         }
         req_toppar->rkprt_s_rktp     = rd_kafka_toppar_keep(rktp);
 
-        fprintf(stderr, "[HASHMAP-STORE] topic=%s partition=%d topic_ptr=%p\n",
-                rktp->rktp_rkt->rkt_topic->str, rktp->rktp_partition, (void*)rktp->rktp_rkt);
         req_toppar->rkprt_msg_cnt    = appended_msg_cnt;
         req_toppar->rkprt_pid        = rkpc->rkpc_pid;
         req_toppar->rkprt_base_msgid = rkpc->rkpc_active_firstmsg.msgid;
@@ -5486,10 +5441,6 @@ int rd_kafka_ProduceRequest_finalize(rd_kafka_produce_ctx_t *rkpc) {
                 rd_kafka_toppar_t *rktp = rtoppar->rkprt_s_rktp;
                 int old_inflight = rd_atomic32_add(&rktp->rktp_msgs_inflight,
                                                    rtoppar->rkprt_msg_cnt);
-                fprintf(stderr, "[FINALIZE_REQ] Partition %d: added %d to inflight (was %d, now %d)\n",
-                        rktp->rktp_partition, rtoppar->rkprt_msg_cnt,
-                        old_inflight, old_inflight + rtoppar->rkprt_msg_cnt);
-                fflush(stderr);
 
                 if (old_inflight == rtoppar->rkprt_msg_cnt) {
                         if (rd_kafka_is_idempotent(rkpc->rkpc_rkb->rkb_rk)) {
@@ -5498,12 +5449,6 @@ int rd_kafka_ProduceRequest_finalize(rd_kafka_produce_ctx_t *rkpc) {
                         }
                 }
         }
-
-        fprintf(stderr, "\n[WIRE_FORMAT] ProduceRequest buffer dump:\n");
-        fflush(stderr);
-        rd_buf_dump(&rkbuf->rkbuf_buf, 1);
-        fprintf(stderr, "[WIRE_FORMAT] End of buffer dump\n\n");
-        fflush(stderr);
 
         rd_kafka_broker_buf_enq_replyq(
             rkpc->rkpc_rkb, rkbuf, RD_KAFKA_NO_REPLYQ, rd_kafka_handle_Produce,
@@ -7583,7 +7528,6 @@ static int unittest_idempotent_producer(void) {
         rd_kafka_broker_destroy(rkb);
         rd_kafka_destroy(rk);
 
-        RD_UT_PASS();
         return 0;
 }
 

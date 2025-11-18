@@ -1615,24 +1615,12 @@ void rd_kafka_msgq_dump(FILE *fp, const char *what, rd_kafka_msgq_t *rkmq) {
  * @brief Destroy resources associated with msgbatch
  */
 void rd_kafka_msgbatch_destroy(rd_kafka_msgbatch_t *rkmb) {
-        fprintf(stderr, "[MSGBATCH_DESTROY] rktp=%p msgq_cnt=%d\n",
-                (void*)rkmb->rktp, rkmb->msgq.rkmq_msg_cnt);
-        fflush(stderr);
-
         if (rkmb->rktp) {
-                fprintf(stderr, "[MSGBATCH_DESTROY] Destroying rktp=%p\n", (void*)rkmb->rktp);
-                fflush(stderr);
                 rd_kafka_toppar_destroy(rkmb->rktp);
                 rkmb->rktp = NULL;
-                fprintf(stderr, "[MSGBATCH_DESTROY] rktp destroyed\n");
-                fflush(stderr);
         }
 
-        fprintf(stderr, "[MSGBATCH_DESTROY] Checking msgq empty\n");
-        fflush(stderr);
         rd_assert(RD_KAFKA_MSGQ_EMPTY(&rkmb->msgq));
-        fprintf(stderr, "[MSGBATCH_DESTROY] Done\n");
-        fflush(stderr);
 }
 
 
