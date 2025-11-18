@@ -1529,6 +1529,18 @@ static const struct rd_kafka_property rd_kafka_properties[] = {
      "Whether to enable pushing of client metrics to the cluster, if the "
      "cluster has a client metrics subscription which matches this client",
      0, 1, 1},
+    {_RK_GLOBAL | _RK_PRODUCER, "produce.request.max.partitions", _RK_C_INT,
+     _RK(produce_request_max_partitions),
+     "The maximum number of partitions to include in a single produce "
+     "request. "
+     "A higher value allows for fewer produce requests when producing "
+     "to many partitions, at the expense of higher memory usage during "
+     "produce request construction. "
+     "This setting is also used for transactional produce requests. "
+     "Note that the broker has a maximum request size (configured via "
+     "`message.max.bytes` on the broker and topic) which may be hit "
+     "before reaching this partition limit.",
+     1, 10000000, 10},
 
 
 

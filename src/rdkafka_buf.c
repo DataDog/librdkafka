@@ -53,6 +53,7 @@ void rd_kafka_buf_destroy_final(rd_kafka_buf_t *rkbuf) {
                 break;
 
         case RD_KAFKAP_Produce:
+                //TODO(xvandish): Update if we need to update batch destruction
                 rd_kafka_msgbatch_destroy(&rkbuf->rkbuf_batch);
                 break;
         }
@@ -73,7 +74,6 @@ void rd_kafka_buf_destroy_final(rd_kafka_buf_t *rkbuf) {
 
         if (rkbuf->rkbuf_rkb)
                 rd_kafka_broker_destroy(rkbuf->rkbuf_rkb);
-
         rd_refcnt_destroy(&rkbuf->rkbuf_refcnt);
 
         rd_free(rkbuf);

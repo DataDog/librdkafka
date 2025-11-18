@@ -268,6 +268,7 @@ _TEST_DECL(0149_broker_same_host_port_mock);
 _TEST_DECL(0150_telemetry_mock);
 _TEST_DECL(0151_purge_brokers_mock);
 _TEST_DECL(0152_rebootstrap_local);
+_TEST_DECL(0201_multibatch_limits_mock);
 
 /* Manual tests */
 _TEST_DECL(8000_idle);
@@ -532,6 +533,7 @@ struct test tests[] = {
     _TEST(0150_telemetry_mock, 0),
     _TEST(0151_purge_brokers_mock, TEST_F_LOCAL),
     _TEST(0152_rebootstrap_local, TEST_F_LOCAL),
+    _TEST(0201_multibatch_limits_mock, TEST_F_LOCAL),
 
 
     /* Manual tests */

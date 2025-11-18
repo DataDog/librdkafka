@@ -265,6 +265,8 @@ typedef struct rd_kafka_acl_result_s rd_kafka_acl_result_t;
 typedef struct rd_kafka_Uuid_s rd_kafka_Uuid_t;
 typedef struct rd_kafka_topic_partition_result_s
     rd_kafka_topic_partition_result_t;
+typedef struct rd_kafka_produce_ctx_s rd_kafka_produce_ctx_t;
+typedef struct rd_kafka_produce_calculator_s rd_kafka_produce_calculator_t;
 /* @endcond */
 
 
