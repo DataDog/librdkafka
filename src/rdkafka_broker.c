@@ -105,7 +105,7 @@ typedef struct produce_batch_s {
 */
 static void
 rd_kafka_broker_produce_batch_init(produce_batch_t *batch, rd_kafka_broker_t *rkb) {
-        TAILQ_INIT(*batch->batch_toppars);
+        TAILQ_INIT(&batch->batch_toppars);
         rd_kafka_produce_calculator_init(&batch->batch_calculator, rkb);
 
         if (rd_kafka_broker_outbufs_space(rkb) > 0)
@@ -148,17 +148,17 @@ rd_kafka_broker_produce_batch_send(produce_batch_t *batch,
         if (unlikely(!rd_kafka_ProduceRequest_init(
                         &ctx, rkb,
                         rkb->rkb_produce_pid,
-                        batch->batch_calc.rkpca_topic_cnt,
-                        batch->batch_calc.rkpca_partition_cnt,
-                        batch->batch_calc.rkpca_message_cnt,
-                        batch->batch_calc.rkpca_message_size,
-                        batch->batch_calc.rkpca_request_req_acks,
-                        batch->batch_calc.rkpca_request_timeout_ms))) {
+                        batch->batch_calculator.rkpca_topic_cnt,
+                        batch->batch_calculator.rkpca_partition_cnt,
+                        batch->batch_calculator.rkpca_message_cnt,
+                        batch->batch_calculator.rkpca_message_size,
+                        batch->batch_calculator.rkpca_request_required_acks,
+                        batch->batch_calculator.rkpca_request_timeout_ms))) {
                 return 0;
         }
 
         TAILQ_FOREACH(rktp, &batch->batch_toppars, rktp_batch_link) {
-                if (unlikely(!rd_kafkaProduceRequest_append(&ctx, rktp)))
+                if (unlikely(!rd_kafka_ProduceRequest_append(&ctx, rktp)))
                         break;
         }
 
@@ -3869,6 +3869,15 @@ static void rd_kafka_broker_internal_serve(rd_kafka_broker_t *rkb,
 }
 
 
+/**
+ * @returns the number of requests that may be enqueued before
+ *          queue.backpressure.threshold is reached.
+ */
+unsigned int rd_kafka_broker_outbufs_space(rd_kafka_broker_t *rkb) {
+        int r = rkb->rkb_rk->rk_conf.queue_backpressure_thres -
+                rd_atomic32_get(&rkb->rkb_outbufs.rkbq_cnt);
+        return r < 0 ? 0 : (unsigned int)r;
+}
 
 /**
  * @brief Update \p *next_wakeup_ptr to \p maybe_next_wakeup if it is sooner.
@@ -4041,14 +4050,10 @@ static int rd_kafka_toppar_producer_serve(rd_kafka_broker_t *rkb,
                                     RD_KAFKAP_STR_PR(rktp->rktp_rkt->rkt_topic),
                                     rktp->rktp_partition, inflight);
 
-                                /* Flush any ProduceRequests for this
-                                 * partition in the output buffer queue to
-                                 * speed up draining. */
-                                if (!did_purge)
-                                        rd_kafka_broker_bufq_purge_by_toppar(
-                                            rkb, &rkb->rkb_outbufs,
-                                            RD_KAFKAP_Produce, rktp,
-                                            RD_KAFKA_RESP_ERR__RETRY);
+                                /* Note: With multi-partition batching, we can't
+                                 * purge by toppar since requests may contain
+                                 * multiple partitions. The drain will complete
+                                 * naturally as requests finish. */
 
                                 return 0;
                         }
@@ -4153,13 +4158,13 @@ static int rd_kafka_broker_produce_toppars(rd_kafka_broker_t *rkb,
                 * then cancel all pending produce requests which have not
                 * yet been sent */
                if (!rd_kafka_pid_valid(pid) ||
-                   !rd_kafka_pid_eq(pid, rkb->rkb_producer_pid)) {
-                        rd_rkb_dbg(rkb, PRODUCER, "PIDCHANGE",
+                   !rd_kafka_pid_eq(pid, rkb->rkb_produce_pid)) {
+                        rd_rkb_dbg(rkb, MSG, "PIDCHANGE",
                                    "Producer PID changed from "
                                    "%s to %s: purging %d pending "
                                    "Produce request(s)",
-                                   rd_kafka_pid_str(&rkb->rkb_producer_pid),
-                                   rd_kafka_pid_str(&pid),
+                                   rd_kafka_pid2str(rkb->rkb_produce_pid),
+                                   rd_kafka_pid2str(pid),
                                    (int)rd_kafka_bufq_cnt(&rkb->rkb_outbufs));
 
                         /* Purge pending Produce requests */
@@ -4183,7 +4188,7 @@ static int rd_kafka_broker_produce_toppars(rd_kafka_broker_t *rkb,
                         return 0;
 
                 /* Cache current producer pid */
-                rkb->rkb_producer_pid = pid;
+                rkb->rkb_produce_pid = pid;
         }
 
         rktp_next_start = NULL;

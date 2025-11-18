@@ -381,13 +381,7 @@ struct rd_kafka_broker_s { /* rd_kafka_broker_t */
  * @returns the number of requests that may be enqueued before
  *          queue.backpressure.threshold is reached.
  */
-
-static RD_INLINE unsigned int
-rd_kafka_broker_outbufs_space(rd_kafka_broker_t *rkb) {
-        int r = rkb->rkb_rk->rk_conf.queue_backpressure_thres -
-                rd_atomic32_get(&rkb->rkb_outbufs.rkbq_cnt);
-        return r < 0 ? 0 : (unsigned int)r;
-}
+unsigned int rd_kafka_broker_outbufs_space(rd_kafka_broker_t *rkb);
 
 /**
  * @brief Locks broker, acquires the states, unlocks, and returns

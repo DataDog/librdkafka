@@ -61,7 +61,7 @@ void rd_kafka_aborted_txns_add(rd_kafka_aborted_txns_t *aborted_txns,
 struct rd_kafka_produce_calculator_s {
         /* Counts used to estimate payload size */
         int rkpca_topic_cnt;
-        int rkcpa_partition_cnt;
+        int rkpca_partition_cnt;
         int rkpca_message_cnt;
         size_t rkpca_message_size;
 
@@ -119,7 +119,7 @@ struct rd_kafka_produce_ctx_s {
         size_t rkpc_appended_message_bytes;
 
         /* As msgs added to a batch, this is the earliest timeout found */
-        rd_ts_t rkpc_first_msg_timout;
+        rd_ts_t rkpc_first_msg_timeout;
 
         /* The offset of topic count in the batch header. This will be updated
          * to reflect the actual topic count when finalizing the batch
@@ -170,8 +170,7 @@ struct rd_kafka_produce_ctx_s {
  */
 
 void rd_kafka_produce_calculator_init(rd_kafka_produce_calculator_t *rkpca,
-                                      rd_kafka_broker_t,
-                                      *rkb);
+                                      rd_kafka_broker_t *rkb);
 
 int rd_kafka_produce_calculator_add(rd_kafka_produce_calculator_t *rkpca,
                                     rd_kafka_toppar_t *rktp);
