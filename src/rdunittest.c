@@ -418,6 +418,7 @@ static int unittest_rdclock(void) {
 extern int unittest_string(void);
 extern int unittest_cgrp(void);
 extern int unittest_mock_cluster(void);
+extern int unittest_msgset_writer(void);
 #if WITH_SASL_SCRAM
 extern int unittest_scram(void);
 #endif
@@ -445,6 +446,7 @@ int rd_unittest(void) {
             {"rdvarint", unittest_rdvarint},
             {"crc32c", unittest_rd_crc32c},
             {"msg", unittest_msg},
+            {"msgset_writer", unittest_msgset_writer},
             {"murmurhash", unittest_murmur2},
             {"fnv1a", unittest_fnv1a},
             {"mock", unittest_mock_cluster},

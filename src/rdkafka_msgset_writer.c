@@ -43,6 +43,7 @@
 #include "snappy.h"
 #include "rdvarint.h"
 #include "crc32c.h"
+#include "rdunittest.h"
 
 /* KAFKA-3219 - max topic length is 249 chars
  * this corresponds to the max file name length of 255
@@ -1973,4 +1974,535 @@ rd_kafka_buf_t *rd_kafka_msgset_create_ProduceRequest(rd_kafka_broker_t *rkb,
                 *MessageSetSizep = rkbuf->rkbuf_totlen;
 
         return rkbuf;
+}
+
+
+/**
+ * @brief Test: Empty partition should be rejected
+ */
+static int unittest_msgset_writer_empty_partition(void) {
+        rd_kafka_conf_t *conf;
+        rd_kafka_t *rk;
+        rd_kafka_topic_t *rkt;
+        rd_kafka_toppar_t *rktp;
+        rd_kafka_produce_calculator_t rkpca;
+        int result;
+
+        RD_UT_BEGIN();
+
+        /* Create producer instance */
+        conf = rd_kafka_conf_new();
+        rd_kafka_conf_set(conf, "client.id", "unittest", NULL, 0);
+        rk = rd_kafka_new(RD_KAFKA_PRODUCER, conf, NULL, 0);
+        if (!rk)
+                RD_UT_FAIL("Failed to create producer");
+
+        /* Create topic and partition */
+        rkt = rd_kafka_topic_new(rk, "test_topic", NULL);
+        rktp = rd_kafka_toppar_new(rkt, 0);
+
+        /* Initialize calculator */
+        memset(&rkpca, 0, sizeof(rkpca));
+        rkpca.rkpca_produce_header_size = 100;
+        rkpca.rkpca_topic_header_size = 50;
+        rkpca.rkpca_partition_header_size = 100;
+        rkpca.rkpca_message_set_header_size = 50;
+        rkpca.rkpca_message_overhead = 30;
+
+        /* Test: Empty partition should return 0 */
+        rktp->rktp_xmit_msgq.rkmq_msg_cnt = 0;
+        result = rd_kafka_produce_calculator_add(&rkpca, rktp);
+        RD_UT_ASSERT(result == 0, "Empty partition should be rejected, got %d", result);
+
+        /* Cleanup */
+        rd_kafka_toppar_destroy(rktp);
+        rd_kafka_topic_destroy(rkt);
+        rd_kafka_destroy(rk);
+
+        RD_UT_PASS();
+}
+
+/**
+ * @brief Test: Partition with messages should be accepted
+ */
+static int unittest_msgset_writer_add_partition(void) {
+        rd_kafka_conf_t *conf;
+        rd_kafka_t *rk;
+        rd_kafka_topic_t *rkt;
+        rd_kafka_toppar_t *rktp;
+        rd_kafka_produce_calculator_t rkpca;
+        int result;
+
+        RD_UT_BEGIN();
+
+        /* Create producer instance */
+        conf = rd_kafka_conf_new();
+        rd_kafka_conf_set(conf, "client.id", "unittest", NULL, 0);
+        rk = rd_kafka_new(RD_KAFKA_PRODUCER, conf, NULL, 0);
+        if (!rk)
+                RD_UT_FAIL("Failed to create producer");
+
+        /* Create topic and partition */
+        rkt = rd_kafka_topic_new(rk, "test_topic", NULL);
+        rktp = rd_kafka_toppar_new(rkt, 0);
+
+        /* Initialize calculator */
+        memset(&rkpca, 0, sizeof(rkpca));
+        rkpca.rkpca_produce_header_size = 100;
+        rkpca.rkpca_topic_header_size = 50;
+        rkpca.rkpca_partition_header_size = 100;
+        rkpca.rkpca_message_set_header_size = 50;
+        rkpca.rkpca_message_overhead = 30;
+
+        /* Simulate 100 messages */
+        rktp->rktp_xmit_msgq.rkmq_msg_cnt   = 100;
+        rktp->rktp_xmit_msgq.rkmq_msg_bytes = 25600;
+        result = rd_kafka_produce_calculator_add(&rkpca, rktp);
+
+        RD_UT_ASSERT(result == 1, "Should accept partition with messages, got %d", result);
+        RD_UT_ASSERT(rkpca.rkpca_partition_cnt >= 1,
+                     "Partition count should be >= 1, got %d", rkpca.rkpca_partition_cnt);
+
+        /* Cleanup - reset fake queue counts to avoid assertion failures */
+        rktp->rktp_xmit_msgq.rkmq_msg_cnt = 0;
+        rktp->rktp_xmit_msgq.rkmq_msg_bytes = 0;
+        rd_kafka_toppar_destroy(rktp);
+        rd_kafka_topic_destroy(rkt);
+        rd_kafka_destroy(rk);
+
+        RD_UT_PASS();
+}
+
+/**
+ * @brief Test: Partition limit enforcement
+ */
+static int unittest_msgset_writer_partition_limit(void) {
+        rd_kafka_conf_t *conf;
+        rd_kafka_t *rk;
+        rd_kafka_topic_t *rkt;
+        rd_kafka_toppar_t *rktp;
+        rd_kafka_produce_calculator_t rkpca;
+        int result;
+        int added_count;
+
+        RD_UT_BEGIN();
+
+        /* Create producer with low partition limit */
+        conf = rd_kafka_conf_new();
+        rd_kafka_conf_set(conf, "client.id", "unittest", NULL, 0);
+        rd_kafka_conf_set(conf, "produce.request.max.partitions", "5", NULL, 0);
+        rk = rd_kafka_new(RD_KAFKA_PRODUCER, conf, NULL, 0);
+        if (!rk)
+                RD_UT_FAIL("Failed to create producer");
+
+        /* Create topic and partition */
+        rkt = rd_kafka_topic_new(rk, "test_topic", NULL);
+        rktp = rd_kafka_toppar_new(rkt, 0);
+
+        /* Initialize calculator */
+        memset(&rkpca, 0, sizeof(rkpca));
+        rkpca.rkpca_produce_header_size = 100;
+        rkpca.rkpca_topic_header_size = 50;
+        rkpca.rkpca_partition_header_size = 100;
+        rkpca.rkpca_message_set_header_size = 50;
+        rkpca.rkpca_message_overhead = 30;
+
+        /* Simulate small partition */
+        rktp->rktp_xmit_msgq.rkmq_msg_cnt   = 10;
+        rktp->rktp_xmit_msgq.rkmq_msg_bytes = 2560;
+
+        /* Add partitions until limit is hit */
+        added_count = 0;
+        for (int i = 0; i < 10; i++) {
+                result = rd_kafka_produce_calculator_add(&rkpca, rktp);
+                if (result == 1) {
+                        added_count++;
+                } else {
+                        break;
+                }
+        }
+
+        /* Limit check is "> max", so max=5 allows indices 0-5 (6 partitions) */
+        RD_UT_ASSERT(added_count == 6,
+                     "Should add 6 partitions (limit > 5), added %d", added_count);
+
+        /* Cleanup - reset fake queue counts to avoid assertion failures */
+        rktp->rktp_xmit_msgq.rkmq_msg_cnt = 0;
+        rktp->rktp_xmit_msgq.rkmq_msg_bytes = 0;
+        rd_kafka_toppar_destroy(rktp);
+        rd_kafka_topic_destroy(rkt);
+        rd_kafka_destroy(rk);
+
+        RD_UT_PASS();
+}
+
+/**
+ * @brief Test: Configuration is properly read
+ */
+static int unittest_msgset_writer_config_values(void) {
+        rd_kafka_conf_t *conf;
+        rd_kafka_t *rk;
+
+        RD_UT_BEGIN();
+
+        /* Create producer with specific configuration */
+        conf = rd_kafka_conf_new();
+        rd_kafka_conf_set(conf, "client.id", "unittest", NULL, 0);
+        rd_kafka_conf_set(conf, "message.max.bytes", "10000", NULL, 0);
+        rd_kafka_conf_set(conf, "produce.request.max.partitions", "123", NULL, 0);
+        rd_kafka_conf_set(conf, "batch.num.messages", "456", NULL, 0);
+        rk = rd_kafka_new(RD_KAFKA_PRODUCER, conf, NULL, 0);
+        if (!rk)
+                RD_UT_FAIL("Failed to create producer");
+
+        /* Verify configuration values were set correctly */
+        RD_UT_ASSERT(rk->rk_conf.max_msg_size == 10000,
+                     "message.max.bytes should be 10000, got %d",
+                     rk->rk_conf.max_msg_size);
+        RD_UT_ASSERT(rk->rk_conf.produce_request_max_partitions == 123,
+                     "produce.request.max.partitions should be 123, got %d",
+                     rk->rk_conf.produce_request_max_partitions);
+        RD_UT_ASSERT(rk->rk_conf.batch_num_messages == 456,
+                     "batch.num.messages should be 456, got %d",
+                     rk->rk_conf.batch_num_messages);
+
+        /* Cleanup */
+        rd_kafka_destroy(rk);
+
+        RD_UT_PASS();
+}
+
+/**
+ * @brief Test: Successfully add multiple small partitions
+ */
+static int unittest_msgset_writer_multiple_partitions(void) {
+        rd_kafka_conf_t *conf;
+        rd_kafka_t *rk;
+        rd_kafka_topic_t *rkt;
+        rd_kafka_toppar_t *rktp;
+        rd_kafka_produce_calculator_t rkpca;
+        int result;
+        int added_count;
+
+        RD_UT_BEGIN();
+
+        /* Create producer with large limits */
+        conf = rd_kafka_conf_new();
+        rd_kafka_conf_set(conf, "client.id", "unittest", NULL, 0);
+        rd_kafka_conf_set(conf, "message.max.bytes", "10000000", NULL, 0);
+        rd_kafka_conf_set(conf, "produce.request.max.partitions", "1000", NULL, 0);
+        rk = rd_kafka_new(RD_KAFKA_PRODUCER, conf, NULL, 0);
+        if (!rk)
+                RD_UT_FAIL("Failed to create producer");
+
+        /* Create topic and partition */
+        rkt = rd_kafka_topic_new(rk, "test_topic", NULL);
+        rktp = rd_kafka_toppar_new(rkt, 0);
+
+        /* Initialize calculator */
+        memset(&rkpca, 0, sizeof(rkpca));
+        rkpca.rkpca_produce_header_size = 100;
+        rkpca.rkpca_topic_header_size = 50;
+        rkpca.rkpca_partition_header_size = 100;
+        rkpca.rkpca_message_set_header_size = 50;
+        rkpca.rkpca_message_overhead = 30;
+
+        /* Simulate small partition */
+        rktp->rktp_xmit_msgq.rkmq_msg_cnt   = 10;
+        rktp->rktp_xmit_msgq.rkmq_msg_bytes = 2560;
+
+        /* Add 100 small partitions */
+        added_count = 0;
+        for (int i = 0; i < 100; i++) {
+                result = rd_kafka_produce_calculator_add(&rkpca, rktp);
+                if (result == 1) {
+                        added_count++;
+                } else {
+                        break;
+                }
+        }
+
+        RD_UT_ASSERT(added_count == 100,
+                     "Should successfully add 100 partitions, added %d", added_count);
+        RD_UT_ASSERT(rkpca.rkpca_partition_cnt == 100,
+                     "Calculator should track 100 partitions, got %d", rkpca.rkpca_partition_cnt);
+
+        /* Cleanup - reset fake queue counts */
+        rktp->rktp_xmit_msgq.rkmq_msg_cnt = 0;
+        rktp->rktp_xmit_msgq.rkmq_msg_bytes = 0;
+        rd_kafka_toppar_destroy(rktp);
+        rd_kafka_topic_destroy(rkt);
+        rd_kafka_destroy(rk);
+
+        RD_UT_PASS();
+}
+
+/**
+ * @brief Test: Configuration mismatch between topics
+ */
+static int unittest_msgset_writer_config_mismatch(void) {
+        rd_kafka_conf_t *conf;
+        rd_kafka_topic_conf_t *tconf1, *tconf2;
+        rd_kafka_t *rk;
+        rd_kafka_topic_t *rkt1, *rkt2;
+        rd_kafka_toppar_t *rktp1, *rktp2;
+        rd_kafka_produce_calculator_t rkpca;
+        int result;
+
+        RD_UT_BEGIN();
+
+        /* Create producer */
+        conf = rd_kafka_conf_new();
+        rd_kafka_conf_set(conf, "client.id", "unittest", NULL, 0);
+        rk = rd_kafka_new(RD_KAFKA_PRODUCER, conf, NULL, 0);
+        if (!rk)
+                RD_UT_FAIL("Failed to create producer");
+
+        /* Create two topics with different acks settings */
+        tconf1 = rd_kafka_topic_conf_new();
+        rd_kafka_topic_conf_set(tconf1, "request.required.acks", "1", NULL, 0);
+        rkt1 = rd_kafka_topic_new(rk, "topic1", tconf1);
+        rktp1 = rd_kafka_toppar_new(rkt1, 0);
+
+        tconf2 = rd_kafka_topic_conf_new();
+        rd_kafka_topic_conf_set(tconf2, "request.required.acks", "-1", NULL, 0);
+        rkt2 = rd_kafka_topic_new(rk, "topic2", tconf2);
+        rktp2 = rd_kafka_toppar_new(rkt2, 0);
+
+        /* Initialize calculator */
+        memset(&rkpca, 0, sizeof(rkpca));
+        rkpca.rkpca_produce_header_size = 100;
+        rkpca.rkpca_topic_header_size = 50;
+        rkpca.rkpca_partition_header_size = 100;
+        rkpca.rkpca_message_set_header_size = 50;
+        rkpca.rkpca_message_overhead = 30;
+
+        /* Add first partition with acks=1 */
+        rktp1->rktp_xmit_msgq.rkmq_msg_cnt   = 10;
+        rktp1->rktp_xmit_msgq.rkmq_msg_bytes = 2560;
+        result = rd_kafka_produce_calculator_add(&rkpca, rktp1);
+        RD_UT_ASSERT(result == 1, "First partition should be added, got %d", result);
+
+        /* Try to add second partition with different acks=-1 (should fail) */
+        rktp2->rktp_xmit_msgq.rkmq_msg_cnt   = 10;
+        rktp2->rktp_xmit_msgq.rkmq_msg_bytes = 2560;
+        result = rd_kafka_produce_calculator_add(&rkpca, rktp2);
+        RD_UT_ASSERT(result == 0,
+                     "Should reject partition with different acks config, got %d", result);
+
+        /* Cleanup - reset fake queue counts */
+        rktp1->rktp_xmit_msgq.rkmq_msg_cnt = 0;
+        rktp1->rktp_xmit_msgq.rkmq_msg_bytes = 0;
+        rktp2->rktp_xmit_msgq.rkmq_msg_cnt = 0;
+        rktp2->rktp_xmit_msgq.rkmq_msg_bytes = 0;
+        rd_kafka_toppar_destroy(rktp1);
+        rd_kafka_toppar_destroy(rktp2);
+        rd_kafka_topic_destroy(rkt1);
+        rd_kafka_topic_destroy(rkt2);
+        rd_kafka_destroy(rk);
+
+        RD_UT_PASS();
+}
+
+/**
+ * @brief Test: Batch count calculation with batch.num.messages
+ */
+static int unittest_msgset_writer_batch_count(void) {
+        rd_kafka_conf_t *conf;
+        rd_kafka_t *rk;
+        rd_kafka_topic_t *rkt;
+        rd_kafka_toppar_t *rktp;
+        rd_kafka_produce_calculator_t rkpca;
+        int result;
+
+        RD_UT_BEGIN();
+
+        /* Create producer with batch.num.messages limit */
+        conf = rd_kafka_conf_new();
+        rd_kafka_conf_set(conf, "client.id", "unittest", NULL, 0);
+        rd_kafka_conf_set(conf, "batch.num.messages", "100", NULL, 0);
+        rd_kafka_conf_set(conf, "message.max.bytes", "1000000", NULL, 0);
+        rk = rd_kafka_new(RD_KAFKA_PRODUCER, conf, NULL, 0);
+        if (!rk)
+                RD_UT_FAIL("Failed to create producer");
+
+        RD_UT_ASSERT(rk->rk_conf.batch_num_messages == 100,
+                     "batch.num.messages should be 100, got %d",
+                     rk->rk_conf.batch_num_messages);
+
+        /* Create topic and partition */
+        rkt = rd_kafka_topic_new(rk, "test_topic", NULL);
+        rktp = rd_kafka_toppar_new(rkt, 0);
+
+        /* Initialize calculator */
+        memset(&rkpca, 0, sizeof(rkpca));
+        rkpca.rkpca_produce_header_size = 100;
+        rkpca.rkpca_topic_header_size = 50;
+        rkpca.rkpca_partition_header_size = 100;
+        rkpca.rkpca_message_set_header_size = 50;
+        rkpca.rkpca_message_overhead = 30;
+
+        /* Simulate 250 messages (should create 3 batches: 100+100+50) */
+        rktp->rktp_xmit_msgq.rkmq_msg_cnt   = 250;
+        rktp->rktp_xmit_msgq.rkmq_msg_bytes = 64000;
+        result = rd_kafka_produce_calculator_add(&rkpca, rktp);
+
+        RD_UT_ASSERT(result == 1, "Should add partition with 250 messages, got %d", result);
+        /* Calculator should account for batching */
+        RD_UT_ASSERT(rkpca.rkpca_partition_cnt >= 1,
+                     "Should track partition, got %d", rkpca.rkpca_partition_cnt);
+
+        /* Cleanup - reset fake queue counts */
+        rktp->rktp_xmit_msgq.rkmq_msg_cnt = 0;
+        rktp->rktp_xmit_msgq.rkmq_msg_bytes = 0;
+        rd_kafka_toppar_destroy(rktp);
+        rd_kafka_topic_destroy(rkt);
+        rd_kafka_destroy(rk);
+
+        RD_UT_PASS();
+}
+
+/**
+ * @brief Test: Adding partitions accumulates message counts
+ */
+static int unittest_msgset_writer_accumulation(void) {
+        rd_kafka_conf_t *conf;
+        rd_kafka_t *rk;
+        rd_kafka_topic_t *rkt;
+        rd_kafka_toppar_t *rktp;
+        rd_kafka_produce_calculator_t rkpca;
+        int result;
+
+        RD_UT_BEGIN();
+
+        /* Create producer */
+        conf = rd_kafka_conf_new();
+        rd_kafka_conf_set(conf, "client.id", "unittest", NULL, 0);
+        rd_kafka_conf_set(conf, "message.max.bytes", "10000000", NULL, 0);
+        rk = rd_kafka_new(RD_KAFKA_PRODUCER, conf, NULL, 0);
+        if (!rk)
+                RD_UT_FAIL("Failed to create producer");
+
+        /* Create topic and partition */
+        rkt = rd_kafka_topic_new(rk, "test_topic", NULL);
+        rktp = rd_kafka_toppar_new(rkt, 0);
+
+        /* Initialize calculator */
+        memset(&rkpca, 0, sizeof(rkpca));
+        rkpca.rkpca_produce_header_size = 100;
+        rkpca.rkpca_topic_header_size = 50;
+        rkpca.rkpca_partition_header_size = 100;
+        rkpca.rkpca_message_set_header_size = 50;
+        rkpca.rkpca_message_overhead = 30;
+
+        /* Add first partition with 50 messages */
+        rktp->rktp_xmit_msgq.rkmq_msg_cnt   = 50;
+        rktp->rktp_xmit_msgq.rkmq_msg_bytes = 12800;
+        result = rd_kafka_produce_calculator_add(&rkpca, rktp);
+        RD_UT_ASSERT(result == 1, "First partition should be added");
+
+        int first_msg_cnt = rkpca.rkpca_message_cnt;
+        size_t first_msg_size = rkpca.rkpca_message_size;
+
+        /* Add second partition with 30 messages */
+        rktp->rktp_xmit_msgq.rkmq_msg_cnt   = 30;
+        rktp->rktp_xmit_msgq.rkmq_msg_bytes = 7680;
+        result = rd_kafka_produce_calculator_add(&rkpca, rktp);
+        RD_UT_ASSERT(result == 1, "Second partition should be added");
+
+        /* Verify accumulation */
+        RD_UT_ASSERT(rkpca.rkpca_partition_cnt >= 2,
+                     "Should have 2+ partitions, got %d", rkpca.rkpca_partition_cnt);
+        RD_UT_ASSERT(rkpca.rkpca_message_cnt > first_msg_cnt,
+                     "Message count should accumulate: %d > %d",
+                     rkpca.rkpca_message_cnt, first_msg_cnt);
+        RD_UT_ASSERT(rkpca.rkpca_message_size > first_msg_size,
+                     "Message size should accumulate: %zu > %zu",
+                     rkpca.rkpca_message_size, first_msg_size);
+
+        /* Cleanup - reset fake queue counts */
+        rktp->rktp_xmit_msgq.rkmq_msg_cnt = 0;
+        rktp->rktp_xmit_msgq.rkmq_msg_bytes = 0;
+        rd_kafka_toppar_destroy(rktp);
+        rd_kafka_topic_destroy(rkt);
+        rd_kafka_destroy(rk);
+
+        RD_UT_PASS();
+}
+
+/**
+ * @brief Test: Exactly at partition limit boundary
+ */
+static int unittest_msgset_writer_exact_limit(void) {
+        rd_kafka_conf_t *conf;
+        rd_kafka_t *rk;
+        rd_kafka_topic_t *rkt;
+        rd_kafka_toppar_t *rktp;
+        rd_kafka_produce_calculator_t rkpca;
+        int result;
+
+        RD_UT_BEGIN();
+
+        /* Create producer with partition limit=1 */
+        conf = rd_kafka_conf_new();
+        rd_kafka_conf_set(conf, "client.id", "unittest", NULL, 0);
+        rd_kafka_conf_set(conf, "produce.request.max.partitions", "1", NULL, 0);
+        rk = rd_kafka_new(RD_KAFKA_PRODUCER, conf, NULL, 0);
+        if (!rk)
+                RD_UT_FAIL("Failed to create producer");
+
+        /* Create topic and partition */
+        rkt = rd_kafka_topic_new(rk, "test_topic", NULL);
+        rktp = rd_kafka_toppar_new(rkt, 0);
+
+        /* Initialize calculator */
+        memset(&rkpca, 0, sizeof(rkpca));
+        rkpca.rkpca_produce_header_size = 100;
+        rkpca.rkpca_topic_header_size = 50;
+        rkpca.rkpca_partition_header_size = 100;
+        rkpca.rkpca_message_set_header_size = 50;
+        rkpca.rkpca_message_overhead = 30;
+
+        /* Simulate small partition */
+        rktp->rktp_xmit_msgq.rkmq_msg_cnt   = 10;
+        rktp->rktp_xmit_msgq.rkmq_msg_bytes = 2560;
+
+        /* First add should succeed (count=0, limit=1, check is count > limit) */
+        result = rd_kafka_produce_calculator_add(&rkpca, rktp);
+        RD_UT_ASSERT(result == 1, "First partition should be added (0 < 1)");
+
+        /* Second add should succeed (count=1, limit=1, 1 is not > 1) */
+        result = rd_kafka_produce_calculator_add(&rkpca, rktp);
+        RD_UT_ASSERT(result == 1, "Second partition should be added (1 not > 1)");
+
+        /* Third add should fail (count=2, limit=1, 2 > 1) */
+        result = rd_kafka_produce_calculator_add(&rkpca, rktp);
+        RD_UT_ASSERT(result == 0, "Third partition should be rejected (2 > 1), got %d", result);
+
+        /* Cleanup - reset fake queue counts */
+        rktp->rktp_xmit_msgq.rkmq_msg_cnt = 0;
+        rktp->rktp_xmit_msgq.rkmq_msg_bytes = 0;
+        rd_kafka_toppar_destroy(rktp);
+        rd_kafka_topic_destroy(rkt);
+        rd_kafka_destroy(rk);
+
+        RD_UT_PASS();
+}
+
+/**
+ * @brief Unit tests for msgset writer - main entry point
+ */
+int unittest_msgset_writer(void) {
+        int fails = 0;
+
+        fails += unittest_msgset_writer_config_values();
+        fails += unittest_msgset_writer_empty_partition();
+        fails += unittest_msgset_writer_add_partition();
+        fails += unittest_msgset_writer_partition_limit();
+        fails += unittest_msgset_writer_multiple_partitions();
+        fails += unittest_msgset_writer_config_mismatch();
+        fails += unittest_msgset_writer_accumulation();
+        fails += unittest_msgset_writer_exact_limit();
+
+        return fails;
 }
