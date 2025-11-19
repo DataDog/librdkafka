@@ -129,17 +129,8 @@ rd_kafka_broker_produce_batch_append(produce_batch_t *batch,
         if (unlikely(!batch->batch_initialized))
                 return 0;
 
-        fprintf(stderr, "[BATCH] batch_append: rktp=%p topic=%s partition=%d\n",
-                (void*)rktp, rktp->rktp_rkt->rkt_topic->str, rktp->rktp_partition);
-        fflush(stderr);
-        fprintf(stderr, "[BATCH] batch_append: about to insert TAILQ\n");
-        fflush(stderr);
         TAILQ_INSERT_TAIL(&batch->batch_toppars, rktp, rktp_batch_link);
-        fprintf(stderr, "[BATCH] batch_append: about to call calculator_add\n");
-        fflush(stderr);
         result = rd_kafka_produce_calculator_add(&batch->batch_calculator, rktp);
-        fprintf(stderr, "[BATCH] batch_append: calculator_add returned %d\n", result);
-        fflush(stderr);
         return result;
 }
 
@@ -149,20 +140,15 @@ rd_kafka_broker_produce_batch_send(produce_batch_t *batch,
         rd_kafka_toppar_t *rktp;
         rd_kafka_produce_ctx_t ctx;
 
-        fprintf(stderr, "[BATCH] batch_send: called\n");
 
         if (unlikely(!batch->batch_initialized)) {
-                fprintf(stderr, "[BATCH] batch_send: batch not initialized\n");
                 return 0;
         }
 
         if (unlikely(TAILQ_FIRST(&batch->batch_toppars) == NULL)) {
-                fprintf(stderr, "[BATCH] batch_send: no toppars in batch\n");
                 return 0;
         }
 
-        fprintf(stderr, "[BATCH] batch_send: about to call ProduceRequest_init\n");
-        fflush(stderr);
         if (unlikely(!rd_kafka_ProduceRequest_init(
                         &ctx, rkb,
                         rkb->rkb_produce_pid,
@@ -172,24 +158,14 @@ rd_kafka_broker_produce_batch_send(produce_batch_t *batch,
                         batch->batch_calculator.rkpca_message_size,
                         batch->batch_calculator.rkpca_request_required_acks,
                         batch->batch_calculator.rkpca_request_timeout_ms))) {
-                fprintf(stderr, "[BATCH] batch_send: ProduceRequest_init FAILED\n");
-                fflush(stderr);
                 return 0;
         }
 
-        fprintf(stderr, "[BATCH] batch_send: ProduceRequest_init succeeded, appending toppars\n");
-        fflush(stderr);
-
         TAILQ_FOREACH(rktp, &batch->batch_toppars, rktp_batch_link) {
-                fprintf(stderr, "[BATCH] batch_send: appending toppar %s[%d]\n",
-                        rktp->rktp_rkt->rkt_topic->str, rktp->rktp_partition);
-                fflush(stderr);
                 if (unlikely(!rd_kafka_ProduceRequest_append(&ctx, rktp)))
                         break;
         }
 
-        fprintf(stderr, "[BATCH] batch_send: calling ProduceRequest_finalize\n");
-        fflush(stderr);
         return rd_kafka_ProduceRequest_finalize(&ctx);
 }
 
@@ -4238,7 +4214,6 @@ static int rd_kafka_broker_produce_toppars(rd_kafka_broker_t *rkb,
                 if (rd_kafka_toppar_producer_serve(rkb, rktp, pid, now, &this_next_wakeup, do_timeout_scan, may_send, flushing)) {
                         total_msg_cnt += rd_kafka_msgq_len(&rktp->rktp_xmit_msgq);
 
-                        fprintf(stderr, "[BATCH] toppar_producer_serve returned 1, total_msg_cnt=%d\n", total_msg_cnt);
 
                         /* More than one message set cannot currently be added
                         * to a single request since there will not be enough
@@ -4248,7 +4223,6 @@ static int rd_kafka_broker_produce_toppars(rd_kafka_broker_t *rkb,
                         * for the same toppar if messages remain.
                         */
                        while(rd_kafka_broker_produce_batch_try_init(&batch, rkb)) {
-                        fprintf(stderr, "[BATCH] batch_try_init succeeded, attempting append\n");
                         if (rd_kafka_broker_produce_batch_append(&batch, rktp))
                                 break;
                         

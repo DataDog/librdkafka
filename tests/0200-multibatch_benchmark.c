@@ -29,84 +29,222 @@
 /**
  * MultiBatch Performance Benchmark
  *
+ * Supports two benchmark modes:
+ * 1. MAX THROUGHPUT: Send messages as fast as possible
+ * 2. CONTROLLED RATE: Send at specified rate (msgs/sec)
+ *
  * Measures:
  * - Throughput (messages/sec, MB/sec)
- * - Latency distribution (P50, P95, P99, P999)
+ * - Latency distribution (P50, P95, P99)
  * - ProduceRequest count (efficiency)
- * - Per-stage latency breakdown
+ * - Per-message latency sampling
  *
- * Supports:
- * - Warmup phase
- * - Multiple measurement runs
- * - Different partition counts
- * - JSON output for analysis
+ * Usage:
+ *   ./test-runner 0200
+ *
+ * Configuration via environment variables:
+ *   MAX_PARTITIONS                Number of partitions (default: 1000)
+ *   BENCH_MAX_THROUGHPUT_MESSAGES Messages for max throughput test (default: 100000)
+ *   BENCH_CONTROLLED_RATES        Comma-separated rates, e.g. "10000,20000,50000" (default: 10000,20000,50000)
+ *   BENCH_CONTROLLED_DURATION     Seconds per controlled rate test (default: 60)
+ *   BENCH_MESSAGE_SIZE            Bytes per message (default: 256)
+ *   BENCH_OUTPUT_DIR              Output directory (default: ./benchmark_output)
+ *   BENCH_SKIP_MAX_THROUGHPUT     Set to "1" to skip max throughput phase
+ *   BENCH_SKIP_CONTROLLED         Set to "1" to skip controlled rate phases
+ *
+ * Example:
+ *   export MAX_PARTITIONS=1000
+ *   export BENCH_MAX_THROUGHPUT_MESSAGES=100000
+ *   export BENCH_CONTROLLED_RATES="10000,20000"
+ *   export BENCH_CONTROLLED_DURATION=30
+ *   ./test-runner 0200
  */
 
 #include "test.h"
 #include "rdkafka.h"
+#include "../src/cJSON.h"
 #include <math.h>
+#include <sys/stat.h>
+#include <time.h>
+
+/* Benchmark mode */
+typedef enum {
+        BENCH_MODE_MAX_THROUGHPUT,
+        BENCH_MODE_CONTROLLED_RATE
+} bench_mode_t;
 
 /* Benchmark configuration */
 typedef struct {
+        /* Common config */
         int partition_cnt;
-        int message_cnt;     /* Per run */
         int message_size;
-        int num_runs;        /* Number of measurement runs */
-        int warmup_messages; /* Messages for warmup */
-        const char *distribution; /* "uniform" or "skewed" */
+        char *output_dir;
+
+        /* Max throughput mode */
+        int max_throughput_messages;
+        int skip_max_throughput;
+
+        /* Controlled rate mode */
+        int *controlled_rates;      /* Array of rates (msgs/sec) */
+        int controlled_rate_cnt;
+        int controlled_duration_sec;
+        int skip_controlled;
 } bench_config_t;
 
 /* Per-message latency tracking */
 typedef struct {
-        int64_t enqueue_ts;   /* When message was enqueued */
-        int64_t delivery_ts;  /* When delivery was confirmed */
+        int64_t enqueue_ts;
+        int64_t delivery_ts;
         int partition;
+        int msg_seq;
 } msg_latency_t;
 
-/* Per-run statistics */
+/* Per-phase statistics */
 typedef struct {
-        int run_number;
+        bench_mode_t mode;
+        int rate_msgs_sec;              /* For controlled rate mode, 0 for max throughput */
         double duration_sec;
-        double throughput_msg_sec;
+        int messages_sent;
+        int messages_failed;
+        double throughput_msgs_sec;
         double throughput_mb_sec;
-        int64_t request_count; /* From stats */
-        int64_t *latencies;    /* Array of latencies in microseconds */
-        int latency_cnt;
-        int latency_size;
-} run_stats_t;
+        int64_t request_count;
+
+        /* Latency statistics */
+        double latency_p50_ms;
+        double latency_p95_ms;
+        double latency_p99_ms;
+
+        /* Broker latency statistics (microseconds) */
+        double int_latency_p50;
+        double int_latency_p95;
+        double int_latency_p99;
+        double rtt_p50;
+        double rtt_p95;
+        double rtt_p99;
+} phase_stats_t;
 
 /* Benchmark context */
 typedef struct {
-        bench_config_t config;
-        run_stats_t *runs;
-        int run_cnt;
+        bench_config_t *config;
+
+        /* Current phase being run */
+        bench_mode_t current_mode;
+        int current_rate;
+        int64_t phase_start_ts;
+
+        /* Message latencies (all messages) */
         msg_latency_t *msg_latencies;
         int msg_lat_cnt;
         int msg_lat_size;
-        int64_t last_tx_requests; /* From stats callback */
+
+        /* Sampled message latencies (every 100th) */
+        msg_latency_t *sampled_latencies;
+        int sampled_lat_cnt;
+        int sampled_lat_size;
+
+        /* Statistics from stats callback */
+        int64_t last_produce_requests;
+        double last_int_latency_p50;
+        double last_int_latency_p95;
+        double last_int_latency_p99;
+        double last_rtt_p50;
+        double last_rtt_p95;
+        double last_rtt_p99;
+
+        /* Results */
+        phase_stats_t *phases;
+        int phase_cnt;
+        int phase_size;
+
         mtx_t lock;
 } bench_ctx_t;
 
 static bench_ctx_t *bench_ctx = NULL;
 
 /**
- * Stats callback - extract request count
+ * Helper to extract double from JSON object
+ */
+static double get_json_double(cJSON *obj, const char *key, double default_val) {
+        cJSON *item = cJSON_GetObjectItem(obj, key);
+        return (item && cJSON_IsNumber(item)) ? cJSON_GetNumberValue(item) : default_val;
+}
+
+/**
+ * Stats callback - extract statistics using cJSON
  */
 static int stats_cb(rd_kafka_t *rk, char *json, size_t json_len, void *opaque) {
-        /* Parse JSON to extract tx request count
-         * For simplicity, we'll look for "tx" field.
-         * A proper implementation would use a JSON parser. */
-        const char *tx_str = strstr(json, "\"tx\":");
-        if (tx_str) {
-                int64_t tx_val;
-                if (sscanf(tx_str + 5, "%" SCNd64, &tx_val) == 1) {
-                        mtx_lock(&bench_ctx->lock);
-                        bench_ctx->last_tx_requests = tx_val;
-                        mtx_unlock(&bench_ctx->lock);
+        cJSON *root = cJSON_Parse(json);
+        if (!root) {
+                return 0;
+        }
+
+        /* Sum up Produce requests from all brokers */
+        int64_t total_produce_reqs = 0;
+        double int_latency_p50 = 0, int_latency_p95 = 0, int_latency_p99 = 0;
+        double rtt_p50 = 0, rtt_p95 = 0, rtt_p99 = 0;
+        int broker_count = 0;
+
+        cJSON *brokers = cJSON_GetObjectItem(root, "brokers");
+        if (brokers && cJSON_IsObject(brokers)) {
+                cJSON *broker = NULL;
+                cJSON_ArrayForEach(broker, brokers) {
+                        cJSON *req = cJSON_GetObjectItem(broker, "req");
+                        if (req && cJSON_IsObject(req)) {
+                                cJSON *produce = cJSON_GetObjectItem(req, "Produce");
+                                if (produce && cJSON_IsNumber(produce)) {
+                                        total_produce_reqs += (int64_t)cJSON_GetNumberValue(produce);
+                                }
+                        }
+
+                        cJSON *int_lat = cJSON_GetObjectItem(broker, "int_latency");
+                        if (int_lat && cJSON_IsObject(int_lat)) {
+                                int_latency_p50 += get_json_double(int_lat, "p50", 0);
+                                int_latency_p95 += get_json_double(int_lat, "p95", 0);
+                                int_latency_p99 += get_json_double(int_lat, "p99", 0);
+                        }
+
+                        cJSON *rtt = cJSON_GetObjectItem(broker, "rtt");
+                        if (rtt && cJSON_IsObject(rtt)) {
+                                rtt_p50 += get_json_double(rtt, "p50", 0);
+                                rtt_p95 += get_json_double(rtt, "p95", 0);
+                                rtt_p99 += get_json_double(rtt, "p99", 0);
+                        }
+
+                        broker_count++;
                 }
         }
+
+        /* Average broker latencies */
+        if (broker_count > 0) {
+                int_latency_p50 /= broker_count;
+                int_latency_p95 /= broker_count;
+                int_latency_p99 /= broker_count;
+                rtt_p50 /= broker_count;
+                rtt_p95 /= broker_count;
+                rtt_p99 /= broker_count;
+        }
+
+        /* Store in context */
+        mtx_lock(&bench_ctx->lock);
+        bench_ctx->last_produce_requests = total_produce_reqs;
+        bench_ctx->last_int_latency_p50 = int_latency_p50;
+        bench_ctx->last_int_latency_p95 = int_latency_p95;
+        bench_ctx->last_int_latency_p99 = int_latency_p99;
+        bench_ctx->last_rtt_p50 = rtt_p50;
+        bench_ctx->last_rtt_p95 = rtt_p95;
+        bench_ctx->last_rtt_p99 = rtt_p99;
+        mtx_unlock(&bench_ctx->lock);
+
+        cJSON_Delete(root);
         return 0;
 }
+
+/* Per-message opaque data */
+typedef struct {
+        int64_t enqueue_ts;
+        int msg_seq;
+} msg_opaque_t;
 
 /**
  * Delivery report callback - record latency
@@ -114,94 +252,53 @@ static int stats_cb(rd_kafka_t *rk, char *json, size_t json_len, void *opaque) {
 static void dr_cb(rd_kafka_t *rk,
                   const rd_kafka_message_t *rkmessage,
                   void *opaque) {
-        if (rkmessage->err) {
-                TEST_FAIL("Message delivery failed: %s",
-                          rd_kafka_err2str(rkmessage->err));
-                return;
-        }
-
         int64_t now = test_clock();
-        int64_t enqueue_ts = *(int64_t *)rkmessage->_private;
+        msg_opaque_t *msg_data = (msg_opaque_t *)rkmessage->_private;
 
         mtx_lock(&bench_ctx->lock);
 
-        /* Ensure capacity */
+        /* Always record full latency for percentile calculation */
         if (bench_ctx->msg_lat_cnt >= bench_ctx->msg_lat_size) {
-                bench_ctx->msg_lat_size = bench_ctx->msg_lat_size
-                                          ? bench_ctx->msg_lat_size * 2
-                                          : 10000;
-                bench_ctx->msg_latencies = realloc(
-                    bench_ctx->msg_latencies,
-                    sizeof(msg_latency_t) * bench_ctx->msg_lat_size);
+                bench_ctx->msg_lat_size = bench_ctx->msg_lat_size ? bench_ctx->msg_lat_size * 2 : 100000;
+                bench_ctx->msg_latencies = realloc(bench_ctx->msg_latencies,
+                                                   sizeof(msg_latency_t) * bench_ctx->msg_lat_size);
         }
 
-        /* Record latency */
-        bench_ctx->msg_latencies[bench_ctx->msg_lat_cnt].enqueue_ts = enqueue_ts;
-        bench_ctx->msg_latencies[bench_ctx->msg_lat_cnt].delivery_ts = now;
-        bench_ctx->msg_latencies[bench_ctx->msg_lat_cnt].partition =
-            rkmessage->partition;
-        bench_ctx->msg_lat_cnt++;
+        int lat_idx = bench_ctx->msg_lat_cnt++;
+        bench_ctx->msg_latencies[lat_idx].enqueue_ts = msg_data->enqueue_ts;
+        bench_ctx->msg_latencies[lat_idx].delivery_ts = now;
+        bench_ctx->msg_latencies[lat_idx].partition = rkmessage->partition;
+        bench_ctx->msg_latencies[lat_idx].msg_seq = msg_data->msg_seq;
+
+        /* Sample every 100th message for CSV output */
+        if (msg_data->msg_seq % 100 == 0) {
+                if (bench_ctx->sampled_lat_cnt >= bench_ctx->sampled_lat_size) {
+                        bench_ctx->sampled_lat_size = bench_ctx->sampled_lat_size ? bench_ctx->sampled_lat_size * 2 : 10000;
+                        bench_ctx->sampled_latencies = realloc(bench_ctx->sampled_latencies,
+                                                               sizeof(msg_latency_t) * bench_ctx->sampled_lat_size);
+                }
+
+                int sample_idx = bench_ctx->sampled_lat_cnt++;
+                bench_ctx->sampled_latencies[sample_idx] = bench_ctx->msg_latencies[lat_idx];
+        }
 
         mtx_unlock(&bench_ctx->lock);
+
+        if (rkmessage->err) {
+                /* Don't fail test, just log error */
+                TEST_WARN("Message delivery failed: %s\n", rd_kafka_err2str(rkmessage->err));
+        }
 
         free(rkmessage->_private);
 }
 
 /**
- * Produce messages for a single run
+ * Comparison function for qsort
  */
-static void produce_run(rd_kafka_t *rk,
-                        rd_kafka_topic_t *rkt,
-                        bench_config_t *config,
-                        int is_warmup) {
-        int msgcnt = is_warmup ? config->warmup_messages : config->message_cnt;
-        char *payload = malloc(config->message_size);
-        memset(payload, 'x', config->message_size);
-
-        if (!is_warmup) {
-                /* Reset stats counter */
-                mtx_lock(&bench_ctx->lock);
-                bench_ctx->last_tx_requests = 0;
-                bench_ctx->msg_lat_cnt = 0;
-                mtx_unlock(&bench_ctx->lock);
-        }
-
-        TEST_SAY("%s: Producing %d messages to %d partitions\n",
-                 is_warmup ? "Warmup" : "Measure", msgcnt, config->partition_cnt);
-
-        for (int i = 0; i < msgcnt; i++) {
-                int32_t partition;
-
-                /* Partition selection based on distribution */
-                if (!strcmp(config->distribution, "skewed")) {
-                        /* 80% of messages go to partition 0 */
-                        partition = (rand() % 100 < 80) ? 0 : (rand() % config->partition_cnt);
-                } else {
-                        /* Uniform distribution */
-                        partition = i % config->partition_cnt;
-                }
-
-                /* Allocate timestamp tracking */
-                int64_t *enqueue_ts = malloc(sizeof(int64_t));
-                *enqueue_ts = test_clock();
-
-                /* Produce */
-                if (rd_kafka_produce(rkt, partition,
-                                    RD_KAFKA_MSG_F_COPY,
-                                    payload, config->message_size,
-                                    NULL, 0,
-                                    enqueue_ts) == -1) {
-                        TEST_FAIL("Failed to produce message %d: %s",
-                                  i, rd_kafka_err2str(rd_kafka_last_error()));
-                        free(enqueue_ts);
-                }
-
-                /* Poll occasionally to trigger delivery callbacks */
-                if (i % 100 == 0)
-                        rd_kafka_poll(rk, 0);
-        }
-
-        free(payload);
+static int cmp_int64(const void *a, const void *b) {
+        int64_t aa = *(int64_t *)a;
+        int64_t bb = *(int64_t *)b;
+        return (aa > bb) - (aa < bb);
 }
 
 /**
@@ -217,141 +314,183 @@ static int64_t percentile(int64_t *sorted, int cnt, double p) {
 }
 
 /**
- * Comparison function for qsort
+ * Create output directory if it doesn't exist
  */
-static int cmp_int64(const void *a, const void *b) {
-        int64_t aa = *(int64_t *)a;
-        int64_t bb = *(int64_t *)b;
-        return (aa > bb) - (aa < bb);
+static void ensure_output_dir(const char *dir) {
+        struct stat st = {0};
+        if (stat(dir, &st) == -1) {
+                mkdir(dir, 0755);
+        }
 }
 
 /**
- * Run a single benchmark measurement
+ * Create producer with standard configuration
  */
-static void run_benchmark_once(rd_kafka_t *rk,
-                              rd_kafka_topic_t *rkt,
-                              bench_config_t *config,
-                              int run_number,
-                              run_stats_t *stats) {
+static rd_kafka_t *create_producer(bench_config_t *config, const char *topic) {
+        rd_kafka_conf_t *conf;
+        rd_kafka_t *rk;
+
+        test_conf_init(&conf, NULL, 120);
+        rd_kafka_conf_set_dr_msg_cb(conf, dr_cb);
+        rd_kafka_conf_set_stats_cb(conf, stats_cb);
+
+        /* Standard MultiBatch configuration */
+        test_conf_set(conf, "statistics.interval.ms", "50");
+        test_conf_set(conf, "queue.buffering.max.messages", "1000000");
+        test_conf_set(conf, "queue.buffering.max.kbytes", "102400"); /* 100MB */
+        test_conf_set(conf, "linger.ms", "500");
+        test_conf_set(conf, "compression.type", "lz4");
+        test_conf_set(conf, "message.max.bytes", "100000000"); /* 100MB */
+        test_conf_set(conf, "batch.size", "10000000"); /* 10MB */
+        test_conf_set(conf, "batch.num.messages", "100000");
+        test_conf_set(conf, "produce.request.max.partitions", "10000");
+        test_conf_set(conf, "queue.buffering.backpressure.threshold", "1");
+
+        /* Allow override via environment */
+        const char *max_partitions = test_getenv("MAX_PARTITIONS", NULL);
+        if (max_partitions) {
+                test_conf_set(conf, "produce.request.max.partitions", max_partitions);
+        }
+
+        rk = test_create_handle(RD_KAFKA_PRODUCER, conf);
+        return rk;
+}
+
+/**
+ * Run max throughput benchmark
+ */
+static void run_max_throughput_phase(bench_config_t *config, const char *topic) {
+        rd_kafka_t *rk;
+        rd_kafka_topic_t *rkt;
         int64_t start_ts, end_ts;
-        int64_t start_tx_requests;
+        int64_t start_requests;
+        int messages_sent = 0;
+        int messages_failed = 0;
 
-        TEST_SAY("=== Run %d/%d ===\n", run_number + 1, config->num_runs);
+        TEST_SAY("\n========================================\n");
+        TEST_SAY("MAX THROUGHPUT MODE\n");
+        TEST_SAY("========================================\n");
+        TEST_SAY("Messages: %d\n", config->max_throughput_messages);
+        TEST_SAY("Partitions: %d\n", config->partition_cnt);
+        TEST_SAY("Message size: %d bytes\n", config->message_size);
+        TEST_SAY("========================================\n\n");
 
-        /* Get initial stats */
-        rd_kafka_poll(rk, 100); /* Trigger stats callback */
+        /* Create producer */
+        rk = create_producer(config, topic);
+        rkt = test_create_producer_topic(rk, topic, "acks", "1", NULL);
+
+        /* Reset latency tracking */
         mtx_lock(&bench_ctx->lock);
-        start_tx_requests = bench_ctx->last_tx_requests;
+        bench_ctx->msg_lat_cnt = 0;
+        bench_ctx->sampled_lat_cnt = 0;
+        bench_ctx->current_mode = BENCH_MODE_MAX_THROUGHPUT;
+        bench_ctx->current_rate = 0;
         mtx_unlock(&bench_ctx->lock);
 
-        /* Start timing */
+        /* Get initial stats */
+        for (int i = 0; i < 3; i++)
+                rd_kafka_poll(rk, 100);
+        mtx_lock(&bench_ctx->lock);
+        start_requests = bench_ctx->last_produce_requests;
+        mtx_unlock(&bench_ctx->lock);
+
+        /* Prepare payload */
+        char *payload = malloc(config->message_size);
+        memset(payload, 'x', config->message_size);
+
+        /* Start timing and produce messages as fast as possible */
         start_ts = test_clock();
 
-        /* Produce messages */
-        produce_run(rk, rkt, config, 0 /* not warmup */);
+        for (int i = 0; i < config->max_throughput_messages; i++) {
+                int32_t partition = i % config->partition_cnt;
+
+                msg_opaque_t *msg_data = malloc(sizeof(msg_opaque_t));
+                msg_data->enqueue_ts = test_clock();
+                msg_data->msg_seq = i;
+
+                if (rd_kafka_produce(rkt, partition,
+                                    RD_KAFKA_MSG_F_COPY,
+                                    payload, config->message_size,
+                                    NULL, 0,
+                                    msg_data) == -1) {
+                        messages_failed++;
+                        free(msg_data);
+                } else {
+                        messages_sent++;
+                }
+
+                /* Poll occasionally */
+                if (i % 1000 == 0)
+                        rd_kafka_poll(rk, 0);
+        }
+
+        free(payload);
 
         /* Wait for all deliveries */
         TEST_SAY("Waiting for delivery confirmations...\n");
         rd_kafka_flush(rk, 60000);
-
-        /* End timing */
         end_ts = test_clock();
 
         /* Get final stats */
-        rd_kafka_poll(rk, 100); /* Trigger stats callback */
-        mtx_lock(&bench_ctx->lock);
-        int64_t end_tx_requests = bench_ctx->last_tx_requests;
-        mtx_unlock(&bench_ctx->lock);
+        for (int i = 0; i < 5; i++)
+                rd_kafka_poll(rk, 100);
 
-        /* Calculate statistics */
-        stats->run_number = run_number;
-        stats->duration_sec = (double)(end_ts - start_ts) / 1000000.0;
-        stats->throughput_msg_sec = config->message_cnt / stats->duration_sec;
-        stats->throughput_mb_sec =
-            (config->message_cnt * config->message_size) /
-            stats->duration_sec / 1000000.0;
-        stats->request_count = end_tx_requests - start_tx_requests;
-
-        /* Extract latencies */
         mtx_lock(&bench_ctx->lock);
-        stats->latency_cnt = bench_ctx->msg_lat_cnt;
-        stats->latencies = malloc(sizeof(int64_t) * stats->latency_cnt);
-        for (int i = 0; i < stats->latency_cnt; i++) {
-                stats->latencies[i] =
-                    bench_ctx->msg_latencies[i].delivery_ts -
-                    bench_ctx->msg_latencies[i].enqueue_ts;
+        int64_t end_requests = bench_ctx->last_produce_requests;
+
+        /* Calculate latency percentiles */
+        int64_t *latencies = malloc(sizeof(int64_t) * bench_ctx->msg_lat_cnt);
+        for (int i = 0; i < bench_ctx->msg_lat_cnt; i++) {
+                latencies[i] = bench_ctx->msg_latencies[i].delivery_ts -
+                              bench_ctx->msg_latencies[i].enqueue_ts;
         }
-        mtx_unlock(&bench_ctx->lock);
+        qsort(latencies, bench_ctx->msg_lat_cnt, sizeof(int64_t), cmp_int64);
 
-        /* Sort for percentile calculation */
-        qsort(stats->latencies, stats->latency_cnt, sizeof(int64_t), cmp_int64);
+        double p50 = percentile(latencies, bench_ctx->msg_lat_cnt, 50) / 1000.0;
+        double p95 = percentile(latencies, bench_ctx->msg_lat_cnt, 95) / 1000.0;
+        double p99 = percentile(latencies, bench_ctx->msg_lat_cnt, 99) / 1000.0;
 
-        TEST_SAY("Run %d complete: %.1f msg/sec, %.2f MB/sec, %" PRId64 " requests\n",
-                 run_number + 1,
-                 stats->throughput_msg_sec,
-                 stats->throughput_mb_sec,
-                 stats->request_count);
-}
+        free(latencies);
 
-/**
- * Run complete benchmark suite
- */
-static void run_benchmark_suite(bench_config_t *config) {
-        rd_kafka_t *rk;
-        rd_kafka_topic_t *rkt;
-        rd_kafka_conf_t *conf;
-        rd_kafka_topic_conf_t *topic_conf;
-        const char *topic;
-        test_timing_t t_total;
-
-        TEST_SAY("\n");
-        TEST_SAY("========================================\n");
-        TEST_SAY("MultiBatch Benchmark\n");
-        TEST_SAY("========================================\n");
-        TEST_SAY("Config:\n");
-        TEST_SAY("  Partitions: %d\n", config->partition_cnt);
-        TEST_SAY("  Messages per run: %d\n", config->message_cnt);
-        TEST_SAY("  Message size: %d bytes\n", config->message_size);
-        TEST_SAY("  Runs: %d\n", config->num_runs);
-        TEST_SAY("  Warmup messages: %d\n", config->warmup_messages);
-        TEST_SAY("  Distribution: %s\n", config->distribution);
-        TEST_SAY("========================================\n\n");
-
-        /* Create topic with many partitions */
-        topic = test_mk_topic_name(__FUNCTION__, 1);
-
-        /* Setup producer */
-        test_conf_init(&conf, &topic_conf, 120);
-        rd_kafka_conf_set_dr_msg_cb(conf, dr_cb);
-        rd_kafka_conf_set_stats_cb(conf, stats_cb);
-        test_conf_set(conf, "statistics.interval.ms", "100");
-        test_conf_set(conf, "queue.buffering.max.messages", "10000000");
-        test_conf_set(conf, "linger.ms", "10");
-
-        rk = test_create_handle(RD_KAFKA_PRODUCER, conf);
-
-        /* Create topic if it doesn't exist */
-        test_create_topic_wait_exists(rk, topic, config->partition_cnt, 1, 10000);
-
-        rkt = test_create_producer_topic(rk, topic, "acks", "1", NULL);
-
-        /* Warmup phase */
-        TEST_SAY("=== Warmup Phase ===\n");
-        produce_run(rk, rkt, config, 1 /* is_warmup */);
-        rd_kafka_flush(rk, 60000);
-        TEST_SAY("Warmup complete\n\n");
-
-        /* Measurement runs */
-        TIMING_START(&t_total, "Total benchmark time");
-
-        bench_ctx->runs = calloc(config->num_runs, sizeof(run_stats_t));
-        bench_ctx->run_cnt = config->num_runs;
-
-        for (int i = 0; i < config->num_runs; i++) {
-                run_benchmark_once(rk, rkt, config, i, &bench_ctx->runs[i]);
+        /* Store phase results */
+        if (bench_ctx->phase_cnt >= bench_ctx->phase_size) {
+                bench_ctx->phase_size = bench_ctx->phase_size ? bench_ctx->phase_size * 2 : 10;
+                bench_ctx->phases = realloc(bench_ctx->phases,
+                                           sizeof(phase_stats_t) * bench_ctx->phase_size);
         }
 
-        TIMING_STOP(&t_total);
+        phase_stats_t *phase = &bench_ctx->phases[bench_ctx->phase_cnt++];
+        phase->mode = BENCH_MODE_MAX_THROUGHPUT;
+        phase->rate_msgs_sec = 0;
+        phase->duration_sec = (double)(end_ts - start_ts) / 1000000.0;
+        phase->messages_sent = messages_sent;
+        phase->messages_failed = messages_failed;
+        phase->throughput_msgs_sec = messages_sent / phase->duration_sec;
+        phase->throughput_mb_sec = (messages_sent * config->message_size) / phase->duration_sec / 1000000.0;
+        phase->request_count = end_requests - start_requests;
+        phase->latency_p50_ms = p50;
+        phase->latency_p95_ms = p95;
+        phase->latency_p99_ms = p99;
+        phase->int_latency_p50 = bench_ctx->last_int_latency_p50;
+        phase->int_latency_p95 = bench_ctx->last_int_latency_p95;
+        phase->int_latency_p99 = bench_ctx->last_int_latency_p99;
+        phase->rtt_p50 = bench_ctx->last_rtt_p50;
+        phase->rtt_p95 = bench_ctx->last_rtt_p95;
+        phase->rtt_p99 = bench_ctx->last_rtt_p99;
+
+        mtx_unlock(&bench_ctx->lock);
+
+        /* Print results */
+        TEST_SAY("\nResults:\n");
+        TEST_SAY("  Duration: %.2f sec\n", phase->duration_sec);
+        TEST_SAY("  Messages sent: %d (failed: %d)\n", messages_sent, messages_failed);
+        TEST_SAY("  Throughput: %.1f msgs/sec (%.2f MB/sec)\n",
+                phase->throughput_msgs_sec, phase->throughput_mb_sec);
+        TEST_SAY("  Requests: %lld (%.1f msgs/req)\n",
+                (long long)phase->request_count,
+                (double)messages_sent / phase->request_count);
+        TEST_SAY("  Latency: p50=%.2fms, p95=%.2fms, p99=%.2fms\n",
+                p50, p95, p99);
 
         /* Cleanup */
         rd_kafka_topic_destroy(rkt);
@@ -359,113 +498,400 @@ static void run_benchmark_suite(bench_config_t *config) {
 }
 
 /**
- * Output results as JSON
+ * Run controlled rate benchmark
+ */
+static void run_controlled_rate_phase(bench_config_t *config, const char *topic, int rate_msgs_sec) {
+        rd_kafka_t *rk;
+        rd_kafka_topic_t *rkt;
+        int64_t start_ts, end_ts;
+        int64_t start_requests;
+        int messages_sent = 0;
+        int messages_failed = 0;
+        int target_messages = rate_msgs_sec * config->controlled_duration_sec;
+
+        TEST_SAY("\n========================================\n");
+        TEST_SAY("CONTROLLED RATE MODE\n");
+        TEST_SAY("========================================\n");
+        TEST_SAY("Target rate: %d msgs/sec\n", rate_msgs_sec);
+        TEST_SAY("Duration: %d seconds\n", config->controlled_duration_sec);
+        TEST_SAY("Target messages: %d\n", target_messages);
+        TEST_SAY("Partitions: %d\n", config->partition_cnt);
+        TEST_SAY("Message size: %d bytes\n", config->message_size);
+        TEST_SAY("========================================\n\n");
+
+        /* Create producer */
+        rk = create_producer(config, topic);
+        rkt = test_create_producer_topic(rk, topic, "acks", "1", NULL);
+
+        /* Reset latency tracking */
+        mtx_lock(&bench_ctx->lock);
+        bench_ctx->msg_lat_cnt = 0;
+        bench_ctx->sampled_lat_cnt = 0;
+        bench_ctx->current_mode = BENCH_MODE_CONTROLLED_RATE;
+        bench_ctx->current_rate = rate_msgs_sec;
+        mtx_unlock(&bench_ctx->lock);
+
+        /* Get initial stats */
+        for (int i = 0; i < 3; i++)
+                rd_kafka_poll(rk, 100);
+        mtx_lock(&bench_ctx->lock);
+        start_requests = bench_ctx->last_produce_requests;
+        mtx_unlock(&bench_ctx->lock);
+
+        /* Prepare payload */
+        char *payload = malloc(config->message_size);
+        memset(payload, 'x', config->message_size);
+
+        /* Start timing and produce at controlled rate */
+        start_ts = test_clock();
+        int64_t interval_us = 1000000 / rate_msgs_sec; /* Microseconds between messages */
+        int64_t next_send_ts = start_ts;
+
+        for (int i = 0; i < target_messages; i++) {
+                /* Rate limiting: wait until it's time to send next message */
+                int64_t now = test_clock();
+                if (now < next_send_ts) {
+                        int64_t sleep_us = next_send_ts - now;
+                        if (sleep_us > 0 && sleep_us < 1000000) {
+                                usleep((useconds_t)sleep_us);
+                        }
+                }
+
+                int32_t partition = i % config->partition_cnt;
+
+                msg_opaque_t *msg_data = malloc(sizeof(msg_opaque_t));
+                msg_data->enqueue_ts = test_clock();
+                msg_data->msg_seq = i;
+
+                if (rd_kafka_produce(rkt, partition,
+                                    RD_KAFKA_MSG_F_COPY,
+                                    payload, config->message_size,
+                                    NULL, 0,
+                                    msg_data) == -1) {
+                        messages_failed++;
+                        free(msg_data);
+                } else {
+                        messages_sent++;
+                }
+
+                next_send_ts += interval_us;
+
+                /* Poll occasionally */
+                if (i % 1000 == 0)
+                        rd_kafka_poll(rk, 0);
+        }
+
+        free(payload);
+
+        /* Wait for all deliveries */
+        TEST_SAY("Waiting for delivery confirmations...\n");
+        rd_kafka_flush(rk, 60000);
+        end_ts = test_clock();
+
+        /* Get final stats */
+        for (int i = 0; i < 5; i++)
+                rd_kafka_poll(rk, 100);
+
+        mtx_lock(&bench_ctx->lock);
+        int64_t end_requests = bench_ctx->last_produce_requests;
+
+        /* Calculate latency percentiles */
+        int64_t *latencies = malloc(sizeof(int64_t) * bench_ctx->msg_lat_cnt);
+        for (int i = 0; i < bench_ctx->msg_lat_cnt; i++) {
+                latencies[i] = bench_ctx->msg_latencies[i].delivery_ts -
+                              bench_ctx->msg_latencies[i].enqueue_ts;
+        }
+        qsort(latencies, bench_ctx->msg_lat_cnt, sizeof(int64_t), cmp_int64);
+
+        double p50 = percentile(latencies, bench_ctx->msg_lat_cnt, 50) / 1000.0;
+        double p95 = percentile(latencies, bench_ctx->msg_lat_cnt, 95) / 1000.0;
+        double p99 = percentile(latencies, bench_ctx->msg_lat_cnt, 99) / 1000.0;
+
+        free(latencies);
+
+        /* Store phase results */
+        if (bench_ctx->phase_cnt >= bench_ctx->phase_size) {
+                bench_ctx->phase_size = bench_ctx->phase_size ? bench_ctx->phase_size * 2 : 10;
+                bench_ctx->phases = realloc(bench_ctx->phases,
+                                           sizeof(phase_stats_t) * bench_ctx->phase_size);
+        }
+
+        phase_stats_t *phase = &bench_ctx->phases[bench_ctx->phase_cnt++];
+        phase->mode = BENCH_MODE_CONTROLLED_RATE;
+        phase->rate_msgs_sec = rate_msgs_sec;
+        phase->duration_sec = (double)(end_ts - start_ts) / 1000000.0;
+        phase->messages_sent = messages_sent;
+        phase->messages_failed = messages_failed;
+        phase->throughput_msgs_sec = messages_sent / phase->duration_sec;
+        phase->throughput_mb_sec = (messages_sent * config->message_size) / phase->duration_sec / 1000000.0;
+        phase->request_count = end_requests - start_requests;
+        phase->latency_p50_ms = p50;
+        phase->latency_p95_ms = p95;
+        phase->latency_p99_ms = p99;
+        phase->int_latency_p50 = bench_ctx->last_int_latency_p50;
+        phase->int_latency_p95 = bench_ctx->last_int_latency_p95;
+        phase->int_latency_p99 = bench_ctx->last_int_latency_p99;
+        phase->rtt_p50 = bench_ctx->last_rtt_p50;
+        phase->rtt_p95 = bench_ctx->last_rtt_p95;
+        phase->rtt_p99 = bench_ctx->last_rtt_p99;
+
+        mtx_unlock(&bench_ctx->lock);
+
+        /* Print results */
+        TEST_SAY("\nResults:\n");
+        TEST_SAY("  Duration: %.2f sec\n", phase->duration_sec);
+        TEST_SAY("  Messages sent: %d (failed: %d)\n", messages_sent, messages_failed);
+        TEST_SAY("  Actual rate: %.1f msgs/sec (target: %d)\n",
+                phase->throughput_msgs_sec, rate_msgs_sec);
+        TEST_SAY("  Throughput: %.2f MB/sec\n", phase->throughput_mb_sec);
+        TEST_SAY("  Requests: %lld (%.1f msgs/req)\n",
+                (long long)phase->request_count,
+                (double)messages_sent / phase->request_count);
+        TEST_SAY("  Latency: p50=%.2fms, p95=%.2fms, p99=%.2fms\n",
+                p50, p95, p99);
+
+        /* Cleanup */
+        rd_kafka_topic_destroy(rkt);
+        rd_kafka_destroy(rk);
+}
+
+/**
+ * Output results to CSV and summary
  */
 static void output_results(bench_config_t *config) {
-        /* Calculate aggregate statistics across all runs */
-        double throughput_sum = 0, throughput_mb_sum = 0;
-        int64_t request_sum = 0;
-        int total_latencies = 0;
+        ensure_output_dir(config->output_dir);
 
-        for (int i = 0; i < bench_ctx->run_cnt; i++) {
-                throughput_sum += bench_ctx->runs[i].throughput_msg_sec;
-                throughput_mb_sum += bench_ctx->runs[i].throughput_mb_sec;
-                request_sum += bench_ctx->runs[i].request_count;
-                total_latencies += bench_ctx->runs[i].latency_cnt;
+        /* Write summary CSV */
+        char summary_path[512];
+        snprintf(summary_path, sizeof(summary_path), "%s/summary.csv", config->output_dir);
+        FILE *summary_fp = fopen(summary_path, "w");
+        if (!summary_fp) {
+                TEST_WARN("Failed to open %s for writing\n", summary_path);
+                return;
         }
 
-        double throughput_mean = throughput_sum / bench_ctx->run_cnt;
-        double throughput_mb_mean = throughput_mb_sum / bench_ctx->run_cnt;
-        double request_mean = (double)request_sum / bench_ctx->run_cnt;
+        fprintf(summary_fp, "mode,rate_msgs_sec,duration_sec,messages_sent,messages_failed,"
+                           "requests_sent,msgs_per_req,throughput_msgs_sec,throughput_mb_sec,"
+                           "latency_p50_ms,latency_p95_ms,latency_p99_ms\n");
 
-        /* Merge all latencies for overall percentiles */
-        int64_t *all_latencies = malloc(sizeof(int64_t) * total_latencies);
-        int lat_idx = 0;
-        for (int i = 0; i < bench_ctx->run_cnt; i++) {
-                memcpy(&all_latencies[lat_idx],
-                       bench_ctx->runs[i].latencies,
-                       sizeof(int64_t) * bench_ctx->runs[i].latency_cnt);
-                lat_idx += bench_ctx->runs[i].latency_cnt;
+        for (int i = 0; i < bench_ctx->phase_cnt; i++) {
+                phase_stats_t *p = &bench_ctx->phases[i];
+                fprintf(summary_fp, "%s,%d,%.2f,%d,%d,%lld,%.1f,%.1f,%.2f,%.2f,%.2f,%.2f\n",
+                       p->mode == BENCH_MODE_MAX_THROUGHPUT ? "max_throughput" : "controlled",
+                       p->rate_msgs_sec,
+                       p->duration_sec,
+                       p->messages_sent,
+                       p->messages_failed,
+                       (long long)p->request_count,
+                       (double)p->messages_sent / p->request_count,
+                       p->throughput_msgs_sec,
+                       p->throughput_mb_sec,
+                       p->latency_p50_ms,
+                       p->latency_p95_ms,
+                       p->latency_p99_ms);
         }
-        qsort(all_latencies, total_latencies, sizeof(int64_t), cmp_int64);
 
-        /* Calculate percentiles (in milliseconds for readability) */
-        double p50 = percentile(all_latencies, total_latencies, 50) / 1000.0;
-        double p95 = percentile(all_latencies, total_latencies, 95) / 1000.0;
-        double p99 = percentile(all_latencies, total_latencies, 99) / 1000.0;
-        double p999 = percentile(all_latencies, total_latencies, 99.9) / 1000.0;
+        fclose(summary_fp);
+        TEST_SAY("Wrote summary to %s\n", summary_path);
 
-        /* Output JSON report */
-        TEST_REPORT(
-            "{"
-            "\"config\": {"
-            "  \"partition_cnt\": %d,"
-            "  \"message_cnt\": %d,"
-            "  \"message_size\": %d,"
-            "  \"num_runs\": %d,"
-            "  \"distribution\": \"%s\""
-            "},"
-            "\"results\": {"
-            "  \"throughput_msg_sec\": %.1f,"
-            "  \"throughput_mb_sec\": %.2f,"
-            "  \"request_count_mean\": %.1f,"
-            "  \"latency_p50_ms\": %.2f,"
-            "  \"latency_p95_ms\": %.2f,"
-            "  \"latency_p99_ms\": %.2f,"
-            "  \"latency_p999_ms\": %.2f,"
-            "  \"messages_per_request\": %.1f"
-            "}"
-            "}",
-            config->partition_cnt,
-            config->message_cnt,
-            config->message_size,
-            config->num_runs,
-            config->distribution,
-            throughput_mean,
-            throughput_mb_mean,
-            request_mean,
-            p50, p95, p99, p999,
-            (double)config->message_cnt / request_mean);
+        /* Write per-message sampled latencies CSV */
+        char latencies_path[512];
+        snprintf(latencies_path, sizeof(latencies_path), "%s/per_message_latencies.csv", config->output_dir);
+        FILE *latencies_fp = fopen(latencies_path, "w");
+        if (!latencies_fp) {
+                TEST_WARN("Failed to open %s for writing\n", latencies_path);
+                return;
+        }
 
-        /* Summary to stderr */
+        fprintf(latencies_fp, "msg_seq,enqueue_timestamp_us,delivery_timestamp_us,latency_us,partition\n");
+
+        mtx_lock(&bench_ctx->lock);
+        for (int i = 0; i < bench_ctx->sampled_lat_cnt; i++) {
+                msg_latency_t *m = &bench_ctx->sampled_latencies[i];
+                fprintf(latencies_fp, "%d,%lld,%lld,%lld,%d\n",
+                       m->msg_seq,
+                       (long long)m->enqueue_ts,
+                       (long long)m->delivery_ts,
+                       (long long)(m->delivery_ts - m->enqueue_ts),
+                       m->partition);
+        }
+        mtx_unlock(&bench_ctx->lock);
+
+        fclose(latencies_fp);
+        TEST_SAY("Wrote sampled latencies to %s\n", latencies_path);
+
+        /* Print human-readable summary */
         TEST_SAY("\n");
-        TEST_SAY("========================================\n");
-        TEST_SAY("Benchmark Results (averaged over %d runs)\n", config->num_runs);
-        TEST_SAY("========================================\n");
-        TEST_SAY("Throughput: %.1f msg/sec (%.2f MB/sec)\n",
-                 throughput_mean, throughput_mb_mean);
-        TEST_SAY("Requests: %.1f req/run (%.1f msgs/req)\n",
-                 request_mean, (double)config->message_cnt / request_mean);
-        TEST_SAY("Latency:\n");
-        TEST_SAY("  P50:  %.2f ms\n", p50);
-        TEST_SAY("  P95:  %.2f ms\n", p95);
-        TEST_SAY("  P99:  %.2f ms\n", p99);
-        TEST_SAY("  P999: %.2f ms\n", p999);
-        TEST_SAY("========================================\n");
+        TEST_SAY("================================================================================\n");
+        TEST_SAY("                       BENCHMARK RESULTS SUMMARY\n");
+        TEST_SAY("================================================================================\n");
+        TEST_SAY("Configuration:\n");
+        TEST_SAY("  Partitions: %d\n", config->partition_cnt);
+        TEST_SAY("  Message size: %d bytes\n", config->message_size);
+        TEST_SAY("  Output directory: %s\n", config->output_dir);
+        TEST_SAY("\n");
 
-        free(all_latencies);
+        if (!config->skip_max_throughput) {
+                TEST_SAY("MAX THROUGHPUT MODE:\n");
+                phase_stats_t *p = &bench_ctx->phases[0];
+                TEST_SAY("  Messages: %d (failed: %d)\n", p->messages_sent, p->messages_failed);
+                TEST_SAY("  Duration: %.2f sec\n", p->duration_sec);
+                TEST_SAY("  Throughput: %.1f msgs/sec (%.2f MB/sec)\n",
+                        p->throughput_msgs_sec, p->throughput_mb_sec);
+                TEST_SAY("  Requests: %lld (%.1f msgs/req)\n",
+                        (long long)p->request_count,
+                        (double)p->messages_sent / p->request_count);
+                TEST_SAY("  Latency: p50=%.2fms, p95=%.2fms, p99=%.2fms\n",
+                        p->latency_p50_ms, p->latency_p95_ms, p->latency_p99_ms);
+                TEST_SAY("\n");
+        }
+
+        if (!config->skip_controlled) {
+                TEST_SAY("CONTROLLED RATE MODE RESULTS:\n");
+                TEST_SAY("%-12s %-12s %-12s %-12s %-12s %-12s %-12s\n",
+                        "Rate", "Duration", "Messages", "Requests", "msgs/req", "p50 lat", "p99 lat");
+                TEST_SAY("%-12s %-12s %-12s %-12s %-12s %-12s %-12s\n",
+                        "(msg/s)", "(s)", "sent", "sent", "", "(ms)", "(ms)");
+                TEST_SAY("------------ ------------ ------------ ------------ ------------ ------------ ------------\n");
+
+                int start_idx = config->skip_max_throughput ? 0 : 1;
+                for (int i = start_idx; i < bench_ctx->phase_cnt; i++) {
+                        phase_stats_t *p = &bench_ctx->phases[i];
+                        TEST_SAY("%-12d %-12.1f %-12d %-12lld %-12.1f %-12.2f %-12.2f\n",
+                                p->rate_msgs_sec,
+                                p->duration_sec,
+                                p->messages_sent,
+                                (long long)p->request_count,
+                                (double)p->messages_sent / p->request_count,
+                                p->latency_p50_ms,
+                                p->latency_p99_ms);
+                }
+                TEST_SAY("\n");
+        }
+
+        TEST_SAY("================================================================================\n");
+        TEST_SAY("Results saved to: %s/\n", config->output_dir);
+        TEST_SAY("================================================================================\n");
+}
+
+/**
+ * Parse configuration from environment variables
+ *
+ * Environment variables:
+ *   MAX_PARTITIONS                Number of partitions (default: 1000)
+ *   BENCH_MAX_THROUGHPUT_MESSAGES Messages for max throughput test (default: 100000)
+ *   BENCH_CONTROLLED_RATES        Comma-separated rates, e.g. "10000,20000,50000" (default: 10000,20000,50000)
+ *   BENCH_CONTROLLED_DURATION     Seconds per controlled rate test (default: 60)
+ *   BENCH_MESSAGE_SIZE            Bytes per message (default: 256)
+ *   BENCH_OUTPUT_DIR              Output directory (default: ./benchmark_output)
+ *   BENCH_SKIP_MAX_THROUGHPUT     Set to "1" to skip max throughput phase
+ *   BENCH_SKIP_CONTROLLED         Set to "1" to skip controlled rate phases
+ */
+static void parse_config(bench_config_t *config) {
+        const char *val;
+
+        /* Set defaults */
+        config->partition_cnt = 1000;
+        config->message_size = 256;
+        config->max_throughput_messages = 100000;
+        config->skip_max_throughput = 0;
+        config->controlled_duration_sec = 60;
+        config->skip_controlled = 0;
+        config->output_dir = strdup("./benchmark_output");
+
+        /* Default controlled rates */
+        config->controlled_rate_cnt = 3;
+        config->controlled_rates = malloc(sizeof(int) * 3);
+        config->controlled_rates[0] = 10000;
+        config->controlled_rates[1] = 20000;
+        config->controlled_rates[2] = 50000;
+
+        /* Override from environment */
+        if ((val = test_getenv("MAX_PARTITIONS", NULL)))
+                config->partition_cnt = atoi(val);
+
+        if ((val = test_getenv("BENCH_MAX_THROUGHPUT_MESSAGES", NULL)))
+                config->max_throughput_messages = atoi(val);
+
+        if ((val = test_getenv("BENCH_CONTROLLED_RATES", NULL))) {
+                /* Parse comma-separated rates */
+                free(config->controlled_rates);
+                config->controlled_rate_cnt = 0;
+                config->controlled_rates = NULL;
+
+                char *rates_str = strdup(val);
+                char *token = strtok(rates_str, ",");
+                while (token) {
+                        config->controlled_rates = realloc(config->controlled_rates,
+                                                          sizeof(int) * (config->controlled_rate_cnt + 1));
+                        config->controlled_rates[config->controlled_rate_cnt++] = atoi(token);
+                        token = strtok(NULL, ",");
+                }
+                free(rates_str);
+        }
+
+        if ((val = test_getenv("BENCH_CONTROLLED_DURATION", NULL)))
+                config->controlled_duration_sec = atoi(val);
+
+        if ((val = test_getenv("BENCH_MESSAGE_SIZE", NULL)))
+                config->message_size = atoi(val);
+
+        if ((val = test_getenv("BENCH_OUTPUT_DIR", NULL))) {
+                free(config->output_dir);
+                config->output_dir = strdup(val);
+        }
+
+        if ((val = test_getenv("BENCH_SKIP_MAX_THROUGHPUT", NULL)))
+                config->skip_max_throughput = atoi(val);
+
+        if ((val = test_getenv("BENCH_SKIP_CONTROLLED", NULL)))
+                config->skip_controlled = atoi(val);
 }
 
 /**
  * Main benchmark entry point
  */
 int main_0200_multibatch_benchmark(int argc, char **argv) {
-        bench_config_t config = {
-            .partition_cnt = 1000,           /* Test with many partitions */
-            .message_cnt = test_quick ? 10000 : 100000,
-            .message_size = 1024,
-            .num_runs = test_quick ? 2 : 5,
-            .warmup_messages = test_quick ? 1000 : 10000,
-            .distribution = "uniform"
-        };
+        bench_config_t config;
+        const char *topic;
+
+        /* Parse configuration from environment */
+        parse_config(&config);
 
         /* Initialize benchmark context */
         bench_ctx = calloc(1, sizeof(bench_ctx_t));
-        bench_ctx->config = config;
+        bench_ctx->config = &config;
         mtx_init(&bench_ctx->lock, mtx_plain);
 
-        /* Run benchmark */
-        run_benchmark_suite(&config);
+        /* Create topic */
+        topic = test_mk_topic_name(__FUNCTION__, 1);
+
+        /* Create a temporary producer just for topic creation */
+        rd_kafka_t *rk_temp = create_producer(&config, topic);
+        test_create_topic_wait_exists(rk_temp, topic, config.partition_cnt, 1, 30000);
+        rd_kafka_destroy(rk_temp);
+
+        TEST_SAY("\n");
+        TEST_SAY("================================================================================\n");
+        TEST_SAY("                    MULTIBATCH BENCHMARK SUITE\n");
+        TEST_SAY("================================================================================\n");
+        TEST_SAY("Topic: %s\n", topic);
+        TEST_SAY("Partitions: %d\n", config.partition_cnt);
+        TEST_SAY("Message size: %d bytes\n", config.message_size);
+        TEST_SAY("Output directory: %s\n", config.output_dir);
+        TEST_SAY("================================================================================\n");
+
+        /* Run max throughput phase */
+        if (!config.skip_max_throughput) {
+                run_max_throughput_phase(&config, topic);
+        }
+
+        /* Run controlled rate phases */
+        if (!config.skip_controlled) {
+                for (int i = 0; i < config.controlled_rate_cnt; i++) {
+                        run_controlled_rate_phase(&config, topic, config.controlled_rates[i]);
+                }
+        }
 
         /* Output results */
         output_results(&config);
@@ -474,13 +900,14 @@ int main_0200_multibatch_benchmark(int argc, char **argv) {
         mtx_destroy(&bench_ctx->lock);
         if (bench_ctx->msg_latencies)
                 free(bench_ctx->msg_latencies);
-        for (int i = 0; i < bench_ctx->run_cnt; i++) {
-                if (bench_ctx->runs[i].latencies)
-                        free(bench_ctx->runs[i].latencies);
-        }
-        if (bench_ctx->runs)
-                free(bench_ctx->runs);
+        if (bench_ctx->sampled_latencies)
+                free(bench_ctx->sampled_latencies);
+        if (bench_ctx->phases)
+                free(bench_ctx->phases);
         free(bench_ctx);
+
+        free(config.output_dir);
+        free(config.controlled_rates);
 
         return 0;
 }

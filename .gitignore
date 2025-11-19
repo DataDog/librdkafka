@@ -32,3 +32,13 @@ gdbrun*.gdb
 TAGS
 vcpkg_installed
 *tmp-KafkaCluster*
+
+# Benchmark outputs
+benchmark_output/
+test_output*/
+tests/*.csv
+tests/stats_dump_*.json
+benchmarks/*.png
+benchmarks/test_output*/
+benchmarks/multibatch*/
+latency_graphs.png

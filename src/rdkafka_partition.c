@@ -715,7 +715,6 @@ void rd_kafka_toppar_enq_msg(rd_kafka_toppar_t *rktp,
                      rd_kafka_msgq_may_wakeup(&rktp->rktp_msgq, now) &&
                      (wakeup_q = rktp->rktp_msgq_wakeup_q))) {
                 /* Wake-up broker thread */
-                fprintf(stderr, "calling wakeup on broker thread\n");
                 rktp->rktp_msgq.rkmq_wakeup.signalled = rd_true;
                 rd_kafka_q_keep(wakeup_q);
         }

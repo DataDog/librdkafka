@@ -1,1 +1,0 @@
-{"config": {  "partition_cnt": 1000,  "message_cnt": 100000,  "message_size": 1024,  "num_runs": 5,  "distribution": "uniform"},"results": {  "throughput_msg_sec": 419554.7,  "throughput_mb_sec": 429.62,  "request_count_mean": 496.4,  "latency_p50_ms": 118.61,  "latency_p95_ms": 223.80,  "latency_p99_ms": 237.26,  "latency_p999_ms": 245.16,  "messages_per_request": 201.5}}
