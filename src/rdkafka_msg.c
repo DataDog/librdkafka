@@ -717,7 +717,6 @@ int rd_kafka_produce_batch(rd_kafka_topic_t *app_rkt,
                            int msgflags,
                            rd_kafka_message_t *rkmessages,
                            int message_cnt) {
-        fprintf(stderr, "INSIDE OF rd_kafka_prouce_batch\n");
         rd_kafka_msgq_t tmpq = RD_KAFKA_MSGQ_INITIALIZER(tmpq);
         int i;
         int64_t utc_now         = rd_uclock() / 1000;
