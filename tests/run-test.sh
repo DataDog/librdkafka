@@ -12,14 +12,24 @@ if [[ $1 == -h ]]; then
     echo "  Modes: bare valgrind helgrind cachegrind drd gdb lldb bash"
     echo "  Options:"
     echo "   -..    - test-runner command arguments (pass thru)"
+    echo "   -o N   - skip tests before number N (sets TESTS_SKIP_BEFORE)"
     exit 0
 fi
 
 ARGS=
+TESTS_SKIP_BEFORE=
 
 while [[ $1 == -* ]]; do
-    ARGS="$ARGS $1"
-    shift
+    case "$1" in
+        -o)
+            TESTS_SKIP_BEFORE="$2"
+            shift 2
+            ;;
+        *)
+            ARGS="$ARGS $1"
+            shift
+            ;;
+    esac
 done
 
 TEST=./test-runner
@@ -59,6 +69,9 @@ echo -e "${CYAN}############## $TEST ################${CCLR}"
 for mode in $MODES; do
     echo -e "${CYAN}### Running test $TEST in $mode mode ###${CCLR}"
     export TEST_MODE=$mode
+    if [[ -n "$TESTS_SKIP_BEFORE" ]]; then
+        export TESTS_SKIP_BEFORE
+    fi
     case "$mode" in
 	valgrind)
 	    valgrind $VALGRIND_ARGS --leak-check=full --show-leak-kinds=all \
@@ -96,13 +109,14 @@ for mode in $MODES; do
             grun=$(mktemp gdbrunXXXXXX)
             cat >$grun <<EOF
 set \$_exitcode = -999
-run $ARGS
+set args $ARGS
+run
 if \$_exitcode != -999
  quit
 end
 EOF
             export ASAN_OPTIONS="$ASAN_OPTIONS:abort_on_error=1"
-            gdb -x $grun $TEST
+            gdb -q -x $grun --args $TEST
             RET=$?
             rm $grun
             ;;
@@ -137,4 +151,3 @@ EOF
 done
 
 exit $FAILED
-

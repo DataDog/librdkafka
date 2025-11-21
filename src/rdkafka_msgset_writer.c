@@ -34,6 +34,7 @@
 #include "rdkafka_topic.h"
 #include "rdkafka_partition.h"
 #include "rdkafka_header.h"
+#include "rdkafka_request.h"
 #include "rdkafka_lz4.h"
 
 #if WITH_ZSTD
@@ -90,10 +91,13 @@ typedef struct rd_kafka_msgset_writer_s {
         struct {
                 size_t of; /* rkbuf's first message position */
                 int64_t timestamp;
+                uint64_t msgid; /**< First message's msgid for sequence calculation */
         } msetw_firstmsg;
 
         rd_kafka_pid_t msetw_pid;      /**< Idempotent producer's
                                         *   current Producer Id */
+        uint64_t msetw_epoch_base_msgid; /**< Partition's epoch base msgid for
+                                          *   sequence number calculation */
         rd_kafka_broker_t *msetw_rkb;  /* @warning Not a refcounted
                                         *          reference! */
         rd_kafka_toppar_t *msetw_rktp; /* @warning Not a refcounted
@@ -426,12 +430,12 @@ static void rd_kafka_produce_request_alloc_buf(rd_kafka_produce_ctx_t *rkpc) {
          * Note: In multi-partition requests, this batch structure is shared across
          * all partitions in the request. The PID must be set for msgbatch_set_first_msg()
          * to work, but per-partition metadata (sequences, etc.) is tracked separately
-         * in the hash map (rd_kafka_produce_req_toppar_t structures). */
+         * in the hash map (rd_kafka_produce_req_toppar_t structures).
+         * The epoch_base_msgid will be set per-partition when calling msgbatch_set_first_msg(). */
         memset(&rkpc->rkpc_buf->rkbuf_batch, 0, sizeof(rkpc->rkpc_buf->rkbuf_batch));
         rd_kafka_msgq_init(&rkpc->rkpc_buf->rkbuf_batch.msgq);
         rkpc->rkpc_buf->rkbuf_batch.pid = rkpc->rkpc_pid;
         rkpc->rkpc_buf->rkbuf_batch.first_seq = -1;
-        rkpc->rkpc_buf->rkbuf_batch.epoch_base_msgid = 0; /* TODO: implement properly */
 }
 
 /**
@@ -610,14 +614,15 @@ static int rd_kafka_msgset_writer_init(rd_kafka_msgset_writer_t *msetw,
 
         memset(msetw, 0, sizeof(*msetw));
 
-        msetw->msetw_rktp       = rktp;
-        msetw->msetw_rkb        = rkpc->rkpc_rkb;
-        msetw->msetw_ApiVersion = rkpc->rkpc_api_version;
-        msetw->msetw_MsgVersion = rkpc->rkpc_msg_version;
-        msetw->msetw_features   = rkpc->rkpc_features;
-        msetw->msetw_rkbuf      = rkpc->rkpc_buf;
-        msetw->msetw_msgq = rkmq;  // TODO(xvandish): What should we use here
-        msetw->msetw_pid  = rkpc->rkpc_pid;
+        msetw->msetw_rktp             = rktp;
+        msetw->msetw_rkb              = rkpc->rkpc_rkb;
+        msetw->msetw_ApiVersion       = rkpc->rkpc_api_version;
+        msetw->msetw_MsgVersion       = rkpc->rkpc_msg_version;
+        msetw->msetw_features         = rkpc->rkpc_features;
+        msetw->msetw_rkbuf            = rkpc->rkpc_buf;
+        msetw->msetw_msgq             = rkmq;  // TODO(xvandish): What should we use here
+        msetw->msetw_pid              = rkpc->rkpc_pid;
+        msetw->msetw_epoch_base_msgid = epoch_base_msgid;
 
         /* Max number of messages to send in a batch,
          * limited by current queue size or configured batch size,
@@ -942,12 +947,21 @@ static int rd_kafka_msgset_writer_write_msgq(rd_kafka_msgset_writer_t *msetw,
         int_latency_base =
             now + ((rd_ts_t)rktp->rktp_rkt->rkt_conf.message_timeout_ms * 1000);
 
-        /* Acquire BaseTimestamp from first message. */
+        /* Acquire information from first message for this partition's MessageSet. */
         rkm = TAILQ_FIRST(&rkmq->rkmq_msgs);
         rd_kafka_assert(NULL, rkm);
         msetw->msetw_firstmsg.timestamp = rkm->rkm_timestamp;
+        msetw->msetw_firstmsg.msgid = rkm->rkm_u.producer.msgid;
 
-        rd_kafka_msgbatch_set_first_msg(msetw->msetw_batch, rkm);
+        /* For multi-partition requests, msgbatch_set_first_msg() should only
+         * be called once for the entire request, not once per partition,
+         * as the batch structure is shared across all partitions.
+         * We set epoch_base_msgid from the first partition processed.
+         * Note: Per-partition sequence tracking is handled in rd_kafka_produce_req_toppar_t. */
+        if (msetw->msetw_batch->first_msgid == 0) {
+                msetw->msetw_batch->epoch_base_msgid = msetw->msetw_epoch_base_msgid;
+                rd_kafka_msgbatch_set_first_msg(msetw->msetw_batch, rkm);
+        }
 
         /*
          * Write as many messages as possible until buffer is full
@@ -1424,9 +1438,25 @@ static void rd_kafka_msgset_writer_finalize_MessageSet_v2_header(
             rkbuf, msetw->msetw_of_start + RD_KAFKAP_MSGSET_V2_OF_MaxTimestamp,
             msetw->msetw_MaxTimestamp);
 
+        /* Calculate BaseSequence for this partition's MessageSet.
+         * In multibatch requests, each partition needs its own BaseSequence
+         * calculated from the partition's epoch_base_msgid and first message msgid.
+         * Fall back to batch.first_seq if msgid wasn't set (shouldn't happen in normal flow). */
+        int32_t base_seq = -1;
+        if (rd_kafka_pid_valid(msetw->msetw_pid)) {
+                if (msetw->msetw_firstmsg.msgid != 0) {
+                        /* Calculate per-partition BaseSequence */
+                        base_seq = rd_kafka_seq_wrap(msetw->msetw_firstmsg.msgid -
+                                                     msetw->msetw_epoch_base_msgid);
+                } else {
+                        /* Fallback: use shared batch first_seq */
+                        base_seq = msetw->msetw_batch->first_seq;
+                }
+        }
+
         rd_kafka_buf_update_i32(
             rkbuf, msetw->msetw_of_start + RD_KAFKAP_MSGSET_V2_OF_BaseSequence,
-            msetw->msetw_batch->first_seq);
+            base_seq);
 
         rd_kafka_buf_update_i32(
             rkbuf, msetw->msetw_of_start + RD_KAFKAP_MSGSET_V2_OF_RecordCount,
@@ -1571,12 +1601,26 @@ void rd_kafka_produce_calculator_init(rd_kafka_produce_calculator_t *rkpca,
             &rkpca->rkpca_message_overhead);
 }
 
-/* Attempt to add a partition into a produce batch calculation.
- * The calculation is an estimate of the total byte size, and doesn't
- * need to be exact. It is used to allocate the buffers used to sture
- * the produce batch, so the closer it is the better.
- * This function will succeed if at least one batch of messages can
- * be added to the calculation. */
+/* Attempt to add a partition into the running size/count calculation for a
+ * multi-partition Produce request.
+ *
+ * Callers:
+ *   - broker batching (`rd_kafka_broker_produce_batch_append`) to decide if the
+ *     current toppar fits before actually writing it into the request.
+ *   - unit tests that exercise limits (partition cap, batch_num_messages,
+ *     message.max.bytes) without serializing a real request.
+ *
+ * Expectations (idealised flow):
+ *   1) Calculator is seeded once per candidate batch via
+ *      rd_kafka_produce_calculator_init() to pick Api/Msg versions and header
+ *      sizes.
+ *   2) Call rd_kafka_produce_calculator_add() for each toppar in tentative
+ *      order; if it returns 1 the caller may enqueue that toppar in the batch,
+ *      if it returns 0 the caller must not include it and should flush/send the
+ *      current batch (then start a new one).
+ *
+ * The result encodes whether at least one batch of messages from this partition
+ * would fit given the running totals and config constraints. */
 int rd_kafka_produce_calculator_add(rd_kafka_produce_calculator_t *rkpca,
                                     rd_kafka_toppar_t *rktp) {
         rd_kafka_t *rk = rktp->rktp_rkt->rkt_rk;
@@ -1824,10 +1868,22 @@ int rd_kafka_produce_ctx_append_toppar(rd_kafka_produce_ctx_t *rkpc,
 
         /* produce the message set */
         rd_kafka_msgset_writer_t msetw;
+        uint64_t epoch_base_msgid;
+
+        /* Get the partition's epoch base msgid for sequence number calculation */
+        rd_kafka_toppar_lock(rktp);
+        epoch_base_msgid = rktp->rktp_eos.epoch_base_msgid;
+        rd_kafka_toppar_unlock(rktp);
+
+        rd_rkb_dbg(rkpc->rkpc_rkb, MSG, "PRODUCE",
+                   "Using epoch_base_msgid %" PRIu64 " for %s [%"PRId32"]",
+                   epoch_base_msgid,
+                   rktp->rktp_rkt->rkt_topic->str,
+                   rktp->rktp_partition);
 
         if (unlikely(!rd_kafka_msgset_writer_init(
                 &msetw, rkpc->rkpc_rkb, rktp, &rktp->rktp_xmit_msgq, rkpc->rkpc_pid,
-                0, /* epoch_base_msgid - TODO: implement properly */
+                epoch_base_msgid,
                 rkpc))) {
                 return 0;
         }
@@ -1943,33 +1999,43 @@ rd_kafka_buf_t *rd_kafka_msgset_create_ProduceRequest(rd_kafka_broker_t *rkb,
                                                       rd_kafka_msgq_t *rkmq,
                                                       const rd_kafka_pid_t pid,
                                                       uint64_t epoch_base_msgid,
-                                                      size_t *MessageSetSizep) {
+                                                     size_t *MessageSetSizep) {
         rd_kafka_produce_ctx_t ctx;
-        rd_kafka_buf_t *rkbuf;
-        int appended_msg_cnt = 0;
+        rd_kafka_buf_t *rkbuf = NULL;
+        int appended_msg_cnt  = 0;
         size_t appended_msg_bytes = 0;
 
-        /* Initialize a single-partition produce context */
-        if (!rd_kafka_produce_ctx_init(&ctx, rkb, 1, 1,
-                                       rd_kafka_msgq_len(rkmq),
-                                       rd_kafka_msgq_size(rkmq),
-                                       rktp->rktp_rkt->rkt_conf.required_acks,
-                                       rktp->rktp_rkt->rkt_conf.request_timeout_ms,
-                                       pid, NULL)) {
+        /* Use the standard ProduceRequest helpers so we get a proper req_ctx
+         * with per-toppar bookkeeping for idempotent/error handling. */
+        if (!rd_kafka_produce_ctx_init(
+                &ctx, rkb, 1, 1, rd_kafka_msgq_len(rkmq),
+                rd_kafka_msgq_size(rkmq),
+                rktp->rktp_rkt->rkt_conf.required_acks,
+                rktp->rktp_rkt->rkt_conf.request_timeout_ms, pid, NULL))
                 return NULL;
-        }
 
-        /* Append the single toppar */
-        if (!rd_kafka_produce_ctx_append_toppar(&ctx, rktp,
-                                                &appended_msg_cnt,
+        /* Legacy single-partition path: tie the batch to this toppar so the
+         * response handler has a valid rktp for bookkeeping. */
+        rd_kafka_msgbatch_init(&ctx.rkpc_buf->rkbuf_batch, rktp, pid,
+                               epoch_base_msgid);
+
+        /* Move messages into the toppar xmit queue for append */
+        rd_kafka_toppar_lock(rktp);
+        rd_kafka_msgq_move(&rktp->rktp_xmit_msgq, rkmq);
+        rd_kafka_toppar_unlock(rktp);
+
+        if (!rd_kafka_produce_ctx_append_toppar(&ctx, rktp, &appended_msg_cnt,
                                                 &appended_msg_bytes)) {
-                if ((rkbuf = rd_kafka_produce_ctx_finalize(&ctx)))
-                        rd_kafka_buf_destroy(rkbuf);
+                rd_kafka_msgq_move(rkmq, &rktp->rktp_xmit_msgq);
                 return NULL;
         }
 
-        /* Finalize and return */
         rkbuf = rd_kafka_produce_ctx_finalize(&ctx);
+
+        /* Move any remaining messages back to caller's queue for the next
+         * iteration. */
+        rd_kafka_msgq_move(rkmq, &rktp->rktp_xmit_msgq);
+
         if (rkbuf && MessageSetSizep)
                 *MessageSetSizep = rkbuf->rkbuf_totlen;
 

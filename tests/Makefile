@@ -67,6 +67,10 @@ run_seq: $(BIN)
 	@echo "Running tests sequentially"
 	./run-test.sh -p1
 
+run_seq_abort: $(BIN)
+	@echo "Running tests sequentially, stopping on first failure" $(if $(START),"(starting at $(START))","")
+	./run-test.sh $(if $(START),-o $(START),) -p1 -a
+
 run_local: $(BIN)
 	@echo "Running local broker-less tests with idempotent producer"
 	./run-test.sh -l -P

@@ -125,13 +125,19 @@ rd_kafka_broker_produce_batch_try_init(produce_batch_t *batch,
 static int
 rd_kafka_broker_produce_batch_append(produce_batch_t *batch,
                                         rd_kafka_toppar_t *rktp) {
-        int result;
+        /* Try to extend the in-flight batch with this toppar. The caller uses
+         * the calculator’s return value to decide whether the toppar may be
+         * included; a 0 means “doesn’t fit” (partition cap, size, or config
+         * mismatch) and the caller should send the current batch and start a
+         * new one. */
         if (unlikely(!batch->batch_initialized))
                 return 0;
 
+        if (!rd_kafka_produce_calculator_add(&batch->batch_calculator, rktp))
+                return 0;
+
         TAILQ_INSERT_TAIL(&batch->batch_toppars, rktp, rktp_batch_link);
-        result = rd_kafka_produce_calculator_add(&batch->batch_calculator, rktp);
-        return result;
+        return 1;
 }
 
 static int

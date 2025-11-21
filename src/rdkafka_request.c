@@ -5026,6 +5026,7 @@ static void rd_kafka_msgbatch_handle_Produce_result(
         rd_kafka_msg_status_t status = RD_KAFKA_MSG_STATUS_POSSIBLY_PERSISTED;
         rd_bool_t last_inflight;
         int32_t next_seq;
+        rd_kafka_produce_req_toppar_t tmp = RD_ZERO_INIT;
 
         /* Decrease partition's messages in-flight counter */
         rd_assert(rd_atomic32_get(&rktp->rktp_msgs_inflight) >=
@@ -5038,14 +5039,13 @@ static void rd_kafka_msgbatch_handle_Produce_result(
                                      rd_kafka_msgq_len(&batch->msgq));
 
         if (!toppar_info) {
-                rd_kafka_produce_req_toppar_t tmp = RD_ZERO_INIT;
-                tmp.rkprt_s_rktp                  = batch->rktp;
-                tmp.rkprt_pid                     = batch->pid;
-                tmp.rkprt_base_seq                = batch->first_seq;
-                tmp.rkprt_base_msgid              = batch->first_msgid;
-                tmp.rkprt_last_seq                = next_seq - 1;
-                tmp.rkprt_next_seq                = next_seq;
-                toppar_info                       = &tmp;
+                tmp.rkprt_s_rktp     = batch->rktp;
+                tmp.rkprt_pid        = batch->pid;
+                tmp.rkprt_base_seq   = batch->first_seq;
+                tmp.rkprt_base_msgid = batch->first_msgid;
+                tmp.rkprt_last_seq   = next_seq - 1;
+                tmp.rkprt_next_seq   = next_seq;
+                toppar_info          = &tmp;
 
                 if (presult) {
                         tmp.rkprt_produce_base_offset = presult->offset;
@@ -5163,6 +5163,7 @@ static void rd_kafka_handle_Produce(rd_kafka_t *rk,
                 batch.rktp        = toppar->rkprt_s_rktp;
                 batch.first_seq   = toppar->rkprt_base_seq;
                 batch.first_msgid = toppar->rkprt_base_msgid;
+                batch.pid         = toppar->rkprt_pid;
                 rd_kafka_msgq_init(&batch.msgq);
 
 
@@ -7375,6 +7376,7 @@ static int unittest_idempotent_producer(void) {
         rd_kafka_toppar_pid_change(rktp, pid, msgid);
 
         remaining_batches = _BATCH_CNT;
+        RD_UT_SAY("HELLOOOOO");
 
         /* Create a ProduceRequest for each batch */
         for (rcnt = 0; rcnt < remaining_batches; rcnt++) {
