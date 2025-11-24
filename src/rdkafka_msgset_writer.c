@@ -1566,6 +1566,11 @@ rd_kafka_msgset_writer_finalize(rd_kafka_msgset_writer_t *msetw,
         rd_kafka_msgq_verify_order(rktp, &msetw->msetw_batch->msgq,
                                    msetw->msetw_batch->first_msgid, rd_false);
 
+        /* Update per-topic batch metrics for producer stats. */
+        rd_avg_add(&rktp->rktp_rkt->rkt_avg_batchcnt, cnt);
+        rd_avg_add(&rktp->rktp_rkt->rkt_avg_batchsize,
+                   (int64_t)msetw->msetw_messages_len);
+
         /* NOTE: In multi-partition requests, we do NOT call msgbatch_ready_produce()
          * because the batch->rktp is not set (the batch is shared across partitions).
          * In-flight tracking is handled per-partition in the request context

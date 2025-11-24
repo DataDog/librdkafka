@@ -5366,8 +5366,6 @@ int rd_kafka_ProduceRequest_append(rd_kafka_produce_ctx_t *rkpc,
 
         ++rkprc->rkprc_toppar_cnt;
 
-        rd_atomic64_add(&rktp->rktp_c.tx_msgs, appended_msg_cnt);
-        rd_atomic64_add(&rktp->rktp_c.tx_msg_bytes, appended_msg_bytes);
         return 1;
 }
 
