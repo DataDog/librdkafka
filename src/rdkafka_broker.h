@@ -76,6 +76,26 @@ typedef struct rd_kafka_broker_monitor_s {
 
 
 /**
+ * @struct Broker-level batch collector for producer batching.
+ *
+ * Collects partitions with messages ready to send and triggers
+ * a produce request when broker.linger.ms expires or thresholds are reached.
+ */
+typedef struct rd_kafka_broker_batch_collector_s {
+        rd_ts_t rkbbcol_first_add_ts;    /**< Timestamp when first partition was
+                                          *   added to this collection cycle.
+                                          *   Used for broker.linger.ms check.
+                                          *   Reset to 0 after each send. */
+        int rkbbcol_partition_cnt;       /**< Number of partitions in collector */
+        int64_t rkbbcol_total_bytes;     /**< Estimated total bytes across
+                                          *   all collected partitions */
+
+        /**< Collected partitions - linked via rktp_collector_link */
+        TAILQ_HEAD(, rd_kafka_toppar_s) rkbbcol_toppars;
+} rd_kafka_broker_batch_collector_t;
+
+
+/**
  * @struct Broker instance
  */
 struct rd_kafka_broker_s { /* rd_kafka_broker_t */
@@ -249,6 +269,12 @@ struct rd_kafka_broker_s { /* rd_kafka_broker_t */
                                           */
         rd_avg_t rkb_avg_rtt;            /* Current RTT period */
         rd_avg_t rkb_avg_throttle;       /* Current throttle period */
+        rd_avg_t rkb_avg_produce_partitions; /**< Avg partitions per Produce */
+        rd_avg_t rkb_avg_produce_reqsize;    /**< Avg bytes per Produce */
+        rd_avg_t rkb_avg_produce_fill;       /**< Fill ratio (permille) */
+        rd_avg_t rkb_avg_batch_wait;         /**< Time from xmit queue enqueue
+                                              *   to inclusion in a Produce
+                                              *   request */
 
         /* These are all protected by rkb_lock */
         char rkb_name[RD_KAFKA_NODENAME_SIZE];     /* Displ name */
@@ -369,6 +395,11 @@ struct rd_kafka_broker_s { /* rd_kafka_broker_t */
 
         /* Track the last valid pid used when generating produce requests. */
         rd_kafka_pid_t rkb_produce_pid;
+
+        /**< Broker-level batch collector for producer batching.
+         *   Collects partitions with messages and sends when
+         *   broker.linger.ms expires or thresholds are reached. */
+        rd_kafka_broker_batch_collector_t rkb_batch_collector;
 };
 
 #define rd_kafka_broker_keep(rkb) rd_refcnt_add(&(rkb)->rkb_refcnt)
@@ -382,6 +413,20 @@ struct rd_kafka_broker_s { /* rd_kafka_broker_t */
  *          queue.backpressure.threshold is reached.
  */
 unsigned int rd_kafka_broker_outbufs_space(rd_kafka_broker_t *rkb);
+
+/**
+ * @name Broker-level batch collector functions
+ * @{
+ */
+void rd_kafka_broker_batch_collector_init(rd_kafka_broker_t *rkb);
+void rd_kafka_broker_batch_collector_add(rd_kafka_broker_t *rkb,
+                                         rd_kafka_toppar_t *rktp);
+int rd_kafka_broker_batch_collector_maybe_send(rd_kafka_broker_t *rkb,
+                                               rd_ts_t now,
+                                               rd_bool_t flushing);
+int rd_kafka_broker_batch_collector_send(rd_kafka_broker_t *rkb);
+rd_ts_t rd_kafka_broker_batch_collector_next_wakeup(rd_kafka_broker_t *rkb);
+/**@}*/
 
 /**
  * @brief Locks broker, acquires the states, unlocks, and returns

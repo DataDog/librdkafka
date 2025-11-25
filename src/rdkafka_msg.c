@@ -1785,7 +1785,7 @@ rd_bool_t rd_kafka_msgq_allow_wakeup_at(rd_kafka_msgq_t *rkmq,
         int64_t msg_bytes = rd_kafka_msgq_size(dest_rkmq);
 
         if (RD_KAFKA_MSGQ_EMPTY(dest_rkmq)) {
-                rkmq->rkmq_wakeup.on_first = rd_true;
+                rkmq->rkmq_wakeup.on_first = rd_false;
                 rkmq->rkmq_wakeup.abstime  = now + linger_us;
                 /* Leave next_wakeup untouched since the queue is empty */
                 msg_cnt   = 0;

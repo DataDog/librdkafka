@@ -175,6 +175,311 @@ rd_kafka_broker_produce_batch_send(produce_batch_t *batch,
         return rd_kafka_ProduceRequest_finalize(&ctx);
 }
 
+
+/*******************************************************************************
+ *
+ * Broker-level batch collector functions
+ *
+ * These functions implement broker-level batching, where partitions with
+ * messages are collected at the broker level and sent together when
+ * broker.linger.ms expires or size/partition thresholds are reached.
+ *
+ ******************************************************************************/
+
+/**
+ * @brief Initialize the broker's batch collector.
+ *
+ * Called when the broker is created.
+ *
+ * @locality broker thread or main thread during broker creation
+ */
+void rd_kafka_broker_batch_collector_init(rd_kafka_broker_t *rkb) {
+        rd_kafka_broker_batch_collector_t *col = &rkb->rkb_batch_collector;
+
+        TAILQ_INIT(&col->rkbbcol_toppars);
+        col->rkbbcol_first_add_ts = 0;
+        col->rkbbcol_partition_cnt = 0;
+        col->rkbbcol_total_bytes = 0;
+}
+
+/**
+ * @brief Get the oldest message timestamp from a partition's message queue.
+ *
+ * @returns The timestamp of the oldest message in the partition's msgq,
+ *          or 0 if the queue is empty.
+ *
+ * @locality broker thread
+ */
+static rd_ts_t rd_kafka_toppar_oldest_msg_ts(rd_kafka_toppar_t *rktp) {
+        rd_kafka_msg_t *rkm;
+
+        /* Check xmit queue first (messages ready for transmission) */
+        rkm = TAILQ_FIRST(&rktp->rktp_xmit_msgq.rkmq_msgs);
+        if (rkm)
+                return rkm->rkm_ts_enq;
+
+        /* Then check main queue */
+        rkm = TAILQ_FIRST(&rktp->rktp_msgq.rkmq_msgs);
+        if (rkm)
+                return rkm->rkm_ts_enq;
+
+        return 0;
+}
+
+/**
+ * @brief Estimate the size of messages in a partition's queue.
+ *
+ * @returns Estimated bytes for all messages in the partition.
+ *
+ * @locality broker thread
+ */
+static int64_t rd_kafka_toppar_estimate_batch_bytes(rd_kafka_toppar_t *rktp) {
+        /* Use the msgq byte count as an estimate */
+        return (int64_t)rd_kafka_msgq_size(&rktp->rktp_msgq) +
+               (int64_t)rd_kafka_msgq_size(&rktp->rktp_xmit_msgq);
+}
+
+/**
+ * @brief Add a partition to the broker's batch collector.
+ *
+ * Called when a partition has messages ready to send. The partition is added
+ * to the collector if not already present, and the collector's state is
+ * updated.
+ *
+ * @param rkb Broker
+ * @param rktp Partition with messages to send
+ *
+ * @locality broker thread
+ */
+void rd_kafka_broker_batch_collector_add(rd_kafka_broker_t *rkb,
+                                         rd_kafka_toppar_t *rktp) {
+        rd_kafka_broker_batch_collector_t *col = &rkb->rkb_batch_collector;
+        rd_ts_t now = rd_clock();
+
+        /* Check if partition has messages */
+        if (rd_kafka_msgq_len(&rktp->rktp_xmit_msgq) == 0 &&
+            rd_kafka_msgq_len(&rktp->rktp_msgq) == 0)
+                return; /* No messages, nothing to collect */
+
+        if (!rktp->rktp_in_batch_collector) {
+                /* New partition - add to collector */
+                TAILQ_INSERT_TAIL(&col->rkbbcol_toppars, rktp,
+                                  rktp_collector_link);
+                rktp->rktp_in_batch_collector = rd_true;
+                col->rkbbcol_partition_cnt++;
+                col->rkbbcol_total_bytes +=
+                    rd_kafka_toppar_estimate_batch_bytes(rktp);
+
+                /* Track when collection started (first partition added) */
+                if (col->rkbbcol_first_add_ts == 0)
+                        col->rkbbcol_first_add_ts = now;
+
+                rd_rkb_dbg(rkb, MSG, "BATCHCOL",
+                           "Added partition %.*s [%" PRId32
+                           "] to collector: "
+                           "partitions=%d bytes=%" PRId64 " collecting_for=%.1fms",
+                           RD_KAFKAP_STR_PR(rktp->rktp_rkt->rkt_topic),
+                           rktp->rktp_partition, col->rkbbcol_partition_cnt,
+                           col->rkbbcol_total_bytes,
+                           (double)(now - col->rkbbcol_first_add_ts) / 1000.0);
+        }
+}
+
+/**
+ * @brief Remove a partition from the collector.
+ *
+ * @locality broker thread
+ */
+static void
+rd_kafka_broker_batch_collector_remove(rd_kafka_broker_batch_collector_t *col,
+                                       rd_kafka_toppar_t *rktp) {
+        if (!rktp->rktp_in_batch_collector)
+                return;
+
+        TAILQ_REMOVE(&col->rkbbcol_toppars, rktp, rktp_collector_link);
+        rktp->rktp_in_batch_collector = rd_false;
+        col->rkbbcol_partition_cnt--;
+}
+
+/**
+ * @brief Send all collected partitions as produce requests.
+ *
+ * Iterates through collected partitions (oldest first) and builds
+ * produce requests until all partitions are sent.
+ *
+ * @param rkb Broker
+ *
+ * @returns Number of messages sent.
+ *
+ * @locality broker thread
+ */
+int rd_kafka_broker_batch_collector_send(rd_kafka_broker_t *rkb) {
+        rd_kafka_broker_batch_collector_t *col = &rkb->rkb_batch_collector;
+        rd_kafka_toppar_t *rktp, *tmp;
+        produce_batch_t batch;
+        int total_msg_cnt = 0;
+
+        if (col->rkbbcol_partition_cnt == 0)
+                return 0;
+
+        rd_rkb_dbg(rkb, MSG, "BATCHCOL",
+                   "Sending collector batch: partitions=%d bytes=%" PRId64
+                   " collecting_for=%.1fms",
+                   col->rkbbcol_partition_cnt, col->rkbbcol_total_bytes,
+                   col->rkbbcol_first_add_ts > 0
+                       ? (double)(rd_clock() - col->rkbbcol_first_add_ts) /
+                             1000.0
+                       : 0.0);
+
+        memset(&batch, 0, sizeof(batch));
+
+        /* Iterate through collected partitions and build produce requests */
+        TAILQ_FOREACH_SAFE(rktp, &col->rkbbcol_toppars, rktp_collector_link,
+                           tmp) {
+                /* Try to initialize a batch if not already */
+                if (!rd_kafka_broker_produce_batch_try_init(&batch, rkb)) {
+                        /* Can't send (e.g., backpressure) - stop here */
+                        break;
+                }
+
+                /* Try to add this partition to the batch */
+                if (rd_kafka_broker_produce_batch_append(&batch, rktp)) {
+                        /* Partition added - remove from collector */
+                        rd_kafka_broker_batch_collector_remove(col, rktp);
+                } else {
+                        /* Batch full - send current batch and start new one */
+                        total_msg_cnt +=
+                            rd_kafka_broker_produce_batch_send(&batch, rkb);
+                        memset(&batch, 0, sizeof(batch));
+
+                        /* Try again with new batch */
+                        if (rd_kafka_broker_produce_batch_try_init(&batch,
+                                                                   rkb) &&
+                            rd_kafka_broker_produce_batch_append(&batch,
+                                                                 rktp)) {
+                                rd_kafka_broker_batch_collector_remove(col,
+                                                                       rktp);
+                        }
+                }
+        }
+
+        /* Send any remaining batch */
+        if (batch.batch_initialized)
+                total_msg_cnt +=
+                    rd_kafka_broker_produce_batch_send(&batch, rkb);
+
+        /* Reset collector state for next collection cycle */
+        col->rkbbcol_total_bytes = 0;
+        /* If all partitions were sent, reset first_add_ts.
+         * If partitions remain (due to backpressure), keep first_add_ts
+         * so we continue timing from when collection started. */
+        if (col->rkbbcol_partition_cnt == 0) {
+                col->rkbbcol_first_add_ts = 0;
+        }
+        /* If partitions remain, recalculate total_bytes */
+        else {
+                TAILQ_FOREACH(rktp, &col->rkbbcol_toppars, rktp_collector_link) {
+                        col->rkbbcol_total_bytes +=
+                            rd_kafka_toppar_estimate_batch_bytes(rktp);
+                }
+        }
+
+        return total_msg_cnt;
+}
+
+/**
+ * @brief Check if batch collection criteria are met and send if so.
+ *
+ * Checks the following criteria in priority order:
+ * 1. Flush requested - always send
+ * 2. broker.batch.max.partitions reached - send early
+ * 3. broker.batch.max.bytes reached - send early
+ * 4. broker.linger.ms expired - send
+ *
+ * @param rkb Broker
+ * @param now Current timestamp
+ * @param flushing True if flush was requested
+ *
+ * @returns Number of messages sent, or 0 if criteria not met.
+ *
+ * @locality broker thread
+ */
+int rd_kafka_broker_batch_collector_maybe_send(rd_kafka_broker_t *rkb,
+                                               rd_ts_t now,
+                                               rd_bool_t flushing) {
+        rd_kafka_broker_batch_collector_t *col = &rkb->rkb_batch_collector;
+        rd_kafka_conf_t *conf = &rkb->rkb_rk->rk_conf;
+        rd_bool_t should_send = rd_false;
+        const char *reason = NULL;
+
+        if (col->rkbbcol_partition_cnt == 0)
+                return 0;
+
+        /* Priority 1: Flush requested */
+        if (flushing) {
+                should_send = rd_true;
+                reason = "flush";
+        }
+
+        /* Priority 2: Partition count cap reached */
+        if (!should_send && conf->broker_batch_max_partitions > 0 &&
+            col->rkbbcol_partition_cnt >= conf->broker_batch_max_partitions) {
+                should_send = rd_true;
+                reason = "max_partitions";
+        }
+
+        /* Priority 3: Byte cap reached */
+        if (!should_send && conf->broker_batch_max_bytes > 0 &&
+            col->rkbbcol_total_bytes >= conf->broker_batch_max_bytes) {
+                should_send = rd_true;
+                reason = "max_bytes";
+        }
+
+        /* Priority 4: broker.linger.ms expired (collecting for too long) */
+        if (!should_send && col->rkbbcol_first_add_ts > 0 &&
+            now - col->rkbbcol_first_add_ts >= conf->broker_linger_us) {
+                should_send = rd_true;
+                reason = "broker_linger";
+        }
+
+        if (should_send) {
+                rd_rkb_dbg(rkb, MSG, "BATCHCOL",
+                           "Batch collector send triggered: partitions=%d "
+                           "bytes=%" PRId64 " collecting_for=%.1fms reason=%s",
+                           col->rkbbcol_partition_cnt, col->rkbbcol_total_bytes,
+                           col->rkbbcol_first_add_ts > 0
+                               ? (double)(now - col->rkbbcol_first_add_ts) /
+                                     1000.0
+                               : 0.0,
+                           reason);
+
+                return rd_kafka_broker_batch_collector_send(rkb);
+        }
+
+        return 0;
+}
+
+/**
+ * @brief Calculate the next wakeup time for the batch collector.
+ *
+ * @param rkb Broker
+ *
+ * @returns The absolute timestamp when the collector should next be checked,
+ *          or 0 if there's nothing pending.
+ *
+ * @locality broker thread
+ */
+rd_ts_t rd_kafka_broker_batch_collector_next_wakeup(rd_kafka_broker_t *rkb) {
+        rd_kafka_broker_batch_collector_t *col = &rkb->rkb_batch_collector;
+        rd_kafka_conf_t *conf = &rkb->rkb_rk->rk_conf;
+
+        if (col->rkbbcol_partition_cnt == 0 || col->rkbbcol_first_add_ts == 0)
+                return 0;
+
+        return col->rkbbcol_first_add_ts + conf->broker_linger_us;
+}
+
+
 /**
  * @returns true for logical brokers (e.g., coordinators) without an address set
  *
@@ -3950,6 +4255,9 @@ static int rd_kafka_toppar_producer_serve(rd_kafka_broker_t *rkb,
 
         rd_kafka_toppar_lock(rktp);
 
+        if (rd_kafka_msgq_len(&rktp->rktp_xmit_msgq) == 0)
+                rktp->rktp_ts_xmit_enq = 0;
+
         if (unlikely(rktp->rktp_broker != rkb)) {
                 /* Currently migrating away from this
                  * broker. */
@@ -4017,20 +4325,23 @@ static int rd_kafka_toppar_producer_serve(rd_kafka_broker_t *rkb,
                         rd_kafka_msgq_insert_msgq(
                             &rktp->rktp_xmit_msgq, &rktp->rktp_msgq,
                             rktp->rktp_rkt->rkt_conf.msg_order_cmp);
+
+                        if (rktp->rktp_ts_xmit_enq == 0 &&
+                            rd_kafka_msgq_len(&rktp->rktp_xmit_msgq) > 0)
+                                rktp->rktp_ts_xmit_enq = now;
                 }
 
-                /* Calculate maximum wait-time to honour
-                 * queue.buffering.max.ms contract.
-                 * Unless flushing in which case immediate
-                 * wakeups are allowed. */
+                /* With broker-level batching, we don't use per-partition linger
+                 * to decide when to send. The broker-level collector handles
+                 * timing based on broker.linger.ms.
+                 *
+                 * We still call rd_kafka_msgq_allow_wakeup_at() to update
+                 * internal state, but pass NULL for next_wakeup so it doesn't
+                 * override the broker-level wakeup timing. */
                 batch_ready = rd_kafka_msgq_allow_wakeup_at(
                     &rktp->rktp_msgq, &rktp->rktp_xmit_msgq,
-                    /* Only update the broker thread wakeup time
-                     * if connection is up and messages can actually be
-                     * sent, otherwise the wakeup can't do much. */
-                    rkb->rkb_state == RD_KAFKA_BROKER_STATE_UP ? next_wakeup
-                                                               : NULL,
-                    now, flushing ? 1 : rkb->rkb_rk->rk_conf.buffering_max_us,
+                    NULL, /* Don't update next_wakeup - broker collector handles it */
+                    now, flushing ? 1 : rkb->rkb_rk->rk_conf.broker_linger_us,
                     /* Batch message count threshold */
                     rkb->rkb_rk->rk_conf.batch_num_messages,
                     /* Batch total size threshold */
@@ -4157,11 +4468,8 @@ static int rd_kafka_broker_produce_toppars(rd_kafka_broker_t *rkb,
         rd_kafka_pid_t pid      = RD_KAFKA_PID_INITIALIZER;
         rd_bool_t may_send      = rd_true;
         rd_bool_t flushing      = rd_false;
-        produce_batch_t batch;
-        int xmit_msg_cnt = 0;
+        int xmit_msg_cnt  = 0;
         int total_msg_cnt = 0;
-
-        memset(&batch, 0, sizeof(batch));
 
         /* Round-robin serve each toppar. */
         rktp = rkb->rkb_active_toppar_next;
@@ -4216,27 +4524,21 @@ static int rd_kafka_broker_produce_toppars(rd_kafka_broker_t *rkb,
         do {
                 rd_ts_t this_next_wakeup = ret_next_wakeup;
 
-                /* Check if the toppar needs to produce */
-                if (rd_kafka_toppar_producer_serve(rkb, rktp, pid, now, &this_next_wakeup, do_timeout_scan, may_send, flushing)) {
-                        total_msg_cnt += rd_kafka_msgq_len(&rktp->rktp_xmit_msgq);
+                /* Check if the toppar needs to produce (moves msgs to xmit_msgq) */
+                if (rd_kafka_toppar_producer_serve(rkb, rktp, pid, now,
+                                                   &this_next_wakeup,
+                                                   do_timeout_scan, may_send,
+                                                   flushing)) {
+                        int msgq_len = rd_kafka_msgq_len(&rktp->rktp_xmit_msgq);
+                        total_msg_cnt += msgq_len;
 
-
-                        /* More than one message set cannot currently be added
-                        * to a single request since there will not be enough
-                        * information to find the correct messages in the
-                        * produce response.
-                        * When a batch completes, try to add messages again
-                        * for the same toppar if messages remain.
-                        */
-                       while(rd_kafka_broker_produce_batch_try_init(&batch, rkb)) {
-                        if (rd_kafka_broker_produce_batch_append(&batch, rktp))
-                                break;
-                        
-                        xmit_msg_cnt += rd_kafka_broker_produce_batch_send(&batch, rkb);
-                        memset(&batch, 0, sizeof(batch));
-
-                        rktp_next_start = rktp;
-                       }
+                        /* Add partition to broker-level batch collector.
+                         * The collector will decide when to send based on
+                         * broker.linger.ms and other thresholds. */
+                        if (msgq_len > 0) {
+                                rd_kafka_broker_batch_collector_add(rkb, rktp);
+                                rktp_next_start = rktp;
+                        }
                 }
 
                 rd_kafka_set_next_wakeup(&ret_next_wakeup, this_next_wakeup);
@@ -4246,23 +4548,41 @@ static int rd_kafka_broker_produce_toppars(rd_kafka_broker_t *rkb,
                  rkb->rkb_active_toppar_next);
 
         /* Update next starting toppar to produce in round-robin list.
-        * but give preference to the next toppar that had messages to send. */
+         * Give preference to the next toppar that had messages to send. */
         rd_kafka_broker_active_toppar_next(
             rkb,
-            (rktp_next_start && rktp_next_start !=
-                        rkb->rkb_active_toppar_next) ? rktp_next_start :
-            CIRCLEQ_LOOP_NEXT(&rkb->rkb_active_toppars, rktp, rktp_activelink));
+            (rktp_next_start &&
+             rktp_next_start != rkb->rkb_active_toppar_next)
+                ? rktp_next_start
+                : CIRCLEQ_LOOP_NEXT(&rkb->rkb_active_toppars, rktp,
+                                    rktp_activelink));
 
+        /* Check collector criteria and send if met.
+         * This implements broker-level batching where we collect partitions
+         * and send when broker.linger.ms expires or thresholds are reached. */
+        xmit_msg_cnt =
+            rd_kafka_broker_batch_collector_maybe_send(rkb, now, flushing);
 
-        /* send the last batch if necessary */
-        if (batch.batch_initialized)
-                xmit_msg_cnt += rd_kafka_broker_produce_batch_send(&batch, rkb);
+        /* Update wakeup time based on collector's next deadline */
+        {
+                rd_ts_t collector_wakeup =
+                    rd_kafka_broker_batch_collector_next_wakeup(rkb);
+                if (collector_wakeup > 0)
+                        rd_kafka_set_next_wakeup(&ret_next_wakeup,
+                                                 collector_wakeup);
+        }
 
         /* Wake up immediately if there is still data ready
-        * to be send and there is capacity to do so. */
-       if ((xmit_msg_cnt < total_msg_cnt) &&
-           rd_kafka_broker_outbufs_space(rkb) > 0)
-               ret_next_wakeup = now;
+         * to be sent and there is capacity to do so. */
+        if (rkb->rkb_batch_collector.rkbbcol_partition_cnt > 0 &&
+            rd_kafka_broker_outbufs_space(rkb) > 0 && xmit_msg_cnt == 0) {
+                /* Collector has pending partitions but didn't send -
+                 * schedule wakeup for when broker.linger.ms expires */
+                rd_ts_t collector_wakeup =
+                    rd_kafka_broker_batch_collector_next_wakeup(rkb);
+                if (collector_wakeup > 0 && collector_wakeup < ret_next_wakeup)
+                        ret_next_wakeup = collector_wakeup;
+        }
 
         *next_wakeup = ret_next_wakeup;
 
@@ -4857,6 +5177,10 @@ void rd_kafka_broker_destroy_final(rd_kafka_broker_t *rkb) {
         rd_avg_destroy(&rkb->rkb_avg_outbuf_latency);
         rd_avg_destroy(&rkb->rkb_avg_rtt);
         rd_avg_destroy(&rkb->rkb_avg_throttle);
+        rd_avg_destroy(&rkb->rkb_avg_produce_partitions);
+        rd_avg_destroy(&rkb->rkb_avg_produce_reqsize);
+        rd_avg_destroy(&rkb->rkb_avg_produce_fill);
+        rd_avg_destroy(&rkb->rkb_avg_batch_wait);
         rd_avg_destroy(&rkb->rkb_telemetry.rd_avg_rollover.rkb_avg_rtt);
         rd_avg_destroy(&rkb->rkb_telemetry.rd_avg_current.rkb_avg_rtt);
         rd_avg_destroy(&rkb->rkb_telemetry.rd_avg_rollover.rkb_avg_throttle);
@@ -4959,6 +5283,7 @@ rd_kafka_broker_t *rd_kafka_broker_add(rd_kafka_t *rk,
         rkb->rkb_logname = rd_strdup(rkb->rkb_name);
         TAILQ_INIT(&rkb->rkb_toppars);
         CIRCLEQ_INIT(&rkb->rkb_active_toppars);
+        rd_kafka_broker_batch_collector_init(rkb);
         TAILQ_INIT(&rkb->rkb_monitors);
         rd_kafka_bufq_init(&rkb->rkb_outbufs);
         rd_kafka_bufq_init(&rkb->rkb_waitresps);
@@ -4972,6 +5297,17 @@ rd_kafka_broker_t *rd_kafka_broker_add(rd_kafka_t *rk,
                     rk->rk_conf.stats_interval_ms);
         rd_avg_init(&rkb->rkb_avg_throttle, RD_AVG_GAUGE, 0, 5000 * 1000, 2,
                     rk->rk_conf.stats_interval_ms);
+        rd_avg_init(&rkb->rkb_avg_produce_partitions, RD_AVG_GAUGE, 0,
+                    rk->rk_conf.produce_request_max_partitions, 2,
+                    rk->rk_conf.stats_interval_ms);
+        rd_avg_init(&rkb->rkb_avg_produce_reqsize, RD_AVG_GAUGE, 0,
+                    rk->rk_conf.max_msg_size, 2,
+                    rk->rk_conf.stats_interval_ms);
+        /* store fill ratio in permille (0-1000). */
+        rd_avg_init(&rkb->rkb_avg_produce_fill, RD_AVG_GAUGE, 0, 1000, 2,
+                    rk->rk_conf.stats_interval_ms);
+        rd_avg_init(&rkb->rkb_avg_batch_wait, RD_AVG_GAUGE, 0, 5 * 1000 * 1000,
+                    2, rk->rk_conf.stats_interval_ms);
         rd_avg_init(&rkb->rkb_telemetry.rd_avg_rollover.rkb_avg_rtt,
                     RD_AVG_GAUGE, 0, 500 * 1000, 2,
                     rk->rk_conf.enable_metrics_push);

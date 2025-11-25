@@ -1738,11 +1738,28 @@ int rd_kafka_produce_calculator_add(rd_kafka_produce_calculator_t *rkpca,
                  * This is a limitation of being able to look up the correct
                  * message data in rd_kafka_handle_Producer_parse */
                 /* TODO(xvandish): This is a big improvement opportunity */
+                if (rk->rk_conf.debug & (RD_KAFKA_DBG_MSG | RD_KAFKA_DBG_QUEUE)) {
+                        int msgs_left_behind =
+                            xmit_msgq_len - (int)batch_msg_cnt;
+                        size_t remaining_capacity =
+                            rk->rk_conf.max_msg_size - calculated_size;
+                        rd_kafka_dbg(
+                            rk, MSG, "MBATCH",
+                            "Calculator added toppar %s[%" PRId32
+                            "]: msgs_added=%d msgs_left=%d "
+                            "est_size=%zu remaining_capacity=%zu (%.1f%% fill)",
+                            rktp->rktp_rkt->rkt_topic->str, rktp->rktp_partition,
+                            (int)batch_msg_cnt, msgs_left_behind,
+                            calculated_size, remaining_capacity,
+                            (calculated_size * 100.0) /
+                                rk->rk_conf.max_msg_size);
+                }
                 break;
         }
 
-        if (added_batch_cnt == 0)
+        if (added_batch_cnt == 0) {
                 return 0;
+        }
 
         rkpca->rkpca_topic_cnt += topic_changed;
         rkpca->rkpca_partition_cnt += added_batch_cnt;
@@ -1935,6 +1952,15 @@ int rd_kafka_produce_ctx_append_toppar(rd_kafka_produce_ctx_t *rkpc,
             queue_msg_cnt_start - queue_msg_cnt_end;
         if (queue_msg_cnt_start != queue_message_cnt_appended) {
                 rkpc->rkpc_full = 1;
+
+                rd_rkb_dbg(rkpc->rkpc_rkb, MSG, "MBATCH",
+                           "Partition %s[%"PRId32"] only partially "
+                           "written to request (%d/%d msgs appended); "
+                           "will need a new request for remaining messages",
+                           rktp->rktp_rkt->rkt_topic->str,
+                           rktp->rktp_partition,
+                           queue_message_cnt_appended,
+                           queue_msg_cnt_start);
         }
 
         /* Add additional required features */
@@ -1950,6 +1976,18 @@ int rd_kafka_produce_ctx_append_toppar(rd_kafka_produce_ctx_t *rkpc,
         rkpc->rkpc_appended_message_bytes +=
             queue_msg_bytes_start - queue_msg_bytes_end;
         *appended_msg_cnt = queue_message_cnt_appended;
+
+        /* Batch wait time: time spent in the broker's per-partition queue
+         * before being packaged into a (multi)Produce request. */
+        if (rktp->rktp_ts_xmit_enq) {
+                rd_ts_t wait_us = rd_clock() - rktp->rktp_ts_xmit_enq;
+                if (wait_us >= 0)
+                        rd_avg_add(&rkpc->rkpc_rkb->rkb_avg_batch_wait,
+                                   (int64_t)wait_us);
+        }
+
+        if (queue_msg_cnt_end == 0)
+                rktp->rktp_ts_xmit_enq = 0;
 
         return 1;
 }
