@@ -1542,6 +1542,34 @@ static const struct rd_kafka_property rd_kafka_properties[] = {
      "before reaching this partition limit.",
      1, 10000000, 10},
 
+    /* Broker-level batching configuration */
+    {_RK_GLOBAL | _RK_PRODUCER, "broker.linger.ms", _RK_C_DBL,
+     _RK(broker_linger_ms_dbl),
+     "Maximum time in milliseconds to wait at the broker level before "
+     "sending a produce request. This is the broker-level equivalent of "
+     "the deprecated `linger.ms` setting. Messages are collected across "
+     "all partitions and sent when this timeout expires, or when "
+     "`broker.batch.max.partitions` or `broker.batch.max.bytes` thresholds "
+     "are reached, whichever comes first. "
+     "This setting controls the maximum latency for message delivery.",
+     .dmin = 0, .dmax = 900.0 * 1000.0, .ddef = 5.0},
+
+    {_RK_GLOBAL | _RK_PRODUCER, "broker.batch.max.partitions", _RK_C_INT,
+     _RK(broker_batch_max_partitions),
+     "Maximum number of partitions to collect before sending a produce "
+     "request, regardless of `broker.linger.ms`. Set to -1 to disable "
+     "this threshold (default). When enabled, a produce request is sent "
+     "as soon as this many partitions have messages ready, which can "
+     "reduce latency for high-throughput workloads.",
+     -1, 10000000, -1},
+
+    {_RK_GLOBAL | _RK_PRODUCER, "broker.batch.max.bytes", _RK_C_INT,
+     _RK(broker_batch_max_bytes),
+     "Maximum total bytes to collect across all partitions before sending "
+     "a produce request, regardless of `broker.linger.ms`. Set to -1 to "
+     "disable this threshold (default). When enabled, a produce request "
+     "is sent as soon as this many bytes are ready across all partitions.",
+     -1, INT_MAX, -1},
 
 
     /*
@@ -4104,6 +4132,19 @@ const char *rd_kafka_conf_finalize(rd_kafka_type_t cltype,
          * update buffering_max_ms_dbl. */
         conf->buffering_max_us = (rd_ts_t)(conf->buffering_max_ms_dbl * 1000);
 
+        /* broker.linger.ms: inherit from linger.ms if not explicitly set.
+         * This provides backwards compatibility for existing configs and
+         * client libraries that use linger.ms. */
+        if (!rd_kafka_conf_is_modified(conf, "broker.linger.ms") &&
+            rd_kafka_conf_is_modified(conf, "linger.ms")) {
+                /* Inherit from linger.ms */
+                conf->broker_linger_us              = conf->buffering_max_us;
+                conf->warn.linger_ms_used_for_broker_linger = rd_true;
+        } else {
+                /* Use broker.linger.ms (default or explicit) */
+                conf->broker_linger_us =
+                    (rd_ts_t)(conf->broker_linger_ms_dbl * 1000);
+        }
 
         return NULL;
 }
@@ -4241,6 +4282,14 @@ int rd_kafka_conf_warn(rd_kafka_t *rk) {
                              "global configuration were overwritten by "
                              "explicitly setting a default_topic_conf: "
                              "recommend not using set_default_topic_conf");
+
+        if (rk->rk_conf.warn.linger_ms_used_for_broker_linger)
+                rd_kafka_log(rk, LOG_WARNING, "CONFWARN",
+                             "Configuration `linger.ms` is deprecated for "
+                             "producer batching. Using its value (%.0fms) for "
+                             "`broker.linger.ms`. Please migrate to "
+                             "`broker.linger.ms` for broker-level batching.",
+                             rk->rk_conf.buffering_max_ms_dbl);
 
         /* Additional warnings */
         if (rk->rk_conf.retry_backoff_ms > rk->rk_conf.retry_backoff_max_ms) {

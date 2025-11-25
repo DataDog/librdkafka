@@ -446,6 +446,11 @@ struct rd_kafka_conf_s {
         int sticky_partition_linger_ms;
         int produce_request_max_partitions;
 
+        /* Broker-level batching configuration */
+        double broker_linger_ms_dbl;    /**< broker.linger.ms configured value */
+        rd_ts_t broker_linger_us;       /**< broker.linger.ms in microseconds */
+        int broker_batch_max_partitions; /**< broker.batch.max.partitions (-1 = disabled) */
+        int broker_batch_max_bytes;     /**< broker.batch.max.bytes (-1 = disabled) */
 
         /* Message delivery report callback.
          * Called once for each produced message, either on
@@ -582,6 +587,8 @@ struct rd_kafka_conf_s {
                 /** Properties on (implicit pass-thru) default_topic_conf were
                  *  overwritten by passing an explicit default_topic_conf. */
                 rd_bool_t default_topic_conf_overwritten;
+                /** linger.ms was used to set broker.linger.ms (deprecated) */
+                rd_bool_t linger_ms_used_for_broker_linger;
         } warn;
 };
 

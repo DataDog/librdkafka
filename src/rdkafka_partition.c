@@ -717,6 +717,30 @@ void rd_kafka_toppar_enq_msg(rd_kafka_toppar_t *rktp,
                 /* Wake-up broker thread */
                 rktp->rktp_msgq.rkmq_wakeup.signalled = rd_true;
                 rd_kafka_q_keep(wakeup_q);
+
+                /* Debug: log what triggered this wakeup */
+                if (rktp->rktp_rkt->rkt_rk->rk_conf.debug &
+                    RD_KAFKA_DBG_MSG) {
+                        const char *reason;
+                        if (now >= rktp->rktp_msgq.rkmq_wakeup.abstime)
+                                reason = "linger_expired";
+                        else if (rktp->rktp_msgq.rkmq_msg_cnt == 1 &&
+                                 rktp->rktp_msgq.rkmq_wakeup.on_first)
+                                reason = "first_msg";
+                        else
+                                reason = "batch_threshold";
+                        rd_kafka_dbg(rktp->rktp_rkt->rkt_rk, MSG, "WAKEUP",
+                                     "Partition %s[%" PRId32
+                                     "] triggered wakeup: reason=%s "
+                                     "msgs=%d abstime=%" PRId64
+                                     " now=%" PRId64 " diff=%" PRId64 "ms",
+                                     rktp->rktp_rkt->rkt_topic->str,
+                                     rktp->rktp_partition, reason,
+                                     rktp->rktp_msgq.rkmq_msg_cnt,
+                                     rktp->rktp_msgq.rkmq_wakeup.abstime, now,
+                                     (rktp->rktp_msgq.rkmq_wakeup.abstime -
+                                      now) / 1000);
+                }
         }
 
         rd_kafka_toppar_unlock(rktp);

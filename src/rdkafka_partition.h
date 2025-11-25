@@ -138,6 +138,7 @@ struct rd_kafka_toppar_s {                           /* rd_kafka_toppar_t */
         TAILQ_ENTRY(rd_kafka_toppar_s) rktp_rklink;  /* rd_kafka_t link */
         TAILQ_ENTRY(rd_kafka_toppar_s) rktp_rkblink; /* rd_kafka_broker_t link*/
         TAILQ_ENTRY(rd_kafka_toppar_s) rktp_batch_link; /* rd_kafka_broker_t link for batch produce */
+        TAILQ_ENTRY(rd_kafka_toppar_s) rktp_collector_link; /* rkb_batch_collector link */
         CIRCLEQ_ENTRY(rd_kafka_toppar_s)
         rktp_activelink;                              /* rkb_active_toppars */
         TAILQ_ENTRY(rd_kafka_toppar_s) rktp_rktlink;  /* rd_kafka_topic_t link*/
@@ -176,8 +177,13 @@ struct rd_kafka_toppar_s {                           /* rd_kafka_toppar_t */
                                            * protected by rktp_lock */
         rd_kafka_msgq_t rktp_xmit_msgq;   /* internal broker xmit queue.
                                            * local to broker thread. */
+        rd_ts_t rktp_ts_xmit_enq;         /**< When the current xmit queue
+                                           *   contents were enqueued on this
+                                           *   broker (for batch wait stats). */
 
         int rktp_fetch; /* On rkb_active_toppars list */
+        rd_bool_t rktp_in_batch_collector; /**< True if partition is in
+                                            *   broker's batch collector */
 
         /* Consumer */
         rd_kafka_q_t *rktp_fetchq; /* Queue of fetched messages

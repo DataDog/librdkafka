@@ -8,19 +8,23 @@ Future Work Ideas for Multibatch
 - **Age-adjusted scoring**: compute `score = backlog_bytes + α * (now - last_sent)` (or a similar function that includes linger age). The age term ensures that even small queues are eventually promoted if they’ve been waiting long enough. Reset `last_sent` when we send for the partition so the score reflects both volume and waiting time.
 - Implementation detail: have `rd_kafka_toppar_producer_serve()` emit the score/deficit alongside the toppar pointer (e.g., by extending the struct we queue in `produce_batch_t`) so the batch builder doesn’t need to re-lock partitions or re-read queues just to rank them.
 
-2. Adaptive Batch Tuning
-------------------------
-- Borrow TCP Vegas-style congestion control: monitor request RTTs and queue backpressure to expand or contract `produce.request.max.partitions` dynamically per broker. We can treat the number of partitions per request as the Vegas window size, increasing when RTT stays close to baseline and decreasing when it inflates.
-- Track per-request partition counts, payload sizes, and success/retry rates to auto-tune batching aggressiveness when the cluster is healthy vs. congested. Feed those metrics into a simple controller (e.g., AIMD) so tuning decisions are automated but bounded.
+2. Adaptive Batch Tuning (merge of RTT/backpressure and inflight scaling)
+-------------------------------------------------------------------------
+- Treat `produce.request.max.partitions` as a window and adapt it dynamically per broker:
+  - Increase when RTT stays near baseline and retry rate/inflight counts are low.
+  - Decrease when RTT inflates, inflight per broker rises, or retry rate spikes.
+- Feed per-request partition counts, payload sizes, RTTs, inflight, and retry metrics into a simple controller (e.g., AIMD/Vegas hybrid) to keep aggressiveness bounded but responsive.
 
 3. Topic-Level Grouping Improvements
 ------------------------------------
 - Sort ready partitions by `(required_acks, request_timeout_ms, topic)` before building a request so we maximize the chance of fitting more partitions per request despite config differences. Maintaining small sorted buckets keyed by that tuple allows O(log n) insertion while the builder simply walks each bucket.
 - Consider grouping by compression codec/common features to avoid toggling compression state mid-request. For example, keep separate queues for LZ4 vs ZSTD topics so the builder can emit homogeneous segments and reuse compression state.
 
-4. Hot Partition Handling
--------------------------
-- Allow multiple message sets from the same toppar in a single request when that toppar dominates the backlog, rather than limiting to one batch per partition. This requires segment metadata (see item 7) but cuts syscall overhead dramatically for skewed topics.
+4. Hot Partition Handling (merged with segments)
+-----------------------------------------------
+- Allow multiple message sets/segments from the same toppar in a single request when that toppar dominates the backlog, rather than limiting to one batch per partition. This requires segment metadata so the response can be split per segment (see below) but cuts syscall overhead and improves compression for skewed topics.
+- Extend the request metadata to keep a list of segments for each partition (e.g., `{msg_count, byte_count, base_msgid/base_seq, msgqueue_cursor}` tuples). The response parser can then iterate segment-by-segment and apply offsets/errors to each slice.
+- With segment tracking in place, let the batch builder append additional chunks from the same partition when backlog remains and request space remains. Guard with configurable limits (max segments per partition, age thresholds) to avoid unbounded growth or head-of-line blocking.
 - Use “linger age” so partitions with nearly expired batches get priority even if their backlog is small. A simple rule like “if `now - oldest_msg_ts > linger_ms * β` push this partition to the front” prevents long-tail latency spikes.
 
 5. Metrics & Visualization
@@ -33,13 +37,6 @@ Future Work Ideas for Multibatch
 - For transactional producers, prefer batching partitions registered in the same transaction to minimize control-plane chatter and reduce `AddPartitionsToTxn` pressure. We can query the transactional state to see which partitions are already in the txn and bias the scheduler towards them.
 
 These ideas build on the rewritten multibatch infrastructure and can be tackled incrementally once the base implementation is stable.
-
-7. Multiple Segments per Hot Partition
---------------------------------------
-- Current upstream batching still limits each partition to a single contiguous message set per request because the response bookkeeping only tracks one entry per `(topic, partition)`. Any additional data from that partition must go into a new request.
-- Extend the request metadata to keep a list of segments for each partition (e.g., `{msg_count, byte_count, base_msgid/base_seq, msgqueue_cursor}` tuples). The response parser can then iterate segment-by-segment and apply offsets/errors to each slice.
-- With segment tracking in place, allow the batch builder to append additional chunks from the same partition when it still has backlog and request space remains. That keeps wire utilization high for skewed workloads, improves compression, and avoids repeated request setup costs for the hot partition.
-- Guard with configurable limits (max segments per partition, age thresholds) to avoid unbounded memory growth or head-of-line blocking.
 
 8. Request Builder Efficiency
 -----------------------------
@@ -59,10 +56,6 @@ These ideas build on the rewritten multibatch infrastructure and can be tackled 
 11. Latency vs Throughput Modes
 -------------------------------
 - Provide a mode or heuristic that biases the builder towards age (low latency) or size (high throughput). Adjust linger behaviour and partition selection accordingly, e.g., by capping per-request wait time when in latency mode or raising `linger.ms`/partition caps when in throughput mode.
-
-12. Backpressure-Aware Scaling
-------------------------------
-- Monitor broker in-flight counts and throttle `produce.request.max.partitions` dynamically: shrink when the broker is saturated to reduce retries, expand when there’s headroom. This can piggyback on `rkb_outbufs_space()` and the observed retry rate.
 
 13. SIMD / Fast Copy Optimizations
 ----------------------------------
