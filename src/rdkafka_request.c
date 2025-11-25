@@ -78,6 +78,9 @@ typedef struct rd_kafka_produce_req_toppar_s {
          * table. */
         int rkprt_assigned;
 
+        /* Cached CRC for fast rejection on lookup */
+        rd_crc32_t rkprt_crc;
+
         /* refcounted toppar pointer */
         rd_kafka_toppar_t *rkprt_s_rktp;
 
@@ -190,6 +193,7 @@ assign_toppar_info(rd_kafka_produce_req_ctx_t *req_ctx,
 
                 if (!rtoppar->rkprt_assigned) {
                         rtoppar->rkprt_assigned = 1;
+                        rtoppar->rkprt_crc      = crc;
                         rd_kafka_dbg(rkt->rkt_rk, MSG, "HASHMAP",
                                      "assign_toppar_info: assigned at index=%d", index);
                         return rtoppar;
@@ -202,6 +206,9 @@ assign_toppar_info(rd_kafka_produce_req_ctx_t *req_ctx,
 
                 if (!rtoppar->rkprt_assigned) {
                         rtoppar->rkprt_assigned = 1;
+                        rtoppar->rkprt_crc      = crc;
+                        rd_kafka_dbg(rkt->rkt_rk, MSG, "HASHMAP",
+                                     "assign_toppar_info: assigned at index=%d", index);
                         return rtoppar;
                 }
         }
@@ -232,6 +239,9 @@ get_toppar_info(rd_kafka_produce_req_ctx_t *req_ctx,
                         continue;
                 }
 
+                if (rtoppar->rkprt_crc && rtoppar->rkprt_crc != crc)
+                        continue;
+
                 rktp = rtoppar->rkprt_s_rktp;
 
                 rd_kafka_dbg(rkt->rkt_rk, MSG, "HASHMAP",
@@ -254,6 +264,9 @@ get_toppar_info(rd_kafka_produce_req_ctx_t *req_ctx,
                 if (!rtoppar->rkprt_assigned || !rtoppar->rkprt_s_rktp) {
                         continue;
                 }
+
+                if (rtoppar->rkprt_crc && rtoppar->rkprt_crc != crc)
+                        continue;
 
                 rktp = rtoppar->rkprt_s_rktp;
 
@@ -5286,12 +5299,18 @@ int rd_kafka_ProduceRequest_init(rd_kafka_produce_ctx_t *rkpc,
                                  size_t message_bytes_size,
                                  int request_required_acks,
                                  int request_timeout_ms) {
+        /* Over-allocate toppar slots to keep hash table load factor low. */
+        int toppar_alloc_cnt = partition_max;
+        if (toppar_alloc_cnt < INT_MAX / 2)
+                toppar_alloc_cnt *= 2;
+
         rd_kafka_produce_req_ctx_t *rkprc =
-            rd_calloc(1, sizeof(*rkprc) + (sizeof(*rkprc->rkprc_toppar_info) *
-                                           partition_max));
+            rd_calloc(1, sizeof(*rkprc) +
+                             (sizeof(*rkprc->rkprc_toppar_info) *
+                              toppar_alloc_cnt));
 
         /* set up rkprc_toppars arre */
-        rkprc->rkprc_toppar_alloc_cnt = partition_max;
+        rkprc->rkprc_toppar_alloc_cnt = toppar_alloc_cnt;
         rkprc->rkprc_toppar_info =
             (rd_kafka_produce_req_toppar_t *)(((char *)rkprc) + sizeof(*rkprc));
 
