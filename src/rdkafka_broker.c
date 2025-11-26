@@ -197,9 +197,10 @@ void rd_kafka_broker_batch_collector_init(rd_kafka_broker_t *rkb) {
         rd_kafka_broker_batch_collector_t *col = &rkb->rkb_batch_collector;
 
         TAILQ_INIT(&col->rkbbcol_toppars);
-        col->rkbbcol_first_add_ts = 0;
+        col->rkbbcol_first_add_ts  = 0;
         col->rkbbcol_partition_cnt = 0;
-        col->rkbbcol_total_bytes = 0;
+        col->rkbbcol_total_bytes   = 0;
+        col->rkbbcol_next          = NULL;
 }
 
 /**
@@ -296,16 +297,22 @@ rd_kafka_broker_batch_collector_remove(rd_kafka_broker_batch_collector_t *col,
         if (!rktp->rktp_in_batch_collector)
                 return;
 
+        /* If we're removing the next partition to process, advance it */
+        if (col->rkbbcol_next == rktp)
+                col->rkbbcol_next =
+                    TAILQ_NEXT(rktp, rktp_collector_link);
+
         TAILQ_REMOVE(&col->rkbbcol_toppars, rktp, rktp_collector_link);
         rktp->rktp_in_batch_collector = rd_false;
         col->rkbbcol_partition_cnt--;
 }
 
 /**
- * @brief Send all collected partitions as produce requests.
+ * @brief Send collected partitions as produce requests with fair round-robin.
  *
- * Iterates through collected partitions (oldest first) and builds
- * produce requests until all partitions are sent.
+ * Iterates through collected partitions starting from where we left off
+ * (rkbbcol_next), wrapping around to ensure fair processing. Stops when
+ * backpressure prevents further sends or all partitions are processed.
  *
  * @param rkb Broker
  *
@@ -315,12 +322,16 @@ rd_kafka_broker_batch_collector_remove(rd_kafka_broker_batch_collector_t *col,
  */
 int rd_kafka_broker_batch_collector_send(rd_kafka_broker_t *rkb) {
         rd_kafka_broker_batch_collector_t *col = &rkb->rkb_batch_collector;
-        rd_kafka_toppar_t *rktp, *tmp;
+        rd_kafka_toppar_t *rktp, *start_rktp;
         produce_batch_t batch;
-        int total_msg_cnt = 0;
+        int total_msg_cnt      = 0;
+        int partitions_visited = 0;
+        int initial_cnt;
 
         if (col->rkbbcol_partition_cnt == 0)
                 return 0;
+
+        initial_cnt = col->rkbbcol_partition_cnt;
 
         rd_rkb_dbg(rkb, MSG, "BATCHCOL",
                    "Sending collector batch: partitions=%d bytes=%" PRId64
@@ -333,13 +344,30 @@ int rd_kafka_broker_batch_collector_send(rd_kafka_broker_t *rkb) {
 
         memset(&batch, 0, sizeof(batch));
 
-        /* Iterate through collected partitions and build produce requests */
-        TAILQ_FOREACH_SAFE(rktp, &col->rkbbcol_toppars, rktp_collector_link,
-                           tmp) {
+        /* Start from where we left off, or head if first time */
+        start_rktp = col->rkbbcol_next;
+        if (!start_rktp)
+                start_rktp = TAILQ_FIRST(&col->rkbbcol_toppars);
+
+        rktp = start_rktp;
+
+        /* Iterate through collected partitions in round-robin fashion */
+        while (rktp && partitions_visited < initial_cnt) {
+                rd_kafka_toppar_t *next_rktp;
+
+                partitions_visited++;
+
+                /* Get next before potentially removing current */
+                next_rktp = TAILQ_NEXT(rktp, rktp_collector_link);
+                if (!next_rktp)
+                        next_rktp = TAILQ_FIRST(&col->rkbbcol_toppars);
+
                 /* Try to initialize a batch if not already */
                 if (!rd_kafka_broker_produce_batch_try_init(&batch, rkb)) {
-                        /* Can't send (e.g., backpressure) - stop here */
-                        break;
+                        /* Can't send (e.g., backpressure) - stop here.
+                         * Save position for next time. */
+                        col->rkbbcol_next = rktp;
+                        goto done;
                 }
 
                 /* Try to add this partition to the batch */
@@ -359,29 +387,40 @@ int rd_kafka_broker_batch_collector_send(rd_kafka_broker_t *rkb) {
                                                                  rktp)) {
                                 rd_kafka_broker_batch_collector_remove(col,
                                                                        rktp);
+                        } else {
+                                /* Still can't add - save position and stop */
+                                col->rkbbcol_next = rktp;
+                                goto done;
                         }
                 }
+
+                /* Move to next, but stop if we've wrapped back to start */
+                if (next_rktp == start_rktp)
+                        break;
+                rktp = next_rktp;
         }
 
+        /* All partitions processed - reset next pointer */
+        col->rkbbcol_next = NULL;
+
+done:
         /* Send any remaining batch */
         if (batch.batch_initialized)
                 total_msg_cnt +=
                     rd_kafka_broker_produce_batch_send(&batch, rkb);
 
-        /* Reset collector state for next collection cycle */
+        /* Update collector state */
         col->rkbbcol_total_bytes = 0;
-        /* If all partitions were sent, reset first_add_ts.
-         * If partitions remain (due to backpressure), keep first_add_ts
-         * so we continue timing from when collection started. */
-        if (col->rkbbcol_partition_cnt == 0) {
-                col->rkbbcol_first_add_ts = 0;
-        }
-        /* If partitions remain, recalculate total_bytes */
-        else {
+        if (col->rkbbcol_partition_cnt > 0) {
+                /* Recalculate bytes for remaining partitions */
                 TAILQ_FOREACH(rktp, &col->rkbbcol_toppars, rktp_collector_link) {
                         col->rkbbcol_total_bytes +=
                             rd_kafka_toppar_estimate_batch_bytes(rktp);
                 }
+        } else {
+                /* All partitions sent - reset timing */
+                col->rkbbcol_first_add_ts = 0;
+                col->rkbbcol_next         = NULL;
         }
 
         return total_msg_cnt;
@@ -4465,7 +4504,7 @@ static int rd_kafka_broker_produce_toppars(rd_kafka_broker_t *rkb,
                                            rd_ts_t now,
                                            rd_ts_t *next_wakeup,
                                            rd_bool_t do_timeout_scan) {
-        rd_kafka_toppar_t *rktp, *rktp_next_start;
+        rd_kafka_toppar_t *rktp;
         rd_ts_t ret_next_wakeup = *next_wakeup;
         rd_kafka_pid_t pid      = RD_KAFKA_PID_INITIALIZER;
         rd_bool_t may_send      = rd_true;
@@ -4519,8 +4558,6 @@ static int rd_kafka_broker_produce_toppars(rd_kafka_broker_t *rkb,
                 rkb->rkb_produce_pid = pid;
         }
 
-        rktp_next_start = NULL;
-
         flushing = may_send && rd_atomic32_get(&rkb->rkb_rk->rk_flushing) > 0;
 
         do {
@@ -4541,7 +4578,6 @@ static int rd_kafka_broker_produce_toppars(rd_kafka_broker_t *rkb,
                         if (msgq_len > 0) {
                                 total_msg_cnt += msgq_len;
                                 rd_kafka_broker_batch_collector_add(rkb, rktp);
-                                rktp_next_start = rktp;
                         }
                 }
 
@@ -4551,15 +4587,12 @@ static int rd_kafka_broker_produce_toppars(rd_kafka_broker_t *rkb,
                                            rktp_activelink)) !=
                  rkb->rkb_active_toppar_next);
 
-        /* Update next starting toppar to produce in round-robin list.
-         * Give preference to the next toppar that had messages to send. */
+        /* Update next starting toppar - simple round-robin advance by 1.
+         * The collector handles fair processing of partitions, so we don't
+         * need to bias toward partitions that had messages. */
         rd_kafka_broker_active_toppar_next(
-            rkb,
-            (rktp_next_start &&
-             rktp_next_start != rkb->rkb_active_toppar_next)
-                ? rktp_next_start
-                : CIRCLEQ_LOOP_NEXT(&rkb->rkb_active_toppars, rktp,
-                                    rktp_activelink));
+            rkb, CIRCLEQ_LOOP_NEXT(&rkb->rkb_active_toppars, rktp,
+                                   rktp_activelink));
 
         /* Check collector criteria and send if met.
          * This implements broker-level batching where we collect partitions

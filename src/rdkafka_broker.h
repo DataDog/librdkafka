@@ -92,6 +92,11 @@ typedef struct rd_kafka_broker_batch_collector_s {
 
         /**< Collected partitions - linked via rktp_collector_link */
         TAILQ_HEAD(, rd_kafka_toppar_s) rkbbcol_toppars;
+
+        /**< Next partition to process on send. Used for fair round-robin
+         *   processing when backpressure prevents sending all partitions
+         *   in one cycle. NULL means start from head. */
+        struct rd_kafka_toppar_s *rkbbcol_next;
 } rd_kafka_broker_batch_collector_t;
 
 

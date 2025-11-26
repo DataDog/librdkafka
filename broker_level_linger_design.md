@@ -554,20 +554,93 @@ partitions_per_request: ~333
 | Metric | 20k msg/s | 50k msg/s | Notes |
 |--------|-----------|-----------|-------|
 | Messages sent | 1,200,000 | 3,000,000 | 2.5x |
-| Requests | 167 | 349 | 2.1x (sub-linear growth) |
-| msgs/req | 7,186 | 8,596 | +20% (batching scales) |
-| Latency p50 | 679ms | 315ms | **-54%** |
-| Latency p99 | 1,230ms | 1,004ms | -18% |
+| Requests | 167 | 352 | 2.1x (sub-linear growth) |
+| msgs/req | 7,186 | 8,523 | +19% (batching scales) |
+| Latency p50 | 679ms | 307ms | **-55%** |
+| Latency p99 | 1,230ms | 565ms | **-54%** |
 | Partitions/req | ~333 | ~333 | Consistent |
 
 **Key observations:**
 1. **Batching scales with throughput**: Higher message rate → more messages per batch
 2. **Sub-linear request growth**: 2.5x messages resulted in only 2.1x requests
-3. **Latency improved significantly at higher throughput**: p50 dropped from 679ms to 315ms
+3. **Latency improved significantly at higher throughput**: p50 dropped from 679ms to 307ms
 4. **Consistent partition batching**: All ~333 partitions per broker sent in each request
+
+### Fair Round-Robin Processing Fix
+
+Initial integration testing revealed potential partition starvation under high load:
+- Some partitions showed 2-minute latency (message timeout) while others had ~170ms
+- Messages accumulated in queue (~70k) suggesting backpressure
+- Affected partitions were on different brokers, ruling out single-broker issues
+
+**Root Cause Analysis:**
+
+The collector processed partitions in TAILQ insertion order. Under backpressure:
+1. Partitions at the tail might not get processed before `broker.linger.ms` triggered another send
+2. The partition iteration had a bias toward partitions with recent messages (`rktp_next_start`)
+3. Combined, this could cause certain partitions to be consistently deprioritized
+
+**Fix: Fair Round-Robin in Collector**
+
+1. **Simplified partition iteration**: Removed `rktp_next_start` bias. Now uses simple
+   round-robin that advances by 1 partition each iteration. Partition iteration just
+   adds to collector with no complex prioritization.
+
+2. **Added `rkbbcol_next` pointer**: Tracks where we left off when backpressure stopped
+   processing. Enables resuming from that position next time.
+
+3. **Rewrote `collector_send` with fair round-robin**:
+   - Starts from `rkbbcol_next` (or head if NULL)
+   - Processes partitions in circular fashion, wrapping around
+   - On backpressure: saves position in `rkbbcol_next` for next time
+   - On completion: resets `rkbbcol_next` to NULL
+
+**Results after fix (50k msg/s):**
+
+| Metric | Before Fix | After Fix | Change |
+|--------|------------|-----------|--------|
+| Latency p50 | 315ms | 307ms | -3% |
+| Latency p95 | 554ms | 539ms | -3% |
+| Latency p99 | 1,004ms | 565ms | **-44%** |
+| msgs/req | 8,596 | 8,523 | ~same |
+
+The significant p99 improvement suggests the fix reduces tail latency spikes, though
+further testing is needed to confirm starvation is fully resolved.
+
+### Multi-Rate Benchmark Results
+
+Testing across different throughput levels confirms broker-level batching works as designed:
+
+| Rate | Requests | msgs/req | p50 | p95 | p99 |
+|------|----------|----------|-----|-----|-----|
+| 10k msg/s | 351 | 1,709 | 347ms | 586ms | 631ms |
+| 20k msg/s | 351 | 3,419 | 323ms | 557ms | 591ms |
+| 50k msg/s | 350 | 8,571 | 309ms | 541ms | 572ms |
+
+**Test Configuration:**
+- 1000 partitions across 3 brokers
+- 60 second duration per rate
+- `broker.linger.ms = 200`
+
+**Key observations:**
+
+1. **Request count is stable (~350-351)** across all throughput levels. The `broker.linger.ms`
+   timing controls when batches are sent, not the message rate. This is exactly the intended
+   behavior - approximately 60s / 200ms ≈ 300 requests, plus variance.
+
+2. **msgs/req scales linearly with throughput**: 5x throughput (10k→50k) results in 5x
+   msgs/req (1,709→8,571). Batching efficiency improves proportionally with load.
+
+3. **Latencies are remarkably consistent**: p50 ranges 309-347ms, p99 ranges 572-631ms
+   across all rates. Higher throughput actually shows slightly *lower* latency due to
+   better pipelining efficiency.
+
+4. **No starvation observed**: All p99 latencies are under 650ms with no 2-minute timeouts,
+   suggesting the fair round-robin fix is working.
 
 ### Next Steps
 
 1. Update stats tracking to use collector metrics (currently showing 0s)
 2. Test with different `broker.linger.ms` values to find optimal latency/throughput tradeoff
 3. Test `broker.batch.max.partitions` early-send threshold
+4. Monitor for partition starvation in extended integration tests
