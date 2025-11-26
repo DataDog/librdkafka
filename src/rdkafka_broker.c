@@ -415,6 +415,10 @@ int rd_kafka_broker_batch_collector_maybe_send(rd_kafka_broker_t *rkb,
         if (col->rkbbcol_partition_cnt == 0)
                 return 0;
 
+        /* Don't send until broker is fully connected with API versions */
+        if (rkb->rkb_state != RD_KAFKA_BROKER_STATE_UP)
+                return 0;
+
         /* Priority 1: Flush requested */
         if (flushing) {
                 should_send = rd_true;
@@ -4331,17 +4335,15 @@ static int rd_kafka_toppar_producer_serve(rd_kafka_broker_t *rkb,
                                 rktp->rktp_ts_xmit_enq = now;
                 }
 
-                /* With broker-level batching, we don't use per-partition linger
-                 * to decide when to send. The broker-level collector handles
-                 * timing based on broker.linger.ms.
+                /* With broker-level batching, the collector handles when to send.
+                 * But we still need partition-level timing to wake the broker
+                 * thread so it can add partitions to the collector.
                  *
-                 * We still call rd_kafka_msgq_allow_wakeup_at() to update
-                 * internal state, but pass NULL for next_wakeup so it doesn't
-                 * override the broker-level wakeup timing. */
+                 * We pass next_wakeup so the broker wakes up when linger expires,
+                 * then the collector decides when to actually send. */
                 batch_ready = rd_kafka_msgq_allow_wakeup_at(
-                    &rktp->rktp_msgq, &rktp->rktp_xmit_msgq,
-                    NULL, /* Don't update next_wakeup - broker collector handles it */
-                    now, flushing ? 1 : rkb->rkb_rk->rk_conf.broker_linger_us,
+                    &rktp->rktp_msgq, &rktp->rktp_xmit_msgq, next_wakeup, now,
+                    flushing ? 1 : rkb->rkb_rk->rk_conf.broker_linger_us,
                     /* Batch message count threshold */
                     rkb->rkb_rk->rk_conf.batch_num_messages,
                     /* Batch total size threshold */
@@ -4524,18 +4526,20 @@ static int rd_kafka_broker_produce_toppars(rd_kafka_broker_t *rkb,
         do {
                 rd_ts_t this_next_wakeup = ret_next_wakeup;
 
-                /* Check if the toppar needs to produce (moves msgs to xmit_msgq) */
-                if (rd_kafka_toppar_producer_serve(rkb, rktp, pid, now,
-                                                   &this_next_wakeup,
-                                                   do_timeout_scan, may_send,
-                                                   flushing)) {
-                        int msgq_len = rd_kafka_msgq_len(&rktp->rktp_xmit_msgq);
-                        total_msg_cnt += msgq_len;
+                /* Process the toppar (moves msgs from msgq to xmit_msgq) */
+                rd_kafka_toppar_producer_serve(rkb, rktp, pid, now,
+                                               &this_next_wakeup,
+                                               do_timeout_scan, may_send,
+                                               flushing);
 
-                        /* Add partition to broker-level batch collector.
-                         * The collector will decide when to send based on
-                         * broker.linger.ms and other thresholds. */
+                /* Add partition to broker-level batch collector if it has
+                 * messages ready to send. The collector handles timing based
+                 * on broker.linger.ms - we add regardless of per-partition
+                 * batch_ready status since the collector controls when to send. */
+                {
+                        int msgq_len = rd_kafka_msgq_len(&rktp->rktp_xmit_msgq);
                         if (msgq_len > 0) {
+                                total_msg_cnt += msgq_len;
                                 rd_kafka_broker_batch_collector_add(rkb, rktp);
                                 rktp_next_start = rktp;
                         }

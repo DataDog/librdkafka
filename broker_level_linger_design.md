@@ -540,12 +540,12 @@ if (now - first_add_ts >= broker_linger_us)
 
 **Results:**
 ```
-requests_sent: 356
-msgs_per_req: 8,427
-throughput: 49,901 msgs/sec (99.8% of target)
-latency_p50: 604ms
-latency_p95: 1,056ms
-latency_p99: 1,100ms
+requests_sent: 349
+msgs_per_req: 8,596
+throughput: 49,916 msgs/sec (99.8% of target)
+latency_p50: 315ms
+latency_p95: 554ms
+latency_p99: 1,004ms
 partitions_per_request: ~333
 ```
 
@@ -554,16 +554,16 @@ partitions_per_request: ~333
 | Metric | 20k msg/s | 50k msg/s | Notes |
 |--------|-----------|-----------|-------|
 | Messages sent | 1,200,000 | 3,000,000 | 2.5x |
-| Requests | 167 | 356 | 2.1x (sub-linear growth) |
-| msgs/req | 7,186 | 8,427 | +17% (batching scales) |
-| Latency p50 | 679ms | 604ms | -11% |
-| Latency p99 | 1,230ms | 1,100ms | -11% |
+| Requests | 167 | 349 | 2.1x (sub-linear growth) |
+| msgs/req | 7,186 | 8,596 | +20% (batching scales) |
+| Latency p50 | 679ms | 315ms | **-54%** |
+| Latency p99 | 1,230ms | 1,004ms | -18% |
 | Partitions/req | ~333 | ~333 | Consistent |
 
 **Key observations:**
 1. **Batching scales with throughput**: Higher message rate → more messages per batch
 2. **Sub-linear request growth**: 2.5x messages resulted in only 2.1x requests
-3. **Latency improved at higher throughput**: Better pipelining efficiency
+3. **Latency improved significantly at higher throughput**: p50 dropped from 679ms to 315ms
 4. **Consistent partition batching**: All ~333 partitions per broker sent in each request
 
 ### Next Steps

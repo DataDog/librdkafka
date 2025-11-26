@@ -4132,8 +4132,19 @@ const char *rd_kafka_conf_finalize(rd_kafka_type_t cltype,
          * update buffering_max_ms_dbl. */
         conf->buffering_max_us = (rd_ts_t)(conf->buffering_max_ms_dbl * 1000);
 
-        /* Convert broker.linger.ms to microseconds */
-        conf->broker_linger_us = (rd_ts_t)(conf->broker_linger_ms_dbl * 1000);
+        /* broker.linger.ms: inherit from linger.ms if not explicitly set.
+         * This provides backwards compatibility for existing configs and
+         * client libraries that use linger.ms. */
+        if (!rd_kafka_conf_is_modified(conf, "broker.linger.ms") &&
+            rd_kafka_conf_is_modified(conf, "linger.ms")) {
+                /* Inherit from linger.ms */
+                conf->broker_linger_us              = conf->buffering_max_us;
+                conf->warn.linger_ms_used_for_broker_linger = rd_true;
+        } else {
+                /* Use broker.linger.ms (default or explicit) */
+                conf->broker_linger_us =
+                    (rd_ts_t)(conf->broker_linger_ms_dbl * 1000);
+        }
 
         return NULL;
 }
@@ -4271,6 +4282,14 @@ int rd_kafka_conf_warn(rd_kafka_t *rk) {
                              "global configuration were overwritten by "
                              "explicitly setting a default_topic_conf: "
                              "recommend not using set_default_topic_conf");
+
+        if (rk->rk_conf.warn.linger_ms_used_for_broker_linger)
+                rd_kafka_log(rk, LOG_WARNING, "CONFWARN",
+                             "Configuration `linger.ms` is deprecated for "
+                             "producer batching. Using its value (%.0fms) for "
+                             "`broker.linger.ms`. Please migrate to "
+                             "`broker.linger.ms` for broker-level batching.",
+                             rk->rk_conf.buffering_max_ms_dbl);
 
         /* Additional warnings */
         if (rk->rk_conf.retry_backoff_ms > rk->rk_conf.retry_backoff_max_ms) {

@@ -587,6 +587,8 @@ struct rd_kafka_conf_s {
                 /** Properties on (implicit pass-thru) default_topic_conf were
                  *  overwritten by passing an explicit default_topic_conf. */
                 rd_bool_t default_topic_conf_overwritten;
+                /** linger.ms was used to set broker.linger.ms (deprecated) */
+                rd_bool_t linger_ms_used_for_broker_linger;
         } warn;
 };
 

@@ -1785,7 +1785,10 @@ rd_bool_t rd_kafka_msgq_allow_wakeup_at(rd_kafka_msgq_t *rkmq,
         int64_t msg_bytes = rd_kafka_msgq_size(dest_rkmq);
 
         if (RD_KAFKA_MSGQ_EMPTY(dest_rkmq)) {
-                rkmq->rkmq_wakeup.on_first = rd_false;
+                /* When queue is empty, wake broker immediately on first
+                 * message so it can add the partition to the collector.
+                 * The collector's broker.linger.ms handles batch timing. */
+                rkmq->rkmq_wakeup.on_first = rd_true;
                 rkmq->rkmq_wakeup.abstime  = now + linger_us;
                 /* Leave next_wakeup untouched since the queue is empty */
                 msg_cnt   = 0;
@@ -1793,6 +1796,7 @@ rd_bool_t rd_kafka_msgq_allow_wakeup_at(rd_kafka_msgq_t *rkmq,
         } else {
                 const rd_kafka_msg_t *rkm = rd_kafka_msgq_first(dest_rkmq);
 
+                /* Not empty - don't wake on subsequent messages */
                 rkmq->rkmq_wakeup.on_first = rd_false;
 
                 if (unlikely(rkm->rkm_u.producer.ts_backoff > now)) {
@@ -1804,12 +1808,14 @@ rd_bool_t rd_kafka_msgq_allow_wakeup_at(rd_kafka_msgq_t *rkmq,
                         /* Use message's produce() time + linger.ms */
                         rkmq->rkmq_wakeup.abstime =
                             rd_kafka_msg_enq_time(rkm) + linger_us;
-                        if (rkmq->rkmq_wakeup.abstime <= now)
-                                rkmq->rkmq_wakeup.abstime = now;
                 }
 
-                /* Update the caller's scheduler wakeup time */
-                if (next_wakeup && rkmq->rkmq_wakeup.abstime < *next_wakeup)
+                /* Update the caller's scheduler wakeup time, but only if
+                 * abstime is in the future. If abstime <= now, the linger
+                 * has already expired and we don't need to schedule a
+                 * wakeup for it - the collector handles send timing. */
+                if (next_wakeup && rkmq->rkmq_wakeup.abstime > now &&
+                    rkmq->rkmq_wakeup.abstime < *next_wakeup)
                         *next_wakeup = rkmq->rkmq_wakeup.abstime;
 
                 msg_cnt   = rd_kafka_msgq_len(dest_rkmq);
