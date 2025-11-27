@@ -638,9 +638,60 @@ Testing across different throughput levels confirms broker-level batching works 
 4. **No starvation observed**: All p99 latencies are under 650ms with no 2-minute timeouts,
    suggesting the fair round-robin fix is working.
 
+### Integration Test: Comparison vs Vanilla librdkafka + Multibatch
+
+Large-scale integration test comparing vanilla librdkafka (with multibatch enabled) vs
+broker-level batching implementation:
+
+**Test Configuration:**
+- 1000 producers
+- 500 KB/s per producer (2500 msgs/s at 200 bytes each)
+- Total: ~2.5M msgs/sec, ~500 MB/s
+
+**Throughput Comparison:**
+
+| Metric | Vanilla + Multibatch | Broker-Level Batching | Improvement |
+|--------|---------------------|----------------------|-------------|
+| Message Rate | ~2.5-3M/sec | ~2.5M/sec | Same throughput |
+| Request Rate | ~50k/sec | ~10-20k/sec | **3-5x lower** |
+| Request Timeouts | ~8-10k/sec | ~2k/sec | **4-5x fewer** |
+
+**Inflight Request Comparison:**
+
+| Metric | Vanilla + Multibatch | Broker-Level Batching | Improvement |
+|--------|---------------------|----------------------|-------------|
+| Total Inflight per Broker | **800k-1M** | **50-100k** | **10x lower** |
+| Inflight per Connection | ~3k | ~1.5-3k | Similar |
+
+**Key Observations:**
+
+1. **10x reduction in total inflight requests per broker**: Vanilla multibatch was hammering
+   brokers with 800k-1M inflight requests. Broker-level batching brings this down to 50-100k,
+   significantly reducing broker load.
+
+2. **3-5x reduction in request rate**: Fewer, larger requests instead of many small ones.
+
+3. **4-5x fewer request timeouts**: Better batching efficiency means fewer requests competing
+   for broker resources.
+
+4. **Same throughput maintained**: Message rate and success rate are comparable between
+   implementations.
+
+**Known Issues Identified:**
+
+1. **Unbounded inflight per connection**: Under high RTT conditions, inflight requests per
+   connection can spike to 4-6k, causing latency spikes up to 2 minutes. Need to add
+   backpressure controls in `maybe_send` to limit inflight requests.
+
+2. **Batch fill not optimal under backpressure**: When RTT is high and requests pile up,
+   we continue sending every `broker.linger.ms` rather than waiting for responses. This
+   results in smaller batches (~70kb avg vs potential 300kb+). Adding inflight limits
+   would naturally improve batch fill by forcing us to wait and accumulate more messages.
+
 ### Next Steps
 
-1. Update stats tracking to use collector metrics (currently showing 0s)
-2. Test with different `broker.linger.ms` values to find optimal latency/throughput tradeoff
-3. Test `broker.batch.max.partitions` early-send threshold
-4. Monitor for partition starvation in extended integration tests
+1. Add backpressure control: limit inflight requests per broker/connection in `maybe_send`
+2. Update stats tracking to use collector metrics (currently showing 0s)
+3. Test with different `broker.linger.ms` values to find optimal latency/throughput tradeoff
+4. Test `broker.batch.max.partitions` early-send threshold
+5. Monitor for partition starvation in extended integration tests
