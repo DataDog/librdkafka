@@ -31,6 +31,7 @@
 #define _RDKAFKA_BROKER_H_
 
 #include "rdkafka_feature.h"
+#include "rdkafka_adaptive.h"
 
 
 extern const char *rd_kafka_broker_state_names[];
@@ -275,11 +276,16 @@ struct rd_kafka_broker_s { /* rd_kafka_broker_t */
         rd_avg_t rkb_avg_rtt;            /* Current RTT period */
         rd_avg_t rkb_avg_throttle;       /* Current throttle period */
         rd_avg_t rkb_avg_produce_partitions; /**< Avg partitions per Produce */
+        rd_avg_t rkb_avg_produce_messages;   /**< Avg messages per Produce */
         rd_avg_t rkb_avg_produce_reqsize;    /**< Avg bytes per Produce */
         rd_avg_t rkb_avg_produce_fill;       /**< Fill ratio (permille) */
         rd_avg_t rkb_avg_batch_wait;         /**< Time from xmit queue enqueue
                                               *   to inclusion in a Produce
                                               *   request */
+
+        /* Adaptive batching state (per-broker) */
+        rd_kafka_adaptive_state_t rkb_adaptive_state;   /**< Adaptive state */
+        rd_kafka_adaptive_params_t rkb_adaptive_params; /**< Current params */
 
         /* These are all protected by rkb_lock */
         char rkb_name[RD_KAFKA_NODENAME_SIZE];     /* Displ name */

@@ -36,6 +36,7 @@
 #include "rdkafka_header.h"
 #include "rdkafka_request.h"
 #include "rdkafka_lz4.h"
+#include "rdkafka_adaptive.h"
 
 #if WITH_ZSTD
 #include "rdkafka_zstd.h"
@@ -1023,6 +1024,11 @@ static int rd_kafka_msgset_writer_write_msgq(rd_kafka_msgset_writer_t *msetw,
                 /* Add internal latency metrics */
                 rd_avg_add(&rkb->rkb_avg_int_latency,
                            int_latency_base - rkm->rkm_ts_timeout);
+
+                /* Feed int_latency to adaptive batching system */
+                if (rkb->rkb_rk->rk_conf.adaptive_batching_enabled)
+                        rd_kafka_adaptive_record_int_latency(
+                            rkb, int_latency_base - rkm->rkm_ts_timeout);
 
                 /* MessageSet v2's .MaxTimestamp field */
                 if (unlikely(MaxTimestamp < rkm->rkm_timestamp))

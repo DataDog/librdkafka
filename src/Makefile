@@ -37,7 +37,7 @@ ifneq ($(HAVE_REGEX), y)
 SRCS_y += regexp.c
 endif
 
-SRCS=		rdkafka.c rdkafka_broker.c rdkafka_msg.c rdkafka_topic.c \
+SRCS=		rdkafka.c rdkafka_adaptive.c rdkafka_broker.c rdkafka_msg.c rdkafka_topic.c \
 		rdkafka_conf.c rdkafka_timer.c rdkafka_offset.c \
 		rdkafka_transport.c rdkafka_buf.c rdkafka_queue.c rdkafka_op.c \
 		rdkafka_request.c rdkafka_cgrp.c rdkafka_pattern.c \
