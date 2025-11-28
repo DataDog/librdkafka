@@ -5399,6 +5399,8 @@ int rd_kafka_ProduceRequest_finalize(rd_kafka_produce_ctx_t *rkpc) {
         rd_ts_t now;
         int64_t rel_timeout_ms;
         int message_cnt = 0;
+        size_t req_size;
+        int64_t fill_permille;
 
         rd_kafka_produce_req_ctx_t *rkprc = rkpc->rkpc_opaque;
         rd_dassert(rkprc);
@@ -5423,6 +5425,41 @@ int rd_kafka_ProduceRequest_finalize(rd_kafka_produce_ctx_t *rkpc) {
         rd_rkb_dbg(rkpc->rkpc_rkb, MSG, "PRODUCE",
                    "ProduceRequest_finalize: topic_cnt=%d toppar_cnt=%d message_cnt=%d",
                    rkprc->rkprc_topic_cnt, rkprc->rkprc_toppar_cnt, rkpc->rkpc_appended_message_cnt);
+
+        /* Track per-broker request-level averages. */
+        req_size = rkbuf->rkbuf_totlen;
+        if (req_size == 0)
+                req_size = rd_buf_write_pos(&rkbuf->rkbuf_buf);
+        if (unlikely(req_size == 0)) {
+                rd_rkb_dbg(rkpc->rkpc_rkb, MSG, "PRODUCE",
+                           "ProduceRequest_finalize: zero req_size, "
+                           "topic_cnt=%d toppar_cnt=%d message_cnt=%d "
+                           "buf_totlen=%" PRIusz " write_pos=%" PRIusz,
+                           rkprc->rkprc_topic_cnt, rkprc->rkprc_toppar_cnt,
+                           rkpc->rkpc_appended_message_cnt,
+                           (size_t)rkbuf->rkbuf_totlen,
+                           rd_buf_write_pos(&rkbuf->rkbuf_buf));
+        }
+        fill_permille = (int64_t)((req_size * 1000) /
+                                  (size_t)rkpc->rkpc_rkb->rkb_rk->rk_conf
+                                      .max_msg_size);
+        rd_avg_add(&rkpc->rkpc_rkb->rkb_avg_produce_partitions,
+                   rkprc->rkprc_toppar_cnt);
+        rd_avg_add(&rkpc->rkpc_rkb->rkb_avg_produce_messages,
+                   rkpc->rkpc_appended_message_cnt);
+        rd_avg_add(&rkpc->rkpc_rkb->rkb_avg_produce_reqsize, (int64_t)req_size);
+        rd_avg_add(&rkpc->rkpc_rkb->rkb_avg_produce_fill, fill_permille);
+
+        /* Temporary debug: log a few samples to verify reqsize/fill recording. */
+        static int log_reqsize_samples = 5;
+        if (log_reqsize_samples-- > 0) {
+                rd_rkb_dbg(rkpc->rkpc_rkb, MSG, "PRODUCE",
+                           "ProduceRequest stats sample: topics=%d partitions=%d "
+                           "messages=%d req_size=%" PRIusz " fill_permille=%" PRId64,
+                           rkprc->rkprc_topic_cnt, rkprc->rkprc_toppar_cnt,
+                           rkpc->rkpc_appended_message_cnt, req_size,
+                           fill_permille);
+        }
 
         if (!rkpc->rkpc_request_required_acks)
                 rkbuf->rkbuf_flags |= RD_KAFKA_OP_F_NO_RESPONSE;

@@ -478,9 +478,11 @@ int rd_kafka_broker_batch_collector_maybe_send(rd_kafka_broker_t *rkb,
                 reason = "max_bytes";
         }
 
-        /* Priority 4: broker.linger.ms expired (collecting for too long) */
+        /* Priority 4: linger expired (collecting for too long)
+         * Use adaptive linger if enabled, otherwise static config. */
         if (!should_send && col->rkbbcol_first_add_ts > 0 &&
-            now - col->rkbbcol_first_add_ts >= conf->broker_linger_us) {
+            now - col->rkbbcol_first_add_ts >=
+                rd_kafka_adaptive_get_linger_us(rkb)) {
                 should_send = rd_true;
                 reason = "broker_linger";
         }
@@ -514,12 +516,12 @@ int rd_kafka_broker_batch_collector_maybe_send(rd_kafka_broker_t *rkb,
  */
 rd_ts_t rd_kafka_broker_batch_collector_next_wakeup(rd_kafka_broker_t *rkb) {
         rd_kafka_broker_batch_collector_t *col = &rkb->rkb_batch_collector;
-        rd_kafka_conf_t *conf = &rkb->rkb_rk->rk_conf;
 
         if (col->rkbbcol_partition_cnt == 0 || col->rkbbcol_first_add_ts == 0)
                 return 0;
 
-        return col->rkbbcol_first_add_ts + conf->broker_linger_us;
+        /* Use adaptive linger if enabled, otherwise static config */
+        return col->rkbbcol_first_add_ts + rd_kafka_adaptive_get_linger_us(rkb);
 }
 
 
@@ -2312,6 +2314,10 @@ static rd_kafka_buf_t *rd_kafka_waitresp_find(rd_kafka_broker_t *rkb,
                 rd_avg_add(&rkb->rkb_avg_rtt, rkbuf->rkbuf_ts_sent);
                 rd_avg_add(&rkb->rkb_telemetry.rd_avg_current.rkb_avg_rtt,
                            rkbuf->rkbuf_ts_sent);
+
+                /* Feed RTT to adaptive batching system */
+                if (rkb->rkb_rk->rk_conf.adaptive_batching_enabled)
+                        rd_kafka_adaptive_record_rtt(rkb, rkbuf->rkbuf_ts_sent);
 
                 switch (rkbuf->rkbuf_reqhdr.ApiKey) {
                 case RD_KAFKAP_Fetch:
@@ -4382,7 +4388,7 @@ static int rd_kafka_toppar_producer_serve(rd_kafka_broker_t *rkb,
                  * then the collector decides when to actually send. */
                 batch_ready = rd_kafka_msgq_allow_wakeup_at(
                     &rktp->rktp_msgq, &rktp->rktp_xmit_msgq, next_wakeup, now,
-                    flushing ? 1 : rkb->rkb_rk->rk_conf.broker_linger_us,
+                    flushing ? 1 : rd_kafka_adaptive_get_linger_us(rkb),
                     /* Batch message count threshold */
                     rkb->rkb_rk->rk_conf.batch_num_messages,
                     /* Batch total size threshold */
@@ -4664,6 +4670,10 @@ static void rd_kafka_broker_producer_serve(rd_kafka_broker_t *rkb,
                 /* Check and move retry buffers */
                 if (unlikely(rd_atomic32_get(&rkb->rkb_retrybufs.rkbq_cnt) > 0))
                         rd_kafka_broker_retry_bufs_move(rkb, &next_wakeup);
+
+                /* Perform adaptive batching adjustment if enabled */
+                if (rd_kafka_adaptive_should_adjust(rkb))
+                        rd_kafka_adaptive_adjust(rkb);
 
                 if (rd_kafka_broker_ops_io_serve(rkb, next_wakeup))
                         return; /* Wakeup */
@@ -5215,6 +5225,7 @@ void rd_kafka_broker_destroy_final(rd_kafka_broker_t *rkb) {
         rd_avg_destroy(&rkb->rkb_avg_rtt);
         rd_avg_destroy(&rkb->rkb_avg_throttle);
         rd_avg_destroy(&rkb->rkb_avg_produce_partitions);
+        rd_avg_destroy(&rkb->rkb_avg_produce_messages);
         rd_avg_destroy(&rkb->rkb_avg_produce_reqsize);
         rd_avg_destroy(&rkb->rkb_avg_produce_fill);
         rd_avg_destroy(&rkb->rkb_avg_batch_wait);
@@ -5239,6 +5250,9 @@ void rd_kafka_broker_destroy_final(rd_kafka_broker_t *rkb) {
                                     .rkb_avg_produce_latency);
         }
 
+        /* Destroy adaptive batching state */
+        if (rkb->rkb_rk->rk_type == RD_KAFKA_PRODUCER)
+                rd_kafka_adaptive_destroy(rkb);
 
         mtx_lock(&rkb->rkb_logname_lock);
         rd_free(rkb->rkb_logname);
@@ -5337,6 +5351,9 @@ rd_kafka_broker_t *rd_kafka_broker_add(rd_kafka_t *rk,
         rd_avg_init(&rkb->rkb_avg_produce_partitions, RD_AVG_GAUGE, 0,
                     rk->rk_conf.produce_request_max_partitions, 2,
                     rk->rk_conf.stats_interval_ms);
+        rd_avg_init(&rkb->rkb_avg_produce_messages, RD_AVG_GAUGE, 0,
+                    rk->rk_conf.queue_buffering_max_msgs, 2,
+                    rk->rk_conf.stats_interval_ms);
         rd_avg_init(&rkb->rkb_avg_produce_reqsize, RD_AVG_GAUGE, 0,
                     rk->rk_conf.max_msg_size, 2,
                     rk->rk_conf.stats_interval_ms);
@@ -5381,6 +5398,10 @@ rd_kafka_broker_t *rd_kafka_broker_add(rd_kafka_t *rk,
                     &rkb->rkb_telemetry.rd_avg_rollover.rkb_avg_produce_latency,
                     RD_AVG_GAUGE, 0, 500 * 1000, 2, rd_true);
         }
+
+        /* Initialize adaptive batching (producer only) */
+        if (rk->rk_type == RD_KAFKA_PRODUCER)
+                rd_kafka_adaptive_init(rkb);
 
         rd_refcnt_init(&rkb->rkb_refcnt, 0);
         rd_kafka_broker_keep(rkb); /* rk_broker's refcount */

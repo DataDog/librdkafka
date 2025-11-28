@@ -176,7 +176,7 @@ typedef enum {
 
 /* Increase in steps of 64 as needed.
  * This must be larger than sizeof(rd_kafka_[topic_]conf_t) */
-#define RD_KAFKA_CONF_PROPS_IDX_MAX (64 * 33)
+#define RD_KAFKA_CONF_PROPS_IDX_MAX (64 * 35)
 
 /**
  * @struct rd_kafka_anyconf_t
@@ -451,6 +451,16 @@ struct rd_kafka_conf_s {
         rd_ts_t broker_linger_us;       /**< broker.linger.ms in microseconds */
         int broker_batch_max_partitions; /**< broker.batch.max.partitions (-1 = disabled) */
         int broker_batch_max_bytes;     /**< broker.batch.max.bytes (-1 = disabled) */
+
+        /* Adaptive batching configuration */
+        rd_bool_t adaptive_batching_enabled; /**< adaptive.batching.enable */
+        double adaptive_alpha;          /**< adaptive.alpha - low threshold */
+        double adaptive_beta;           /**< adaptive.beta - high threshold */
+        rd_ts_t adaptive_linger_min_us; /**< adaptive.linger.min.ms in us */
+        rd_ts_t adaptive_linger_max_us; /**< adaptive.linger.max.ms in us */
+        int64_t adaptive_batch_min_bytes; /**< adaptive.batch.min.bytes */
+        int64_t adaptive_batch_max_bytes; /**< adaptive.batch.max.bytes */
+        rd_ts_t adaptive_adjustment_interval_us; /**< adaptive.adjustment.interval.ms */
 
         /* Message delivery report callback.
          * Called once for each produced message, either on

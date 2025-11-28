@@ -1571,6 +1571,59 @@ static const struct rd_kafka_property rd_kafka_properties[] = {
      "is sent as soon as this many bytes are ready across all partitions.",
      -1, INT_MAX, -1},
 
+    /* Adaptive batching configuration */
+    {_RK_GLOBAL | _RK_PRODUCER, "adaptive.batching.enable", _RK_C_BOOL,
+     _RK(adaptive_batching_enabled),
+     "Enable adaptive batching. When enabled, librdkafka dynamically "
+     "adjusts batching parameters (linger time and batch size) based on "
+     "congestion signals (RTT and internal latency) using a TCP Vegas-inspired "
+     "algorithm. This helps maintain low latency during traffic spikes.",
+     0, 1, 0},
+
+    {_RK_GLOBAL | _RK_PRODUCER, "adaptive.alpha", _RK_C_DBL,
+     _RK(adaptive_alpha),
+     "Adaptive batching low threshold. When congestion score falls below "
+     "this value, batching parameters are decreased (faster sending). "
+     "Range: 0.0-1.0.",
+     .dmin = 0.0, .dmax = 1.0, .ddef = 0.1},
+
+    {_RK_GLOBAL | _RK_PRODUCER, "adaptive.beta", _RK_C_DBL,
+     _RK(adaptive_beta),
+     "Adaptive batching high threshold. When congestion score exceeds "
+     "this value, batching parameters are increased (slower sending, "
+     "larger batches). Range: 0.0-1.0. Should be greater than adaptive.alpha.",
+     .dmin = 0.0, .dmax = 1.0, .ddef = 0.3},
+
+    {_RK_GLOBAL | _RK_PRODUCER, "adaptive.linger.min.ms", _RK_C_INT,
+     _RK(adaptive_linger_min_us),
+     "Minimum linger time in milliseconds for adaptive batching. "
+     "The adaptive algorithm will not reduce linger below this value.",
+     0, 60000, 5},
+
+    {_RK_GLOBAL | _RK_PRODUCER, "adaptive.linger.max.ms", _RK_C_INT,
+     _RK(adaptive_linger_max_us),
+     "Maximum linger time in milliseconds for adaptive batching. "
+     "The adaptive algorithm will not increase linger above this value.",
+     0, 60000, 500},
+
+    {_RK_GLOBAL | _RK_PRODUCER, "adaptive.batch.min.bytes", _RK_C_INT,
+     _RK(adaptive_batch_min_bytes),
+     "Minimum batch size in bytes for adaptive batching. "
+     "The adaptive algorithm will not reduce batch size below this value.",
+     0, INT_MAX, 16384},
+
+    {_RK_GLOBAL | _RK_PRODUCER, "adaptive.batch.max.bytes", _RK_C_INT,
+     _RK(adaptive_batch_max_bytes),
+     "Maximum batch size in bytes for adaptive batching. "
+     "The adaptive algorithm will not increase batch size above this value.",
+     0, INT_MAX, 10485760},
+
+    {_RK_GLOBAL | _RK_PRODUCER, "adaptive.adjustment.interval.ms", _RK_C_INT,
+     _RK(adaptive_adjustment_interval_us),
+     "How often in milliseconds to check congestion and adjust batching "
+     "parameters. Lower values are more responsive but may cause oscillation.",
+     10, 10000, 100},
+
 
     /*
      * Topic properties
@@ -4145,6 +4198,12 @@ const char *rd_kafka_conf_finalize(rd_kafka_type_t cltype,
                 conf->broker_linger_us =
                     (rd_ts_t)(conf->broker_linger_ms_dbl * 1000);
         }
+
+        /* Convert adaptive batching ms configs to internal us values.
+         * The config parser stores ms values as int, we need to convert to us. */
+        conf->adaptive_linger_min_us *= 1000;
+        conf->adaptive_linger_max_us *= 1000;
+        conf->adaptive_adjustment_interval_us *= 1000;
 
         return NULL;
 }

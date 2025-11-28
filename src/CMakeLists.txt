@@ -10,6 +10,7 @@ set(
     rdfnv1a.c
     rdbase64.c
     rdkafka.c
+    rdkafka_adaptive.c
     rdkafka_assignor.c
     rdkafka_broker.c
     rdkafka_buf.c

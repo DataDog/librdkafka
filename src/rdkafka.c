@@ -1872,6 +1872,8 @@ static void rd_kafka_stats_emit_all(rd_kafka_t *rk) {
                 rd_kafka_stats_emit_avg(st, "throttle", &rkb->rkb_avg_throttle);
                 rd_kafka_stats_emit_avg(st, "produce_partitions",
                                         &rkb->rkb_avg_produce_partitions);
+                rd_kafka_stats_emit_avg(st, "produce_messages",
+                                        &rkb->rkb_avg_produce_messages);
                 rd_kafka_stats_emit_avg(st, "produce_reqsize",
                                         &rkb->rkb_avg_produce_reqsize);
                 rd_kafka_stats_emit_avg(st, "produce_fill",
