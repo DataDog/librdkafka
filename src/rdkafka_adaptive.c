@@ -190,16 +190,19 @@ void rd_kafka_adaptive_record_int_latency(rd_kafka_broker_t *rkb,
 /**
  * @brief Calculate current congestion score.
  *
- * Combines two signals:
- * 1. RTT-based congestion (Vegas formula): (current - base) / base
- * 2. Internal latency congestion: (current - base) / base
+ * Uses RTT-based congestion detection (Vegas formula): (current - base) / base
  *
- * Returns MAX of both - react to EITHER signal showing pressure.
+ * NOTE: int_latency signal is currently disabled. It was too noisy because:
+ * - Baseline used absolute minimum, which ratcheted down to ~100µs
+ * - Normal variance then looked like 100x+ congestion
+ * - Caused constant oscillation between SLOW_DOWN and SPEED_UP
+ *
+ * TODO: Re-enable int_latency with EWMA baseline + floor once RTT-only is stable.
  */
 double rd_kafka_adaptive_calc_congestion(rd_kafka_broker_t *rkb) {
         rd_kafka_adaptive_state_t *state = &rkb->rkb_adaptive_state;
 
-        /* Signal 1: RTT-based (Vegas) - authoritative but lagging */
+        /* Signal 1: RTT-based (Vegas) - authoritative, stable baseline */
         double rtt_congestion = 0.0;
         if (state->rtt_stats.rtt_base > 0 &&
             state->rtt_stats.rtt_current > state->rtt_stats.rtt_base) {
@@ -209,8 +212,10 @@ double rd_kafka_adaptive_calc_congestion(rd_kafka_broker_t *rkb) {
                     (double)state->rtt_stats.rtt_base;
         }
 
-        /* Signal 2: Internal latency - fast leading indicator */
+        /* Signal 2: Internal latency - DISABLED (too noisy with min-based baseline)
+         * TODO: Re-enable with EWMA baseline + floor */
         double int_lat_congestion = 0.0;
+#if 0
         if (state->int_lat_stats.int_lat_base > 0 &&
             state->int_lat_stats.int_lat_current >
                 state->int_lat_stats.int_lat_base) {
@@ -219,13 +224,14 @@ double rd_kafka_adaptive_calc_congestion(rd_kafka_broker_t *rkb) {
                              state->int_lat_stats.int_lat_base) /
                     (double)state->int_lat_stats.int_lat_base;
         }
+#endif
 
         /* Store individual components for observability */
         state->rtt_congestion     = rtt_congestion;
         state->int_lat_congestion = int_lat_congestion;
 
-        /* Combined: take MAX - react to EITHER signal showing pressure */
-        return RD_MAX(0.0, RD_MAX(rtt_congestion, int_lat_congestion));
+        /* Use RTT signal only for now */
+        return RD_MAX(0.0, rtt_congestion);
 }
 
 
@@ -234,7 +240,11 @@ double rd_kafka_adaptive_calc_congestion(rd_kafka_broker_t *rkb) {
  *
  * Cinnamon improvement: detect if we're in runaway mode where
  * increasing limits isn't improving throughput but RTT keeps growing.
+ *
+ * DISABLED: Was causing oscillation during sustained degradation.
+ * TODO: Re-enable with proper throughput tracking and cooldown period.
  */
+#if 0
 static void
 rd_kafka_adaptive_check_covariance(rd_kafka_broker_t *rkb,
                                    double current_throughput,
@@ -268,6 +278,7 @@ rd_kafka_adaptive_check_covariance(rd_kafka_broker_t *rkb,
         state->prev_throughput = current_throughput;
         state->prev_rtt        = current_rtt;
 }
+#endif
 
 
 /**
@@ -319,11 +330,23 @@ void rd_kafka_adaptive_adjust(rd_kafka_broker_t *rkb) {
                 state->adjustments_up++;
                 action = "SLOW_DOWN";
 
-                /* Check for runaway condition */
+                /* Runaway detection DISABLED - was causing oscillation during
+                 * sustained degradation. The check would reset baseline after
+                 * 5 consecutive increases, which then triggered SPEED_UP,
+                 * followed by more SLOW_DOWNs, creating a loop.
+                 *
+                 * Instead, we rely on:
+                 * 1. Hard bounds (linger_max, batch_max) to cap growth
+                 * 2. Baseline decay (1% per 10s) for gradual adaptation
+                 *
+                 * TODO: Re-enable with proper throughput tracking and cooldown.
+                 */
+#if 0
                 rd_kafka_adaptive_check_covariance(
                     rkb,
                     0.0, /* TODO: pass actual throughput */
                     (double)state->rtt_stats.rtt_current);
+#endif
 
         } else {
                 /* Stable - maintain current settings */
