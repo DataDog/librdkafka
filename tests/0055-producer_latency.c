@@ -82,42 +82,25 @@ dr_msg_cb(rd_kafka_t *rk, const rd_kafka_message_t *rkmessage, void *opaque) {
 
 
 /**
- * @brief A stats callback to get the per-broker wakeup counts.
- *
- * The JSON "parsing" here is crude..
+ * @brief A typed stats callback to get the per-broker wakeup counts.
  */
-static int stats_cb(rd_kafka_t *rk, char *json, size_t json_len, void *opaque) {
-        const char *t = json;
-        int cnt       = 0;
-        int total     = 0;
+static void stats_cb(rd_kafka_t *rk,
+                     const rd_kafka_stats_t *stats,
+                     void *opaque) {
+        uint32_t i;
+        int total = 0;
 
         /* Since we're only producing to one partition there will only be
          * one broker, the leader, who's wakeup counts we're interested in, but
          * we also want to know that other broker threads aren't spinning
          * like crazy. So just summarize all the wakeups from all brokers. */
-        while ((t = strstr(t, "\"wakeups\":"))) {
-                int wakeups;
-                const char *next;
-
-                t += strlen("\"wakeups\":");
-                while (isspace((int)*t))
-                        t++;
-                wakeups = strtol(t, (char **)&next, 0);
-
-                TEST_ASSERT(t != next, "No wakeup number found at \"%.*s...\"",
-                            16, t);
-
-                total += wakeups;
-                cnt++;
-
-                t = next;
+        for (i = 0; i < stats->broker_cnt; i++) {
+                total += (int)stats->brokers[i].wakeups;
         }
 
-        TEST_ASSERT(cnt > 0, "No brokers found in stats");
+        TEST_ASSERT(stats->broker_cnt > 0, "No brokers found in stats");
 
         tot_wakeups = total;
-
-        return 0;
 }
 
 
@@ -190,7 +173,9 @@ static void test_producer_latency(const char *topic, struct latconf *latconf) {
 
         rd_kafka_conf_set_dr_msg_cb(conf, dr_msg_cb);
         rd_kafka_conf_set_opaque(conf, latconf);
-        rd_kafka_conf_set_stats_cb(conf, stats_cb);
+        /* Disable JSON callback to avoid double rd_avg_rollover */
+        rd_kafka_conf_set_stats_cb(conf, NULL);
+        rd_kafka_conf_set_stats_cb_typed(conf, stats_cb);
         test_conf_set(conf, "statistics.interval.ms", "100");
         tot_wakeups = 0;
 

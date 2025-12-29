@@ -638,6 +638,8 @@ static const struct rd_kafka_property rd_kafka_properties[] = {
      "Throttle callback (set with rd_kafka_conf_set_throttle_cb())"},
     {_RK_GLOBAL, "stats_cb", _RK_C_PTR, _RK(stats_cb),
      "Statistics callback (set with rd_kafka_conf_set_stats_cb())"},
+    {_RK_GLOBAL, "stats_cb_typed", _RK_C_PTR, _RK(stats_cb_typed),
+     "Typed statistics callback (set with rd_kafka_conf_set_stats_cb_typed())"},
     {_RK_GLOBAL, "log_cb", _RK_C_PTR, _RK(log_cb),
      "Log callback (set with rd_kafka_conf_set_log_cb())",
      .pdef = rd_kafka_log_print},
@@ -2932,6 +2934,15 @@ void rd_kafka_conf_set_stats_cb(rd_kafka_conf_t *conf,
                                                 size_t json_len,
                                                 void *opaque)) {
         rd_kafka_anyconf_set_internal(_RK_GLOBAL, conf, "stats_cb", stats_cb);
+}
+
+void rd_kafka_conf_set_stats_cb_typed(
+    rd_kafka_conf_t *conf,
+    void (*stats_cb)(rd_kafka_t *rk,
+                     const rd_kafka_stats_t *stats,
+                     void *opaque)) {
+        rd_kafka_anyconf_set_internal(_RK_GLOBAL, conf, "stats_cb_typed",
+                                      stats_cb);
 }
 
 void rd_kafka_conf_set_oauthbearer_token_refresh_cb(

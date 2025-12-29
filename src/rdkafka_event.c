@@ -271,6 +271,10 @@ const char *rd_kafka_event_stats(rd_kafka_event_t *rkev) {
         return rkev->rko_u.stats.json;
 }
 
+const rd_kafka_stats_t *rd_kafka_event_stats_typed(rd_kafka_event_t *rkev) {
+        return rkev->rko_u.stats.typed;
+}
+
 rd_kafka_topic_partition_list_t *
 rd_kafka_event_topic_partition_list(rd_kafka_event_t *rkev) {
         switch (rkev->rko_evtype) {
