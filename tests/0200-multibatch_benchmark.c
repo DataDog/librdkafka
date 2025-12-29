@@ -68,7 +68,6 @@
 
 #include "test.h"
 #include "rdkafka.h"
-#include "../src/cJSON.h"
 #include <math.h>
 #include <sys/stat.h>
 #include <time.h>
@@ -98,10 +97,6 @@ typedef struct {
         int controlled_rate_cnt;
         int controlled_duration_sec;
         int skip_controlled;
-
-        /* Stats dumping */
-        int stats_dump_max; /* Number of stats JSON dumps to emit at phase end
-                             * (per phase). Set to 0 to disable. */
 } bench_config_t;
 
 /* Per-message latency tracking */
@@ -177,13 +172,6 @@ typedef struct {
         double last_produce_fill_avg_permille;
         double last_batch_wait_p50_us;
 
-        /* Latest raw stats snapshot */
-        char *last_stats_json;
-        size_t last_stats_len;
-
-        /* Stats dumping control */
-        int stats_dump_id;
-
         /* Results */
         phase_stats_t *phases;
         int phase_cnt;
@@ -195,146 +183,82 @@ typedef struct {
 static bench_ctx_t *bench_ctx = NULL;
 
 /**
- * Helper to extract double from JSON object
+ * Typed stats callback - extract statistics directly from struct
  */
-static double get_json_double(cJSON *obj, const char *key, double default_val) {
-        cJSON *item = cJSON_GetObjectItem(obj, key);
-        return (item && cJSON_IsNumber(item)) ? cJSON_GetNumberValue(item) : default_val;
-}
-
-/**
- * Helper to extract int64 from JSON object
- */
-static int64_t get_json_int(cJSON *obj, const char *key, int64_t default_val) {
-        cJSON *item = cJSON_GetObjectItem(obj, key);
-        return (item && cJSON_IsNumber(item)) ? (int64_t)cJSON_GetNumberValue(item)
-                                              : default_val;
-}
-
-/**
- * Stats callback - extract statistics using cJSON
- */
-static int stats_cb(rd_kafka_t *rk, char *json, size_t json_len, void *opaque) {
-        cJSON *root = NULL;
-        cJSON *brokers = NULL;
-        cJSON *broker = NULL;
-
-        (void)rk;
-        (void)opaque;
-
-        if (!bench_ctx)
-                return 0;
-
-        root = cJSON_Parse(json);
-        if (!root)
-                return 0;
-
-        mtx_lock(&bench_ctx->lock);
-
-        /* Store raw JSON for later dumping */
-        if (bench_ctx->last_stats_json)
-                free(bench_ctx->last_stats_json);
-        bench_ctx->last_stats_json = malloc(json_len + 1);
-        if (bench_ctx->last_stats_json) {
-                memcpy(bench_ctx->last_stats_json, json, json_len);
-                bench_ctx->last_stats_json[json_len] = '\0';
-                bench_ctx->last_stats_len = json_len;
-        }
-
-        /* Aggregate stats across all brokers */
+static void stats_cb(rd_kafka_t *rk,
+                     const rd_kafka_stats_t *stats,
+                     void *opaque) {
+        uint32_t i;
         int64_t total_tx = 0;
         double sum_int_latency_p50 = 0, sum_int_latency_p95 = 0, sum_int_latency_p99 = 0;
         double sum_rtt_p50 = 0, sum_rtt_p95 = 0, sum_rtt_p99 = 0;
         double sum_produce_partitions_p50 = 0, sum_produce_partitions_avg = 0;
         double sum_produce_reqsize_avg = 0, sum_produce_fill_avg = 0;
         double sum_batch_wait_p50 = 0;
-        int broker_cnt = 0;
 
-        brokers = cJSON_GetObjectItem(root, "brokers");
-        if (brokers) {
-                cJSON_ArrayForEach(broker, brokers) {
-                        cJSON *int_latency, *rtt;
-                        cJSON *produce_partitions, *produce_reqsize, *produce_fill;
-                        cJSON *toppars, *toppar;
+        (void)rk;
+        (void)opaque;
 
-                        /* Count requests */
-                        total_tx += (int64_t)get_json_double(broker, "tx", 0);
+        if (!bench_ctx)
+                return;
 
-                        /* Internal latency (time from produce() to broker send) */
-                        int_latency = cJSON_GetObjectItem(broker, "int_latency");
-                        if (int_latency) {
-                                sum_int_latency_p50 += get_json_double(int_latency, "p50", 0);
-                                sum_int_latency_p95 += get_json_double(int_latency, "p95", 0);
-                                sum_int_latency_p99 += get_json_double(int_latency, "p99", 0);
-                        }
+        mtx_lock(&bench_ctx->lock);
 
-                        /* RTT (broker round-trip time) */
-                        rtt = cJSON_GetObjectItem(broker, "rtt");
-                        if (rtt) {
-                                sum_rtt_p50 += get_json_double(rtt, "p50", 0);
-                                sum_rtt_p95 += get_json_double(rtt, "p95", 0);
-                                sum_rtt_p99 += get_json_double(rtt, "p99", 0);
-                        }
+        /* Aggregate stats across all brokers */
+        for (i = 0; i < stats->broker_cnt; i++) {
+                const rd_kafka_broker_stats_t *broker = &stats->brokers[i];
 
-                        /* Produce request partitions per request */
-                        produce_partitions = cJSON_GetObjectItem(broker, "produce_partitions");
-                        if (produce_partitions) {
-                                sum_produce_partitions_p50 += get_json_double(produce_partitions, "p50", 0);
-                                sum_produce_partitions_avg += get_json_double(produce_partitions, "avg", 0);
-                        }
+                /* Count requests */
+                total_tx += broker->tx;
 
-                        /* Produce request size */
-                        produce_reqsize = cJSON_GetObjectItem(broker, "produce_reqsize");
-                        if (produce_reqsize) {
-                                sum_produce_reqsize_avg += get_json_double(produce_reqsize, "avg", 0);
-                        }
+                /* Internal latency (time from produce() to broker send) */
+                sum_int_latency_p50 += (double)broker->int_latency.p50;
+                sum_int_latency_p95 += (double)broker->int_latency.p95;
+                sum_int_latency_p99 += (double)broker->int_latency.p99;
 
-                        /* Produce fill ratio (permille) */
-                        produce_fill = cJSON_GetObjectItem(broker, "produce_fill");
-                        if (produce_fill) {
-                                sum_produce_fill_avg += get_json_double(produce_fill, "avg", 0);
-                        }
+                /* RTT (broker round-trip time) */
+                sum_rtt_p50 += (double)broker->rtt.p50;
+                sum_rtt_p95 += (double)broker->rtt.p95;
+                sum_rtt_p99 += (double)broker->rtt.p99;
 
-                        /* Batch wait time from toppars */
-                        toppars = cJSON_GetObjectItem(broker, "toppars");
-                        if (toppars) {
-                                int toppar_cnt = 0;
-                                double toppar_batch_wait_sum = 0;
-                                cJSON_ArrayForEach(toppar, toppars) {
-                                        cJSON *batchcnt = cJSON_GetObjectItem(toppar, "batchcnt");
-                                        if (batchcnt) {
-                                                toppar_batch_wait_sum += get_json_double(batchcnt, "p50", 0);
-                                                toppar_cnt++;
-                                        }
-                                }
-                                if (toppar_cnt > 0)
-                                        sum_batch_wait_p50 += toppar_batch_wait_sum / toppar_cnt;
-                        }
+                /* Produce request partitions per request */
+                sum_produce_partitions_p50 += (double)broker->produce_partitions.p50;
+                sum_produce_partitions_avg += (double)broker->produce_partitions.avg;
 
-                        broker_cnt++;
-                }
+                /* Produce request size */
+                sum_produce_reqsize_avg += (double)broker->produce_reqsize.avg;
+
+                /* Produce fill ratio (permille) */
+                sum_produce_fill_avg += (double)broker->produce_fill.avg;
+
+                /* Batch wait time (broker-level aggregate) */
+                sum_batch_wait_p50 += (double)broker->batch_wait.p50;
         }
 
         /* Calculate averages across brokers */
-        if (broker_cnt > 0) {
+        if (stats->broker_cnt > 0) {
                 bench_ctx->last_produce_requests = total_tx;
-                bench_ctx->last_int_latency_p50 = sum_int_latency_p50 / broker_cnt;
-                bench_ctx->last_int_latency_p95 = sum_int_latency_p95 / broker_cnt;
-                bench_ctx->last_int_latency_p99 = sum_int_latency_p99 / broker_cnt;
-                bench_ctx->last_rtt_p50 = sum_rtt_p50 / broker_cnt;
-                bench_ctx->last_rtt_p95 = sum_rtt_p95 / broker_cnt;
-                bench_ctx->last_rtt_p99 = sum_rtt_p99 / broker_cnt;
-                bench_ctx->last_produce_partitions_p50 = sum_produce_partitions_p50 / broker_cnt;
-                bench_ctx->last_produce_partitions_avg = sum_produce_partitions_avg / broker_cnt;
-                bench_ctx->last_produce_reqsize_avg_bytes = sum_produce_reqsize_avg / broker_cnt;
-                bench_ctx->last_produce_fill_avg_permille = sum_produce_fill_avg / broker_cnt;
-                bench_ctx->last_batch_wait_p50_us = sum_batch_wait_p50 / broker_cnt;
+                bench_ctx->last_int_latency_p50 = sum_int_latency_p50 / stats->broker_cnt;
+                bench_ctx->last_int_latency_p95 = sum_int_latency_p95 / stats->broker_cnt;
+                bench_ctx->last_int_latency_p99 = sum_int_latency_p99 / stats->broker_cnt;
+                bench_ctx->last_rtt_p50 = sum_rtt_p50 / stats->broker_cnt;
+                bench_ctx->last_rtt_p95 = sum_rtt_p95 / stats->broker_cnt;
+                bench_ctx->last_rtt_p99 = sum_rtt_p99 / stats->broker_cnt;
+
+                /* Only update produce stats if there was actual produce activity
+                 * in this interval (cnt > 0). Otherwise zeros from "empty"
+                 * intervals would overwrite valid data. This is important when
+                 * statistics.interval.ms < broker.linger.ms. */
+                if (sum_produce_partitions_avg > 0) {
+                        bench_ctx->last_produce_partitions_p50 = sum_produce_partitions_p50 / stats->broker_cnt;
+                        bench_ctx->last_produce_partitions_avg = sum_produce_partitions_avg / stats->broker_cnt;
+                        bench_ctx->last_produce_reqsize_avg_bytes = sum_produce_reqsize_avg / stats->broker_cnt;
+                        bench_ctx->last_produce_fill_avg_permille = sum_produce_fill_avg / stats->broker_cnt;
+                        bench_ctx->last_batch_wait_p50_us = sum_batch_wait_p50 / stats->broker_cnt;
+                }
         }
 
         mtx_unlock(&bench_ctx->lock);
-
-        cJSON_Delete(root);
-        return 0;
 }
 
 /* Per-message opaque data */
@@ -421,47 +345,6 @@ static void ensure_output_dir(const char *dir) {
 }
 
 /**
- * @brief Dump the latest stats JSON snapshot to disk with a label.
- */
-static void dump_latest_stats(const char *label) {
-        char *copy = NULL;
-        size_t len = 0;
-        int dump_id = -1;
-
-        if (!bench_ctx || bench_ctx->config->stats_dump_max == 0)
-                return;
-
-        mtx_lock(&bench_ctx->lock);
-        if (bench_ctx->last_stats_json && bench_ctx->last_produce_requests > 0) {
-                len  = bench_ctx->last_stats_len;
-                copy = malloc(len + 1);
-                if (copy) {
-                        memcpy(copy, bench_ctx->last_stats_json, len + 1);
-                        dump_id = bench_ctx->stats_dump_id++;
-                }
-        }
-        mtx_unlock(&bench_ctx->lock);
-
-        if (!copy)
-                return;
-
-        ensure_output_dir(bench_ctx->config->output_dir);
-        char path[512];
-        rd_snprintf(path, sizeof(path), "%s/stats_dump_%s_%d.json",
-                    bench_ctx->config->output_dir, label, dump_id);
-        FILE *fp = fopen(path, "w");
-        if (fp) {
-                fwrite(copy, 1, len, fp);
-                fclose(fp);
-                TEST_SAY("Dumped stats JSON to %s\n", path);
-        } else {
-                TEST_WARN("Failed to write stats dump to %s\n", path);
-        }
-
-        free(copy);
-}
-
-/**
  * Create producer with standard configuration
  */
 static rd_kafka_t *create_producer(bench_config_t *config, const char *topic) {
@@ -471,7 +354,10 @@ static rd_kafka_t *create_producer(bench_config_t *config, const char *topic) {
 
         test_conf_init(&conf, NULL, 120);
         rd_kafka_conf_set_dr_msg_cb(conf, dr_cb);
-        rd_kafka_conf_set_stats_cb(conf, stats_cb);
+        /* Use typed stats callback only - disable JSON callback set by
+         * test_conf_init to avoid double rd_avg_rollover consumption */
+        rd_kafka_conf_set_stats_cb(conf, NULL);
+        rd_kafka_conf_set_stats_cb_typed(conf, stats_cb);
 
         /* Standard MultiBatch configuration */
         test_conf_set(conf, "statistics.interval.ms", "50");
@@ -658,8 +544,6 @@ static void run_max_throughput_phase(bench_config_t *config, const char *topic) 
                  phase->produce_fill_avg_permille / 10.0,
                  phase->batch_wait_p50_us / 1000.0);
 
-        dump_latest_stats("max");
-
         /* Cleanup */
         rd_kafka_topic_destroy(rkt);
         rd_kafka_destroy(rk);
@@ -831,10 +715,6 @@ static void run_controlled_rate_phase(bench_config_t *config, const char *topic,
                  phase->produce_reqsize_avg_bytes,
                  phase->produce_fill_avg_permille / 10.0,
                  phase->batch_wait_p50_us / 1000.0);
-
-        char dump_label[64];
-        rd_snprintf(dump_label, sizeof(dump_label), "rate_%d", rate_msgs_sec);
-        dump_latest_stats(dump_label);
 
         /* Cleanup */
         rd_kafka_topic_destroy(rkt);
@@ -1052,11 +932,6 @@ static void parse_config(bench_config_t *config) {
 
         if ((val = test_getenv("BENCH_SKIP_CONTROLLED", NULL)))
                 config->skip_controlled = atoi(val);
-
-        if ((val = test_getenv("BENCH_DUMP_STATS", NULL)))
-                config->stats_dump_max = atoi(val);
-        else
-                config->stats_dump_max = 1; /* dump once per phase by default */
 }
 
 /**
@@ -1073,7 +948,6 @@ int main_0200_multibatch_benchmark(int argc, char **argv) {
         bench_ctx = calloc(1, sizeof(bench_ctx_t));
         bench_ctx->config = &config;
         mtx_init(&bench_ctx->lock, mtx_plain);
-        bench_ctx->stats_dump_id        = 0;
 
         /* Create topic */
         topic = test_mk_topic_name(__FUNCTION__, 1);
@@ -1116,8 +990,6 @@ int main_0200_multibatch_benchmark(int argc, char **argv) {
                 free(bench_ctx->sampled_latencies);
         if (bench_ctx->phases)
                 free(bench_ctx->phases);
-        if (bench_ctx->last_stats_json)
-                free(bench_ctx->last_stats_json);
         free(bench_ctx);
 
         free(config.output_dir);

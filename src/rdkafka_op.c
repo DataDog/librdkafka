@@ -36,6 +36,7 @@
 #include "rdkafka_proto.h"
 #include "rdkafka_offset.h"
 #include "rdkafka_error.h"
+#include "rdkafka_stats.h"
 
 /* Current number of rd_kafka_op_t */
 rd_atomic32_t rd_kafka_op_cnt;
@@ -380,6 +381,7 @@ void rd_kafka_op_destroy(rd_kafka_op_t *rko) {
 
         case RD_KAFKA_OP_STATS:
                 RD_IF_FREE(rko->rko_u.stats.json, rd_free);
+                RD_IF_FREE(rko->rko_u.stats.typed, rd_kafka_stats_destroy);
                 break;
 
         case RD_KAFKA_OP_XMIT_RETRY:

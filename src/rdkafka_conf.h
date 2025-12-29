@@ -44,6 +44,7 @@
  * Forward declarations
  */
 struct rd_kafka_transport_s;
+typedef struct rd_kafka_stats_s rd_kafka_stats_t;
 
 
 /**
@@ -519,11 +520,16 @@ struct rd_kafka_conf_s {
                             int throttle_time_ms,
                             void *opaque);
 
-        /* Stats callback */
+        /* Stats callback (JSON) */
         int (*stats_cb)(rd_kafka_t *rk,
                         char *json,
                         size_t json_len,
                         void *opaque);
+
+        /* Stats callback (typed struct) - higher performance alternative */
+        void (*stats_cb_typed)(rd_kafka_t *rk,
+                               const rd_kafka_stats_t *stats,
+                               void *opaque);
 
         /* Socket creation callback */
         int (*socket_cb)(int domain, int type, int protocol, void *opaque);

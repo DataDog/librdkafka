@@ -57,6 +57,12 @@
 #include "rdkafka_interceptor.h"
 #include "rdkafka_idempotence.h"
 #include "rdkafka_sasl_oauthbearer.h"
+#include "rdkafka_stats.h"
+
+/* Internal stats functions declared in rdkafka_stats.c */
+rd_kafka_stats_t *rd_kafka_stats_new(rd_kafka_t *rk);
+void rd_kafka_stats_destroy(rd_kafka_stats_t *stats);
+
 #if WITH_OAUTHBEARER_OIDC
 #include "rdkafka_sasl_oauthbearer_oidc.h"
 #endif
@@ -1729,6 +1735,39 @@ static void rd_kafka_stats_emit_all(rd_kafka_t *rk) {
         struct _stats_emit stx    = {.size = 1024 * 10};
         struct _stats_emit *st    = &stx;
         struct _stats_total total = {0};
+        rd_ts_t ts_json_start = 0, ts_json_end = 0;
+        rd_ts_t ts_typed_start = 0, ts_typed_end = 0;
+        rd_bool_t need_json;
+        rd_bool_t need_typed;
+        rd_kafka_stats_t *typed_stats = NULL;
+
+        /* Determine what stats formats are needed.
+         * - JSON: only if JSON callback is set
+         * - Typed: if typed callback is set OR events include STATS */
+        need_json  = rk->rk_conf.stats_cb != NULL;
+        need_typed = rk->rk_conf.stats_cb_typed != NULL ||
+                     (rk->rk_conf.enabled_events & RD_KAFKA_EVENT_STATS);
+
+        /* Early return if no stats are needed */
+        if (!need_json && !need_typed)
+                return;
+
+        /* Generate typed stats first (if needed) - has its own locking */
+        if (need_typed) {
+                ts_typed_start = rd_clock();
+                typed_stats    = rd_kafka_stats_new(rk);
+                ts_typed_end   = rd_clock();
+        }
+
+        /* Generate JSON stats (if needed) */
+        if (!need_json) {
+                /* Skip JSON generation entirely */
+                st->buf = NULL;
+                st->of  = 0;
+                goto enqueue_op;
+        }
+
+        ts_json_start = rd_clock();
 
         st->buf = rd_malloc(st->size);
 
@@ -2039,12 +2078,25 @@ static void rd_kafka_stats_emit_all(rd_kafka_t *rk) {
 
         _st_printf("}" /*close object*/);
 
+        ts_json_end = rd_clock();
 
-        /* Enqueue op for application */
+enqueue_op:
+        /* Log timing comparison for performance analysis */
+        rd_kafka_dbg(rk, GENERIC, "STATS",
+                     "Stats generation timing: JSON=%.3fms (%" PRIusz
+                     " bytes), typed=%.3fms",
+                     (double)(ts_json_end - ts_json_start) / 1000.0, st->of,
+                     (double)(ts_typed_end - ts_typed_start) / 1000.0);
+
+        /* Enqueue op for delivery via poll/events.
+         * Both typed and JSON callbacks will be invoked on the app's thread
+         * when it calls rd_kafka_poll() or rd_kafka_queue_poll(). */
         rko = rd_kafka_op_new(RD_KAFKA_OP_STATS);
         rd_kafka_op_set_prio(rko, RD_KAFKA_PRIO_HIGH);
         rko->rko_u.stats.json     = st->buf;
         rko->rko_u.stats.json_len = st->of;
+        rko->rko_u.stats.typed    = typed_stats;
+
         rd_kafka_q_enq(rk->rk_rep, rko);
 }
 
@@ -4123,8 +4175,13 @@ rd_kafka_op_res_t rd_kafka_poll_cb(rd_kafka_t *rk,
                 break;
 
         case RD_KAFKA_OP_STATS:
-                /* Statistics */
-                if (rk->rk_conf.stats_cb &&
+                /* Statistics - deliver typed stats first, then JSON.
+                 * Both callbacks run on the app's thread (here). */
+                if (rk->rk_conf.stats_cb_typed && rko->rko_u.stats.typed) {
+                        rk->rk_conf.stats_cb_typed(rk, rko->rko_u.stats.typed,
+                                                   rk->rk_conf.opaque);
+                }
+                if (rk->rk_conf.stats_cb && rko->rko_u.stats.json &&
                     rk->rk_conf.stats_cb(rk, rko->rko_u.stats.json,
                                          rko->rko_u.stats.json_len,
                                          rk->rk_conf.opaque) == 1)

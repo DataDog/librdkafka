@@ -246,6 +246,8 @@ const char *rd_kafka_get_debug_contexts(void);
         "security,fetch,interceptor,plugin,consumer,admin,eos,mock,assignor,"  \
         "conf"
 
+/* Include typed statistics structures */
+#include "rdkafka_stats.h"
 
 /* @cond NO_DOC */
 /* Private types to provide ABI compatibility */
@@ -2221,6 +2223,35 @@ RD_EXPORT
 void rd_kafka_conf_set_stats_cb(
     rd_kafka_conf_t *conf,
     int (*stats_cb)(rd_kafka_t *rk, char *json, size_t json_len, void *opaque));
+
+/**
+ * @brief Set typed statistics callback in provided conf object.
+ *
+ * This is a higher-performance alternative to rd_kafka_conf_set_stats_cb()
+ * that provides statistics as a typed C struct instead of JSON.
+ *
+ * The statistics callback is triggered from rd_kafka_poll() every
+ * \c statistics.interval.ms (needs to be configured separately).
+ * Function arguments:
+ *   - \p rk - Kafka handle
+ *   - \p stats - Typed statistics structure (see rdkafka_stats.h)
+ *   - \p opaque - Application-provided opaque as set by
+ *                 rd_kafka_conf_set_opaque().
+ *
+ * The stats structure is only valid during the callback. If you need
+ * to retain any data, copy it during the callback.
+ *
+ * Both JSON and typed callbacks can be set simultaneously for comparison.
+ * The typed callback is invoked first, then the JSON callback.
+ *
+ * See rdkafka_stats.h for the full definition of the stats structure.
+ */
+RD_EXPORT
+void rd_kafka_conf_set_stats_cb_typed(
+    rd_kafka_conf_t *conf,
+    void (*stats_cb)(rd_kafka_t *rk,
+                     const rd_kafka_stats_t *stats,
+                     void *opaque));
 
 /**
  * @brief Set SASL/OAUTHBEARER token refresh callback in provided conf object.
@@ -5822,6 +5853,40 @@ int rd_kafka_event_debug_contexts(rd_kafka_event_t *rkev,
  */
 RD_EXPORT
 const char *rd_kafka_event_stats(rd_kafka_event_t *rkev);
+
+/**
+ * @returns the typed statistics struct from the event.
+ *
+ * Event types:
+ *  - RD_KAFKA_EVENT_STATS
+ *
+ * @remark The returned pointer is valid only during the lifetime of the event.
+ *         It will be freed automatically along with the event object.
+ * @remark May return NULL if typed stats were not generated (e.g., if only
+ *         the JSON stats callback was configured).
+ */
+RD_EXPORT
+const rd_kafka_stats_t *rd_kafka_event_stats_typed(rd_kafka_event_t *rkev);
+
+
+/**
+ * @name Statistics state name arrays
+ * @{
+ *
+ * Static arrays for converting integer enum values in rd_kafka_stats_t
+ * to human-readable strings.
+ */
+
+#define RD_KAFKA_BROKER_STATE_COUNT 8
+#define RD_KAFKA_FETCH_STATE_COUNT  6
+
+/** Broker state names. Index with rd_kafka_broker_stats_t.state */
+RD_EXPORT extern const char *rd_kafka_broker_state_names[];
+
+/** Partition fetch state names. Index with rd_kafka_partition_stats_t.fetch_state */
+RD_EXPORT extern const char *rd_kafka_fetch_states[];
+
+/**@}*/
 
 
 /**

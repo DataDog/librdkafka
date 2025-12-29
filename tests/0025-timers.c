@@ -46,7 +46,9 @@ struct state {
 struct state state;
 
 
-static int stats_cb(rd_kafka_t *rk, char *json, size_t json_len, void *opaque) {
+static void stats_cb(rd_kafka_t *rk,
+                     const rd_kafka_stats_t *stats,
+                     void *opaque) {
         const int64_t now = test_clock();
         /* Fake the first elapsed time since we dont really know how
          * long rd_kafka_new() takes and at what time the timer is started. */
@@ -57,6 +59,8 @@ static int stats_cb(rd_kafka_t *rk, char *json, size_t json_len, void *opaque) {
             (int)((double)state.interval *
                   (!strcmp(test_mode, "bare") ? 0.2 : 1.0));
         const int wiggleroom_down = (int)((double)state.interval * 0.1);
+
+        (void)stats; /* Unused - we only care about timing */
 
         TEST_SAY("Call #%d: after %" PRId64
                  "ms, %.0f%% outside "
@@ -73,8 +77,6 @@ static int stats_cb(rd_kafka_t *rk, char *json, size_t json_len, void *opaque) {
 
         state.ts_last = now;
         state.calls++;
-
-        return 0;
 }
 
 
@@ -96,7 +98,9 @@ static void do_test_stats_timer(void) {
 
         test_conf_set(conf, "statistics.interval.ms", "600");
         test_conf_set(conf, "bootstrap.servers", NULL); /*no need for brokers*/
-        rd_kafka_conf_set_stats_cb(conf, stats_cb);
+        /* Disable JSON callback to avoid double rd_avg_rollover */
+        rd_kafka_conf_set_stats_cb(conf, NULL);
+        rd_kafka_conf_set_stats_cb_typed(conf, stats_cb);
 
         TIMING_START(&t_new, "rd_kafka_new()");
         rk = test_create_handle(RD_KAFKA_CONSUMER, conf);

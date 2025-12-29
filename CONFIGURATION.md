@@ -40,6 +40,7 @@ enabled_events                           |  *  | 0 .. 2147483647 |             0
 error_cb                                 |  *  |                 |               | low        | Error callback (set with rd_kafka_conf_set_error_cb()) <br>*Type: see dedicated API*
 throttle_cb                              |  *  |                 |               | low        | Throttle callback (set with rd_kafka_conf_set_throttle_cb()) <br>*Type: see dedicated API*
 stats_cb                                 |  *  |                 |               | low        | Statistics callback (set with rd_kafka_conf_set_stats_cb()) <br>*Type: see dedicated API*
+stats_cb_typed                           |  *  |                 |               | low        | Typed statistics callback (set with rd_kafka_conf_set_stats_cb_typed()) <br>*Type: see dedicated API*
 log_cb                                   |  *  |                 |               | low        | Log callback (set with rd_kafka_conf_set_log_cb()) <br>*Type: see dedicated API*
 log_level                                |  *  | 0 .. 7          |             6 | low        | Logging level (syslog(3) levels) <br>*Type: integer*
 log.queue                                |  *  | true, false     |         false | low        | Disable spontaneous log_cb from internal librdkafka threads, instead enqueue log messages on queue set with `rd_kafka_set_log_queue()` and serve log callbacks or events through the standard poll APIs. **NOTE**: Log messages will linger in a temporary queue until the log queue has been set. <br>*Type: boolean*

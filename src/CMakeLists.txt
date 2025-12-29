@@ -17,6 +17,7 @@ set(
     rdkafka_cgrp.c
     rdkafka_conf.c
     rdkafka_event.c
+    rdkafka_stats.c
     rdkafka_feature.c
     rdkafka_lz4.c
     rdkafka_metadata.c
