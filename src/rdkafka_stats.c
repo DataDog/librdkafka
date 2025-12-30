@@ -32,6 +32,7 @@
 #include "rdkafka_partition.h"
 #include "rdkafka_cgrp.h"
 #include "rdkafka_stats.h"
+#include "rdkafka_adaptive.h"
 #include "rdavg.h"
 
 #include <string.h>
@@ -398,6 +399,25 @@ static void rd_kafka_stats_broker_populate(rd_kafka_broker_stats_t *dst,
         rd_kafka_stats_avg_populate(&dst->produce_reqsize, &rkb->rkb_avg_produce_reqsize);
         rd_kafka_stats_avg_populate(&dst->produce_fill, &rkb->rkb_avg_produce_fill);
         rd_kafka_stats_avg_populate(&dst->batch_wait, &rkb->rkb_avg_batch_wait);
+
+        /* Adaptive batching stats */
+        dst->adaptive_enabled = rkb->rkb_rk->rk_conf.adaptive_batching_enabled;
+        if (dst->adaptive_enabled) {
+                rd_kafka_adaptive_state_t *state = &rkb->rkb_adaptive_state;
+                rd_kafka_adaptive_params_t *params = &rkb->rkb_adaptive_params;
+
+                dst->adaptive_linger_us = params->linger_us;
+                dst->adaptive_batch_max_bytes = params->batch_max_bytes;
+                dst->adaptive_congestion = state->congestion_score;
+                dst->adaptive_rtt_congestion = state->rtt_congestion;
+                dst->adaptive_int_lat_congestion = state->int_lat_congestion;
+                dst->adaptive_rtt_base_us = state->rtt_stats.rtt_base;
+                dst->adaptive_rtt_current_us = state->rtt_stats.rtt_current;
+                dst->adaptive_int_lat_base_us = state->int_lat_stats.int_lat_base;
+                dst->adaptive_int_lat_current_us = state->int_lat_stats.int_lat_current;
+                dst->adaptive_adjustments_up = state->adjustments_up;
+                dst->adaptive_adjustments_down = state->adjustments_down;
+        }
 
         /* Request type counts (only non-zero entries with names) */
         dst->reqs = *req_ptr;
