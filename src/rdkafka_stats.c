@@ -164,8 +164,8 @@ static void rd_kafka_stats_partition_populate(rd_kafka_partition_stats_t *dst,
         /* Producer queue stats */
         dst->msgq_cnt        = rd_kafka_msgq_len(&rktp->rktp_msgq);
         dst->msgq_bytes      = rd_kafka_msgq_size(&rktp->rktp_msgq);
-        dst->xmit_msgq_cnt   = 0; /* FIXME: xmit_msgq is local to broker thread */
-        dst->xmit_msgq_bytes = 0;
+        dst->xmit_msgq_cnt   = rd_atomic32_get(&rktp->rktp_xmit_msgq_cnt);
+        dst->xmit_msgq_bytes = rd_atomic64_get(&rktp->rktp_xmit_msgq_bytes);
 
         /* Consumer stats */
         dst->fetchq_cnt  = rd_kafka_q_len(rktp->rktp_fetchq);
@@ -417,6 +417,7 @@ static void rd_kafka_stats_broker_populate(rd_kafka_broker_stats_t *dst,
                 dst->adaptive_int_lat_current_us = state->int_lat_stats.int_lat_current;
                 dst->adaptive_adjustments_up = state->adjustments_up;
                 dst->adaptive_adjustments_down = state->adjustments_down;
+                dst->adaptive_backlog_drain_events = state->backlog_drain_events;
         }
 
         /* Request type counts (only non-zero entries with names) */

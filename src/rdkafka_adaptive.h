@@ -96,8 +96,9 @@ typedef struct rd_kafka_adaptive_state_s {
         double prev_rtt;
 
         /* Statistics counters */
-        int64_t adjustments_up;   /**< Count of slow-down adjustments */
-        int64_t adjustments_down; /**< Count of speed-up adjustments */
+        int64_t adjustments_up;       /**< Count of slow-down adjustments */
+        int64_t adjustments_down;     /**< Count of speed-up adjustments */
+        int64_t backlog_drain_events; /**< Count of backlog drain cycles */
 } rd_kafka_adaptive_state_t;
 
 /* Forward declaration */

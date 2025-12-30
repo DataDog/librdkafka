@@ -4581,6 +4581,12 @@ static int rd_kafka_broker_produce_toppars(rd_kafka_broker_t *rkb,
                  * batch_ready status since the collector controls when to send. */
                 {
                         int msgq_len = rd_kafka_msgq_len(&rktp->rktp_xmit_msgq);
+                        size_t msgq_bytes = rd_kafka_msgq_size(&rktp->rktp_xmit_msgq);
+
+                        /* Update atomic counters for stats visibility */
+                        rd_atomic32_set(&rktp->rktp_xmit_msgq_cnt, msgq_len);
+                        rd_atomic64_set(&rktp->rktp_xmit_msgq_bytes, msgq_bytes);
+
                         if (msgq_len > 0) {
                                 total_msg_cnt += msgq_len;
                                 rd_kafka_broker_batch_collector_add(rkb, rktp);

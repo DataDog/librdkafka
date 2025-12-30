@@ -37,6 +37,16 @@
 /* Maximum consecutive increases before checking for runaway */
 #define RD_KAFKA_ADAPTIVE_RUNAWAY_THRESHOLD 5
 
+/* RTT staleness threshold in microseconds (5 seconds).
+ * If no RTT samples received within this period, skip adjustment.
+ * This prevents speeding up when broker is disconnected or unresponsive. */
+#define RD_KAFKA_ADAPTIVE_STALENESS_THRESHOLD_US (5 * 1000 * 1000)
+
+/* Backlog threshold for triggering drain mode.
+ * When queue depth exceeds this AND congestion is low, we force
+ * minimum linger to drain the backlog faster. */
+#define RD_KAFKA_ADAPTIVE_BACKLOG_THRESHOLD 1000
+
 
 /**
  * @brief Initialize adaptive batching state for a broker.
@@ -298,10 +308,64 @@ void rd_kafka_adaptive_adjust(rd_kafka_broker_t *rkb) {
         rd_ts_t old_linger                 = params->linger_us;
         int64_t old_batch                  = params->batch_max_bytes;
         const char *action;
+        rd_ts_t now = rd_clock();
+
+        /* Don't adjust if broker is not connected */
+        if (rkb->rkb_state != RD_KAFKA_BROKER_STATE_UP)
+                return;
+
+        /* Don't adjust if RTT data is stale (no recent samples).
+         * This prevents speeding up when broker is disconnected or
+         * just reconnected but hasn't received responses yet. */
+        if ((now - state->rtt_stats.rtt_last_update) >
+            RD_KAFKA_ADAPTIVE_STALENESS_THRESHOLD_US)
+                return;
 
         /* Calculate congestion from both signals */
         double congestion       = rd_kafka_adaptive_calc_congestion(rkb);
         state->congestion_score = congestion;
+
+        /* Check for backlog that needs draining.
+         * If queue is large but RTT has recovered (congestion low),
+         * speed up to drain faster using normal adjustment step. */
+        int queue_depth = rd_kafka_curr_msgs_cnt(rkb->rkb_rk);
+        if (queue_depth > RD_KAFKA_ADAPTIVE_BACKLOG_THRESHOLD &&
+            congestion < state->alpha) {
+                /* Backlog with healthy RTT - speed up to drain it */
+                rd_ts_t old_linger  = params->linger_us;
+                int64_t old_batch   = params->batch_max_bytes;
+
+                params->linger_us = (rd_ts_t)((double)params->linger_us /
+                                              RD_KAFKA_ADAPTIVE_ADJUSTMENT_STEP);
+                params->batch_max_bytes =
+                    (int64_t)((double)params->batch_max_bytes /
+                              RD_KAFKA_ADAPTIVE_ADJUSTMENT_STEP);
+
+                /* Enforce bounds */
+                params->linger_us = RD_MAX(params->linger_min_us,
+                                           params->linger_us);
+                params->batch_max_bytes = RD_MAX(params->batch_max_bytes_min,
+                                                 params->batch_max_bytes);
+
+                state->backlog_drain_events++;
+                state->adjustments_down++;
+
+                if (params->linger_us != old_linger ||
+                    params->batch_max_bytes != old_batch) {
+                        rd_rkb_dbg(rkb, BROKER, "ADAPTIVE",
+                                   "BACKLOG_DRAIN: queue_depth=%d (threshold=%d) "
+                                   "congestion=%.3f < alpha=%.2f "
+                                   "linger=%"PRId64"ms->%"PRId64"ms "
+                                   "batch=%"PRId64"KB->%"PRId64"KB",
+                                   queue_depth, RD_KAFKA_ADAPTIVE_BACKLOG_THRESHOLD,
+                                   congestion, state->alpha,
+                                   old_linger / 1000, params->linger_us / 1000,
+                                   old_batch / 1024, params->batch_max_bytes / 1024);
+                }
+
+                state->last_adjustment = now;
+                return;
+        }
 
         if (congestion < state->alpha) {
                 /* Low congestion - we can speed up (decrease linger/batch) */
