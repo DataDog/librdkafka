@@ -181,6 +181,11 @@ struct rd_kafka_toppar_s {                           /* rd_kafka_toppar_t */
                                            *   contents were enqueued on this
                                            *   broker (for batch wait stats). */
 
+        /* Atomic mirrors of xmit_msgq for stats visibility.
+         * Updated by broker thread, read by stats thread. */
+        rd_atomic32_t rktp_xmit_msgq_cnt;   /**< Atomic count of xmit_msgq */
+        rd_atomic64_t rktp_xmit_msgq_bytes; /**< Atomic size of xmit_msgq */
+
         int rktp_fetch; /* On rkb_active_toppars list */
         rd_bool_t rktp_in_batch_collector; /**< True if partition is in
                                             *   broker's batch collector */

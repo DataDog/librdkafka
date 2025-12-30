@@ -219,6 +219,7 @@ typedef struct rd_kafka_broker_stats_s {
         int64_t adaptive_int_lat_current_us;        /**< Current smoothed int latency */
         int64_t adaptive_adjustments_up;            /**< Slow-down adjustment count */
         int64_t adaptive_adjustments_down;          /**< Speed-up adjustment count */
+        int64_t adaptive_backlog_drain_events;      /**< Backlog drain cycle count */
 
         /* Request type counts (only non-zero entries) */
         uint32_t req_cnt;                /**< Number of request type entries */

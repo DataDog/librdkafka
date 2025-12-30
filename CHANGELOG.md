@@ -1,3 +1,14 @@
+# librdkafka-adaptive
+
+After a spike in rtt (possibly from a kafka-cluster downscale or operation)
+it's common to see an increase in queue_depth. Since we don't signal on that
+currently, the queue then stayed elevated for an extended period of time, causing
+messages stuck in the queue for a given partition to stay stuck for an elevated
+period of time. We now attempt to detect this, and when the queue exceeds some threshold
+and rtt has returned to nromal, we try to speed up. We also fix a bug where parameters
+got modified during a disconnect for a broker, because we thought there was 0 contention.
+This had the possibility of causing retry storms.
+
 # librdkafka v2.10.1
 
 librdkafka v2.10.1 is a maintenance release:
