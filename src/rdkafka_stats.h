@@ -205,6 +205,21 @@ typedef struct rd_kafka_broker_stats_s {
         rd_kafka_avg_stats_t produce_fill;       /**< Fill percentage (permille) */
         rd_kafka_avg_stats_t batch_wait;         /**< Batch wait time */
 
+        /* Adaptive batching stats (only valid when adaptive_enabled is true) */
+        int8_t adaptive_enabled;                    /**< Whether adaptive batching is on */
+        int8_t _pad_adaptive[7];
+        int64_t adaptive_linger_us;                 /**< Current adaptive linger */
+        int64_t adaptive_batch_max_bytes;           /**< Current adaptive batch limit */
+        double adaptive_congestion;                 /**< Combined congestion score */
+        double adaptive_rtt_congestion;             /**< RTT-based congestion component */
+        double adaptive_int_lat_congestion;         /**< Internal latency congestion */
+        int64_t adaptive_rtt_base_us;               /**< RTT baseline */
+        int64_t adaptive_rtt_current_us;            /**< Current smoothed RTT */
+        int64_t adaptive_int_lat_base_us;           /**< Int latency baseline */
+        int64_t adaptive_int_lat_current_us;        /**< Current smoothed int latency */
+        int64_t adaptive_adjustments_up;            /**< Slow-down adjustment count */
+        int64_t adaptive_adjustments_down;          /**< Speed-up adjustment count */
+
         /* Request type counts (only non-zero entries) */
         uint32_t req_cnt;                /**< Number of request type entries */
         uint32_t _pad2;
