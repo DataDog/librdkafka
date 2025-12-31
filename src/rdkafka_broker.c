@@ -488,6 +488,8 @@ int rd_kafka_broker_batch_collector_maybe_send(rd_kafka_broker_t *rkb,
         }
 
         if (should_send) {
+                int msg_cnt;
+
                 rd_rkb_dbg(rkb, MSG, "BATCHCOL",
                            "Batch collector send triggered: partitions=%d "
                            "bytes=%" PRId64 " collecting_for=%.1fms reason=%s",
@@ -498,7 +500,21 @@ int rd_kafka_broker_batch_collector_maybe_send(rd_kafka_broker_t *rkb,
                                : 0.0,
                            reason);
 
-                return rd_kafka_broker_batch_collector_send(rkb);
+                msg_cnt = rd_kafka_broker_batch_collector_send(rkb);
+
+                /* If we tried to send but couldn't (blocked on max_in_flight,
+                 * outbufs full, etc.), reset first_add_ts to start a fresh
+                 * linger period. This prevents spin-looping when blocked -
+                 * we'll wait for linger before trying again. */
+                if (msg_cnt == 0 && col->rkbbcol_partition_cnt > 0) {
+                        col->rkbbcol_first_add_ts = now;
+                        rd_rkb_dbg(rkb, MSG, "BATCHCOL",
+                                   "Send blocked (0 msgs sent with %d "
+                                   "partitions pending), resetting linger timer",
+                                   col->rkbbcol_partition_cnt);
+                }
+
+                return msg_cnt;
         }
 
         return 0;
@@ -516,12 +532,23 @@ int rd_kafka_broker_batch_collector_maybe_send(rd_kafka_broker_t *rkb,
  */
 rd_ts_t rd_kafka_broker_batch_collector_next_wakeup(rd_kafka_broker_t *rkb) {
         rd_kafka_broker_batch_collector_t *col = &rkb->rkb_batch_collector;
+        rd_ts_t wakeup, now;
 
         if (col->rkbbcol_partition_cnt == 0 || col->rkbbcol_first_add_ts == 0)
                 return 0;
 
         /* Use adaptive linger if enabled, otherwise static config */
-        return col->rkbbcol_first_add_ts + rd_kafka_adaptive_get_linger_us(rkb);
+        wakeup = col->rkbbcol_first_add_ts + rd_kafka_adaptive_get_linger_us(rkb);
+
+        /* Don't return a time in the past - this can happen if we've been
+         * collecting for longer than linger (e.g., blocked on max_in_flight).
+         * Returning a past time causes immediate wakeup and spin loop.
+         * Cap at now + 1ms minimum to allow other work to proceed. */
+        now = rd_clock();
+        if (wakeup < now)
+                wakeup = now + 1000; /* 1ms minimum sleep */
+
+        return wakeup;
 }
 
 
