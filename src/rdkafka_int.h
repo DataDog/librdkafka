@@ -1002,7 +1002,8 @@ const char *rd_kafka_purge_flags2str(int flags);
 #define RD_KAFKA_DBG_ASSIGNOR    0x20000
 #define RD_KAFKA_DBG_CONF        0x40000
 #define RD_KAFKA_DBG_TELEMETRY   0x80000
-#define RD_KAFKA_DBG_ALL         0xfffff
+#define RD_KAFKA_DBG_BATCHCOL    0x100000
+#define RD_KAFKA_DBG_ALL         0x1fffff
 #define RD_KAFKA_DBG_NONE        0x0
 
 /* Jitter Percent for exponential retry backoff */

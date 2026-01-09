@@ -375,11 +375,6 @@ static rd_kafka_t *create_producer(bench_config_t *config, const char *topic) {
         if ((val = test_getenv("BROKER_LINGER_MS", NULL)))
                 test_conf_set(conf, "broker.linger.ms", val);
 
-        /* Allow broker.batch.max.partitions override via environment
-         * -1 = disabled (default), use broker.linger.ms only */
-        if ((val = test_getenv("BROKER_BATCH_MAX_PARTITIONS", NULL)))
-                test_conf_set(conf, "broker.batch.max.partitions", val);
-
         /* Allow broker.batch.max.bytes override via environment
          * -1 = disabled (default), use broker.linger.ms only */
         test_conf_set(conf, "broker.batch.max.bytes", "10000000"); /* 10MB */

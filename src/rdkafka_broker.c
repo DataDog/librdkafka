@@ -99,6 +99,67 @@ typedef struct produce_batch_s {
         rd_kafka_produce_calculator_t batch_calculator;
 } produce_batch_t;
 
+typedef struct rd_kafka_produce_topic_bucket_s {
+        rd_kafka_topic_t *rkt;
+        rd_list_t toppars;
+} rd_kafka_produce_topic_bucket_t;
+
+static void
+rd_kafka_produce_topic_bucket_cleanup(void *ptr) {
+        rd_kafka_produce_topic_bucket_t *bucket = ptr;
+
+        rd_list_destroy(&bucket->toppars);
+}
+
+static rd_kafka_produce_topic_bucket_t *
+rd_kafka_produce_topic_bucket_find(rd_list_t *buckets,
+                                   const rd_kafka_topic_t *rkt) {
+        rd_kafka_produce_topic_bucket_t *bucket;
+        int i;
+
+        RD_LIST_FOREACH(bucket, buckets, i) {
+                if (bucket->rkt == rkt)
+                        return bucket;
+        }
+
+        return NULL;
+}
+
+static int
+rd_kafka_produce_topic_buckets_build(rd_list_t *buckets,
+                                     const produce_batch_t *batch) {
+        rd_kafka_toppar_t *rktp;
+        int topic_max = batch->batch_calculator.rkpca_topic_cnt;
+        int partition_cnt = batch->batch_calculator.rkpca_partition_cnt;
+        int bucket_prealloc;
+
+        if (unlikely(topic_max <= 0))
+                return 0;
+
+        rd_list_init(buckets, 0, rd_kafka_produce_topic_bucket_cleanup);
+        rd_list_prealloc_elems(buckets, sizeof(rd_kafka_produce_topic_bucket_t),
+                               topic_max, 1);
+
+        bucket_prealloc =
+            RD_MAX(1, partition_cnt / RD_MAX(1, topic_max));
+
+        TAILQ_FOREACH(rktp, &batch->batch_toppars, rktp_batch_link) {
+                rd_kafka_produce_topic_bucket_t *bucket;
+
+                bucket = rd_kafka_produce_topic_bucket_find(
+                    buckets, rktp->rktp_rkt);
+                if (!bucket) {
+                        bucket = rd_list_add(buckets, NULL);
+                        bucket->rkt = rktp->rktp_rkt;
+                        rd_list_init(&bucket->toppars, bucket_prealloc, NULL);
+                }
+
+                rd_list_add(&bucket->toppars, rktp);
+        }
+
+        return rd_list_cnt(buckets) > 0;
+}
+
 /* These rd_kafka_broker_produce_batch_* functions are helpers
 * for delaying the construction of a message batch until the
 * counts of messages, partitions, and topics are known 
@@ -143,8 +204,17 @@ rd_kafka_broker_produce_batch_append(produce_batch_t *batch,
 static int
 rd_kafka_broker_produce_batch_send(produce_batch_t *batch,
                                         rd_kafka_broker_t *rkb) {
-        rd_kafka_toppar_t *rktp;
         rd_kafka_produce_ctx_t ctx;
+        rd_list_t topic_buckets;
+        rd_kafka_produce_topic_bucket_t *bucket;
+        int i;
+        int ret = 0;
+        const int expected_topic_cnt = batch->batch_calculator.rkpca_topic_cnt;
+        const int expected_partition_cnt =
+            batch->batch_calculator.rkpca_partition_cnt;
+        const int expected_message_cnt = batch->batch_calculator.rkpca_message_cnt;
+        const size_t expected_message_bytes =
+            batch->batch_calculator.rkpca_message_size;
 
 
         if (unlikely(!batch->batch_initialized)) {
@@ -155,24 +225,76 @@ rd_kafka_broker_produce_batch_send(produce_batch_t *batch,
                 return 0;
         }
 
+        if (unlikely(!rd_kafka_produce_topic_buckets_build(&topic_buckets,
+                                                           batch))) {
+                return 0;
+        }
+
+        rd_rkb_dbg(rkb, BATCHCOL, "BATCHCOL",
+                   "produce_batch_send: topics=%d partitions=%d messages=%d bytes=%" PRIusz,
+                   rd_list_cnt(&topic_buckets), expected_partition_cnt,
+                   expected_message_cnt, expected_message_bytes);
+
         if (unlikely(!rd_kafka_ProduceRequest_init(
                         &ctx, rkb,
                         rkb->rkb_produce_pid,
-                        batch->batch_calculator.rkpca_topic_cnt,
+                        rd_list_cnt(&topic_buckets),
                         batch->batch_calculator.rkpca_partition_cnt,
                         batch->batch_calculator.rkpca_message_cnt,
                         batch->batch_calculator.rkpca_message_size,
                         batch->batch_calculator.rkpca_request_required_acks,
                         batch->batch_calculator.rkpca_request_timeout_ms))) {
+                rd_list_destroy(&topic_buckets);
                 return 0;
         }
 
-        TAILQ_FOREACH(rktp, &batch->batch_toppars, rktp_batch_link) {
-                if (unlikely(!rd_kafka_ProduceRequest_append(&ctx, rktp)))
-                        break;
+        if (unlikely(expected_topic_cnt != rd_list_cnt(&topic_buckets))) {
+                rd_rkb_dbg(rkb, BATCHCOL, "BATCHCOL",
+                           "produce_batch_send: calculator topic_cnt=%d "
+                           "but buckets topic_cnt=%d",
+                           expected_topic_cnt, rd_list_cnt(&topic_buckets));
         }
 
-        return rd_kafka_ProduceRequest_finalize(&ctx);
+        int appended_partitions = 0;
+        RD_LIST_FOREACH(bucket, &topic_buckets, i) {
+                rd_kafka_toppar_t *bucket_rktp;
+                int j;
+
+                RD_LIST_FOREACH(bucket_rktp, &bucket->toppars, j) {
+                        appended_partitions++;
+                        if (appended_partitions == 1 ||
+                            appended_partitions % 25 == 0 ||
+                            appended_partitions == expected_partition_cnt) {
+                                rd_rkb_dbg(
+                                    rkb, BATCHCOL, "BATCHCOL",
+                                    "produce_batch_send: append %d/%d: %s [%" PRId32
+                                    "] xmitq=%d xmit_bytes=%" PRIusz,
+                                    appended_partitions, expected_partition_cnt,
+                                    bucket_rktp->rktp_rkt->rkt_topic->str,
+                                    bucket_rktp->rktp_partition,
+                                    rd_kafka_msgq_len(&bucket_rktp->rktp_xmit_msgq),
+                                    rd_kafka_msgq_size(
+                                        &bucket_rktp->rktp_xmit_msgq));
+                        }
+                        if (unlikely(!rd_kafka_ProduceRequest_append(
+                                &ctx, bucket_rktp)))
+                                goto finalize;
+                }
+        }
+
+finalize:
+        if (unlikely(appended_partitions != expected_partition_cnt)) {
+                rd_rkb_dbg(
+                    rkb, BATCHCOL, "BATCHCOL",
+                    "produce_batch_send: finalize after %d/%d partitions "
+                    "(calculator messages=%d bytes=%" PRIusz ")",
+                    appended_partitions, expected_partition_cnt,
+                    expected_message_cnt, expected_message_bytes);
+        }
+        ret = rd_kafka_ProduceRequest_finalize(&ctx);
+        rd_list_destroy(&topic_buckets);
+
+        return ret;
 }
 
 
@@ -198,7 +320,8 @@ void rd_kafka_broker_batch_collector_init(rd_kafka_broker_t *rkb) {
 
         TAILQ_INIT(&col->rkbbcol_toppars);
         col->rkbbcol_first_add_ts  = 0;
-        col->rkbbcol_partition_cnt = 0;
+        col->rkbbcol_earliest_backoff = 0;
+        col->rkbbcol_active_partition_cnt = 0;
         col->rkbbcol_total_bytes   = 0;
         col->rkbbcol_next          = NULL;
 }
@@ -255,56 +378,83 @@ static int64_t rd_kafka_toppar_estimate_batch_bytes(rd_kafka_toppar_t *rktp) {
 void rd_kafka_broker_batch_collector_add(rd_kafka_broker_t *rkb,
                                          rd_kafka_toppar_t *rktp) {
         rd_kafka_broker_batch_collector_t *col = &rkb->rkb_batch_collector;
-        rd_ts_t now = rd_clock();
 
-        /* Check if partition has messages */
-        if (rd_kafka_msgq_len(&rktp->rktp_xmit_msgq) == 0 &&
-            rd_kafka_msgq_len(&rktp->rktp_msgq) == 0)
-                return; /* No messages, nothing to collect */
-
+        /* Caller already verified partition has messages in xmit_msgq.
+         * We just ensure partition is in the collector list - actual
+         * state (bytes, first_add_ts) is calculated fresh in maybe_send(). */
         if (!rktp->rktp_in_batch_collector) {
                 /* New partition - add to collector */
                 TAILQ_INSERT_TAIL(&col->rkbbcol_toppars, rktp,
                                   rktp_collector_link);
                 rktp->rktp_in_batch_collector = rd_true;
-                col->rkbbcol_partition_cnt++;
-                col->rkbbcol_total_bytes +=
-                    rd_kafka_toppar_estimate_batch_bytes(rktp);
-
-                /* Track when collection started (first partition added) */
-                if (col->rkbbcol_first_add_ts == 0)
-                        col->rkbbcol_first_add_ts = now;
-
-                rd_rkb_dbg(rkb, MSG, "BATCHCOL",
-                           "Added partition %.*s [%" PRId32
-                           "] to collector: "
-                           "partitions=%d bytes=%" PRId64 " collecting_for=%.1fms",
-                           RD_KAFKAP_STR_PR(rktp->rktp_rkt->rkt_topic),
-                           rktp->rktp_partition, col->rkbbcol_partition_cnt,
-                           col->rkbbcol_total_bytes,
-                           (double)(now - col->rkbbcol_first_add_ts) / 1000.0);
+                rd_rkb_dbg(rkb, BATCHCOL, "BATCHCOL",
+                           "Collector add: %s [%" PRId32
+                           "]",
+                           rktp->rktp_rkt->rkt_topic->str,
+                           rktp->rktp_partition);
+        } else if (unlikely(rktp->rktp_broker != rkb)) {
+                rd_rkb_dbg(rkb, BATCHCOL, "BATCHCOL",
+                           "Collector add skipped (already in collector): "
+                           "%s [%" PRId32 "] rktp %p rktp_broker=%s "
+                           "current_broker=%s",
+                           rktp->rktp_rkt->rkt_topic->str,
+                           rktp->rktp_partition, rktp,
+                           rktp->rktp_broker
+                               ? rd_kafka_broker_name(rktp->rktp_broker)
+                               : "none",
+                           rd_kafka_broker_name(rkb));
         }
 }
 
 /**
- * @brief Remove a partition from the collector.
+ * @brief Remove a partition from the broker's batch collector.
+ *
+ * Called when a partition is leaving the broker to avoid stale collector
+ * state across broker transitions.
+ *
+ * @param rkb Broker
+ * @param rktp Partition to remove
  *
  * @locality broker thread
  */
-static void
-rd_kafka_broker_batch_collector_remove(rd_kafka_broker_batch_collector_t *col,
-                                       rd_kafka_toppar_t *rktp) {
+static void rd_kafka_broker_batch_collector_del(rd_kafka_broker_t *rkb,
+                                                rd_kafka_toppar_t *rktp) {
+        rd_kafka_broker_batch_collector_t *col = &rkb->rkb_batch_collector;
+        rd_kafka_toppar_t *it;
+
         if (!rktp->rktp_in_batch_collector)
                 return;
 
-        /* If we're removing the next partition to process, advance it */
-        if (col->rkbbcol_next == rktp)
-                col->rkbbcol_next =
-                    TAILQ_NEXT(rktp, rktp_collector_link);
+        TAILQ_FOREACH(it, &col->rkbbcol_toppars, rktp_collector_link) {
+                if (it != rktp)
+                        continue;
 
-        TAILQ_REMOVE(&col->rkbbcol_toppars, rktp, rktp_collector_link);
+                if (col->rkbbcol_next == rktp) {
+                        rd_kafka_toppar_t *next =
+                            TAILQ_NEXT(rktp, rktp_collector_link);
+                        if (!next)
+                                next = TAILQ_FIRST(&col->rkbbcol_toppars);
+                        col->rkbbcol_next = next;
+                }
+
+                TAILQ_REMOVE(&col->rkbbcol_toppars, rktp,
+                             rktp_collector_link);
+                rktp->rktp_in_batch_collector = rd_false;
+                rd_rkb_dbg(rkb, BATCHCOL, "BATCHCOL",
+                           "Collector remove: %s [%" PRId32
+                           "] rktp %p broker=%s",
+                           rktp->rktp_rkt->rkt_topic->str,
+                           rktp->rktp_partition, rktp,
+                           rd_kafka_broker_name(rkb));
+                return;
+        }
+
         rktp->rktp_in_batch_collector = rd_false;
-        col->rkbbcol_partition_cnt--;
+        rd_rkb_dbg(rkb, BATCHCOL, "BATCHCOL",
+                   "Collector remove: %s [%" PRId32
+                   "] rktp %p not in list, clearing flag (broker=%s)",
+                   rktp->rktp_rkt->rkt_topic->str, rktp->rktp_partition, rktp,
+                   rd_kafka_broker_name(rkb));
 }
 
 /**
@@ -326,17 +476,13 @@ int rd_kafka_broker_batch_collector_send(rd_kafka_broker_t *rkb) {
         produce_batch_t batch;
         int total_msg_cnt      = 0;
         int partitions_visited = 0;
-        int initial_cnt;
 
-        if (col->rkbbcol_partition_cnt == 0)
-                return 0;
+        if (TAILQ_FIRST(&col->rkbbcol_toppars) == NULL)
+            return 0;
 
-        initial_cnt = col->rkbbcol_partition_cnt;
 
-        rd_rkb_dbg(rkb, MSG, "BATCHCOL",
-                   "Sending collector batch: partitions=%d bytes=%" PRId64
-                   " collecting_for=%.1fms",
-                   col->rkbbcol_partition_cnt, col->rkbbcol_total_bytes,
+        rd_rkb_dbg(rkb, BATCHCOL, "BATCHCOL",
+                   "Sending collector batch: collecting_for=%.1fms",
                    col->rkbbcol_first_add_ts > 0
                        ? (double)(rd_clock() - col->rkbbcol_first_add_ts) /
                              1000.0
@@ -352,7 +498,7 @@ int rd_kafka_broker_batch_collector_send(rd_kafka_broker_t *rkb) {
         rktp = start_rktp;
 
         /* Iterate through collected partitions in round-robin fashion */
-        while (rktp && partitions_visited < initial_cnt) {
+        while (rktp) {
                 rd_kafka_toppar_t *next_rktp;
 
                 partitions_visited++;
@@ -361,6 +507,32 @@ int rd_kafka_broker_batch_collector_send(rd_kafka_broker_t *rkb) {
                 next_rktp = TAILQ_NEXT(rktp, rktp_collector_link);
                 if (!next_rktp)
                         next_rktp = TAILQ_FIRST(&col->rkbbcol_toppars);
+
+                if (rd_kafka_msgq_len(&rktp->rktp_xmit_msgq) == 0) {
+                    /* Move to next, but stop if we've wrapped back to start */
+                    if (next_rktp == start_rktp)
+                        break;
+
+                    rktp = next_rktp;
+                    continue;
+                }
+
+                /* Check if first message is in backoff - if so, skip this
+                 * partition for now. The message will be retried when the
+                 * backoff expires. Don't remove from collector as it still
+                 * has messages pending. */
+                {
+                    rd_kafka_msg_t *first_msg =
+                        TAILQ_FIRST(&rktp->rktp_xmit_msgq.rkmq_msgs);
+                    if (first_msg &&
+                        first_msg->rkm_u.producer.ts_backoff > rd_clock()) {
+                            /* Move to next, but stop if we've wrapped back */
+                            if (next_rktp == start_rktp)
+                                    break;
+                            rktp = next_rktp;
+                            continue;
+                    }
+                }
 
                 /* Try to initialize a batch if not already */
                 if (!rd_kafka_broker_produce_batch_try_init(&batch, rkb)) {
@@ -372,8 +544,6 @@ int rd_kafka_broker_batch_collector_send(rd_kafka_broker_t *rkb) {
 
                 /* Try to add this partition to the batch */
                 if (rd_kafka_broker_produce_batch_append(&batch, rktp)) {
-                        /* Partition added - remove from collector */
-                        rd_kafka_broker_batch_collector_remove(col, rktp);
                 } else {
                         /* Batch full - send current batch and start new one */
                         total_msg_cnt +=
@@ -385,8 +555,6 @@ int rd_kafka_broker_batch_collector_send(rd_kafka_broker_t *rkb) {
                                                                    rkb) &&
                             rd_kafka_broker_produce_batch_append(&batch,
                                                                  rktp)) {
-                                rd_kafka_broker_batch_collector_remove(col,
-                                                                       rktp);
                         } else {
                                 /* Still can't add - save position and stop */
                                 col->rkbbcol_next = rktp;
@@ -396,7 +564,7 @@ int rd_kafka_broker_batch_collector_send(rd_kafka_broker_t *rkb) {
 
                 /* Move to next, but stop if we've wrapped back to start */
                 if (next_rktp == start_rktp)
-                        break;
+                    break;
                 rktp = next_rktp;
         }
 
@@ -409,20 +577,6 @@ done:
                 total_msg_cnt +=
                     rd_kafka_broker_produce_batch_send(&batch, rkb);
 
-        /* Update collector state */
-        col->rkbbcol_total_bytes = 0;
-        if (col->rkbbcol_partition_cnt > 0) {
-                /* Recalculate bytes for remaining partitions */
-                TAILQ_FOREACH(rktp, &col->rkbbcol_toppars, rktp_collector_link) {
-                        col->rkbbcol_total_bytes +=
-                            rd_kafka_toppar_estimate_batch_bytes(rktp);
-                }
-        } else {
-                /* All partitions sent - reset timing */
-                col->rkbbcol_first_add_ts = 0;
-                col->rkbbcol_next         = NULL;
-        }
-
         return total_msg_cnt;
 }
 
@@ -431,7 +585,6 @@ done:
  *
  * Checks the following criteria in priority order:
  * 1. Flush requested - always send
- * 2. broker.batch.max.partitions reached - send early
  * 3. broker.batch.max.bytes reached - send early
  * 4. broker.linger.ms expired - send
  *
@@ -451,12 +604,64 @@ int rd_kafka_broker_batch_collector_maybe_send(rd_kafka_broker_t *rkb,
         rd_bool_t should_send = rd_false;
         const char *reason = NULL;
 
-        if (col->rkbbcol_partition_cnt == 0)
+        /* Calculate current state by scanning partitions */
+        int active_partition_cnt = 0;
+        int sendable_partition_cnt = 0;
+        int64_t total_bytes = 0;
+        rd_ts_t first_add_ts = 0;
+        rd_ts_t earliest_backoff = 0;
+        rd_kafka_toppar_t *rktp;
+
+        TAILQ_FOREACH(rktp, &col->rkbbcol_toppars, rktp_collector_link) {
+            int msgq_len = rd_kafka_msgq_len(&rktp->rktp_xmit_msgq);
+            if (msgq_len > 0) {
+                active_partition_cnt++;
+
+                rd_kafka_msg_t *first_msg = TAILQ_FIRST(&rktp->rktp_xmit_msgq.rkmq_msgs);
+                if (first_msg) {
+                    /* Check if first message is in backoff */
+                    if (first_msg->rkm_u.producer.ts_backoff > now) {
+                        /* Track earliest backoff time for wakeup scheduling */
+                        if (earliest_backoff == 0 ||
+                            first_msg->rkm_u.producer.ts_backoff < earliest_backoff)
+                            earliest_backoff = first_msg->rkm_u.producer.ts_backoff;
+                    } else {
+                        /* Message is sendable - count partition and track enq time */
+                        sendable_partition_cnt++;
+                        total_bytes += rd_kafka_msgq_size(&rktp->rktp_xmit_msgq);
+                        rd_ts_t enq_time = first_msg->rkm_ts_enq;
+                        if (first_add_ts == 0 || enq_time < first_add_ts) {
+                            first_add_ts = enq_time;
+                        }
+                    }
+                }
+            }
+        }
+
+        col->rkbbcol_first_add_ts = first_add_ts;
+        col->rkbbcol_earliest_backoff = earliest_backoff;
+        col->rkbbcol_active_partition_cnt = active_partition_cnt;
+
+        if (active_partition_cnt == 0)
                 return 0;
 
         /* Don't send until broker is fully connected with API versions */
         if (rkb->rkb_state != RD_KAFKA_BROKER_STATE_UP)
                 return 0;
+
+        /* Even when backpressured we must keep the collector state up to date,
+         * otherwise the broker thread may not schedule an appropriate wakeup
+         * once backpressure clears, which can lead to broker thread dormancy
+         * and producer starvation. That's why we don't check outbufs space
+         * until after we calculate the collector state */
+        if (rd_kafka_broker_outbufs_space(rkb) == 0) {
+                rd_rkb_dbg(rkb, BATCHCOL, "BATCHCOL",
+                           "Outbufs full, exiting until next-wakeup "
+                           "(outbufs=%d threshold=%d)",
+                           rd_kafka_bufq_cnt(&rkb->rkb_outbufs),
+                           conf->queue_backpressure_thres);
+                return 0;
+        }
 
         /* Priority 1: Flush requested */
         if (flushing) {
@@ -464,57 +669,34 @@ int rd_kafka_broker_batch_collector_maybe_send(rd_kafka_broker_t *rkb,
                 reason = "flush";
         }
 
-        /* Priority 2: Partition count cap reached */
-        if (!should_send && conf->broker_batch_max_partitions > 0 &&
-            col->rkbbcol_partition_cnt >= conf->broker_batch_max_partitions) {
-                should_send = rd_true;
-                reason = "max_partitions";
-        }
-
         /* Priority 3: Byte cap reached */
         if (!should_send && conf->broker_batch_max_bytes > 0 &&
-            col->rkbbcol_total_bytes >= conf->broker_batch_max_bytes) {
+            total_bytes >= conf->broker_batch_max_bytes) {
                 should_send = rd_true;
                 reason = "max_bytes";
         }
 
         /* Priority 4: linger expired (collecting for too long)
          * Use adaptive linger if enabled, otherwise static config. */
-        if (!should_send && col->rkbbcol_first_add_ts > 0 &&
-            now - col->rkbbcol_first_add_ts >=
+        if (!should_send && first_add_ts > 0 &&
+            now - first_add_ts >=
                 rd_kafka_adaptive_get_linger_us(rkb)) {
                 should_send = rd_true;
                 reason = "broker_linger";
         }
 
         if (should_send) {
-                int msg_cnt;
-
-                rd_rkb_dbg(rkb, MSG, "BATCHCOL",
+                rd_rkb_dbg(rkb, BATCHCOL, "BATCHCOL",
                            "Batch collector send triggered: partitions=%d "
                            "bytes=%" PRId64 " collecting_for=%.1fms reason=%s",
-                           col->rkbbcol_partition_cnt, col->rkbbcol_total_bytes,
-                           col->rkbbcol_first_add_ts > 0
-                               ? (double)(now - col->rkbbcol_first_add_ts) /
+                           active_partition_cnt, total_bytes,
+                           first_add_ts > 0
+                               ? (double)(now - first_add_ts) /
                                      1000.0
                                : 0.0,
                            reason);
 
-                msg_cnt = rd_kafka_broker_batch_collector_send(rkb);
-
-                /* If we tried to send but couldn't (blocked on max_in_flight,
-                 * outbufs full, etc.), reset first_add_ts to start a fresh
-                 * linger period. This prevents spin-looping when blocked -
-                 * we'll wait for linger before trying again. */
-                if (msg_cnt == 0 && col->rkbbcol_partition_cnt > 0) {
-                        col->rkbbcol_first_add_ts = now;
-                        rd_rkb_dbg(rkb, MSG, "BATCHCOL",
-                                   "Send blocked (0 msgs sent with %d "
-                                   "partitions pending), resetting linger timer",
-                                   col->rkbbcol_partition_cnt);
-                }
-
-                return msg_cnt;
+                return rd_kafka_broker_batch_collector_send(rkb);
         }
 
         return 0;
@@ -532,21 +714,32 @@ int rd_kafka_broker_batch_collector_maybe_send(rd_kafka_broker_t *rkb,
  */
 rd_ts_t rd_kafka_broker_batch_collector_next_wakeup(rd_kafka_broker_t *rkb) {
         rd_kafka_broker_batch_collector_t *col = &rkb->rkb_batch_collector;
-        rd_ts_t wakeup, now;
+        rd_ts_t wakeup = 0, now;
+        rd_ts_t linger = rd_kafka_adaptive_get_linger_us(rkb);
 
-        if (col->rkbbcol_partition_cnt == 0 || col->rkbbcol_first_add_ts == 0)
+        /* If we have sendable messages, calculate wakeup based on linger */
+        if (col->rkbbcol_first_add_ts != 0) {
+                wakeup = col->rkbbcol_first_add_ts + linger;
+        }
+
+        /* If we have messages in backoff, consider earliest backoff time.
+         * Use whichever is earlier: linger expiry or backoff expiry. */
+        if (col->rkbbcol_earliest_backoff != 0) {
+                if (wakeup == 0 || col->rkbbcol_earliest_backoff < wakeup)
+                        wakeup = col->rkbbcol_earliest_backoff;
+        }
+
+        if (wakeup == 0)
                 return 0;
-
-        /* Use adaptive linger if enabled, otherwise static config */
-        wakeup = col->rkbbcol_first_add_ts + rd_kafka_adaptive_get_linger_us(rkb);
 
         /* Don't return a time in the past - this can happen if we've been
          * collecting for longer than linger (e.g., blocked on max_in_flight).
          * Returning a past time causes immediate wakeup and spin loop.
-         * Cap at now + 1ms minimum to allow other work to proceed. */
+         * Back off by another linger period - IO events will wake us sooner
+         * if the block clears. */
         now = rd_clock();
         if (wakeup < now)
-                wakeup = now + 1000; /* 1ms minimum sleep */
+                wakeup = now + linger;
 
         return wakeup;
 }
@@ -2385,6 +2578,9 @@ static rd_kafka_buf_t *rd_kafka_waitresp_find(rd_kafka_broker_t *rkb,
 /**
  * Map a response message to a request.
  */
+static const char *rd_kafka_buf_metadata_log_suffix(const rd_kafka_buf_t *rkbuf,
+                                                    char *dst,
+                                                    size_t dst_sz);
 static int rd_kafka_req_response(rd_kafka_broker_t *rkb,
                                  rd_kafka_buf_t *rkbuf) {
         rd_kafka_buf_t *req   = NULL;
@@ -2410,13 +2606,18 @@ static int rd_kafka_req_response(rd_kafka_broker_t *rkb,
                 return -1;
         }
 
-        rd_rkb_dbg(rkb, PROTOCOL, "RECV",
-                   "Received %sResponse (v%hd, %" PRIusz
-                   " bytes, CorrId %" PRId32 ", rtt %.2fms)",
-                   rd_kafka_ApiKey2str(req->rkbuf_reqhdr.ApiKey),
-                   req->rkbuf_reqhdr.ApiVersion, rkbuf->rkbuf_totlen,
-                   rkbuf->rkbuf_reshdr.CorrId,
-                   (float)req->rkbuf_ts_sent / 1000.0f);
+        if (rd_rkb_is_dbg(rkb, PROTOCOL)) {
+                char md_info[256];
+                const char *md_suffix = rd_kafka_buf_metadata_log_suffix(
+                    req, md_info, sizeof(md_info));
+                rd_rkb_dbg(rkb, PROTOCOL, "RECV",
+                           "Received %sResponse (v%hd, %" PRIusz
+                           " bytes, CorrId %" PRId32 ", rtt %.2fms)%s",
+                           rd_kafka_ApiKey2str(req->rkbuf_reqhdr.ApiKey),
+                           req->rkbuf_reqhdr.ApiVersion, rkbuf->rkbuf_totlen,
+                           rkbuf->rkbuf_reshdr.CorrId,
+                           (float)req->rkbuf_ts_sent / 1000.0f, md_suffix);
+        }
 
         /* Copy request's header and certain flags to response object's
          * reqhdr for convenience. */
@@ -3203,6 +3404,41 @@ static RD_INLINE int rd_kafka_broker_request_supported(rd_kafka_broker_t *rkb,
                rkbuf->rkbuf_reqhdr.ApiVersion <= ret->MaxVer;
 }
 
+static const char *rd_kafka_buf_metadata_log_suffix(const rd_kafka_buf_t *rkbuf,
+                                                    char *dst,
+                                                    size_t dst_sz) {
+        const char *reason;
+
+        if (rkbuf->rkbuf_reqhdr.ApiKey != RD_KAFKAP_Metadata)
+                return "";
+
+        reason = rkbuf->rkbuf_u.Metadata.reason;
+        if (!reason)
+                reason = "";
+
+        if (rkbuf->rkbuf_u.Metadata.all_topics) {
+                rd_snprintf(dst, dst_sz, " (reason: %s, all topics)", reason);
+                return dst;
+        }
+
+        if (rkbuf->rkbuf_u.Metadata.topics &&
+            rd_list_cnt(rkbuf->rkbuf_u.Metadata.topics) > 0) {
+                rd_snprintf(dst, dst_sz, " (reason: %s, topics=%d)", reason,
+                            rd_list_cnt(rkbuf->rkbuf_u.Metadata.topics));
+                return dst;
+        }
+
+        if (rkbuf->rkbuf_u.Metadata.topic_ids &&
+            rd_list_cnt(rkbuf->rkbuf_u.Metadata.topic_ids) > 0) {
+                rd_snprintf(dst, dst_sz, " (reason: %s, topic_ids=%d)", reason,
+                            rd_list_cnt(rkbuf->rkbuf_u.Metadata.topic_ids));
+                return dst;
+        }
+
+        rd_snprintf(dst, dst_sz, " (reason: %s, brokers only)", reason);
+        return dst;
+}
+
 
 /**
  * Send queued messages to broker
@@ -3316,28 +3552,43 @@ int rd_kafka_send(rd_kafka_broker_t *rkb) {
 
                 /* Partial send? Continue next time. */
                 if (rd_slice_remains(&rkbuf->rkbuf_reader) > 0) {
-                        rd_rkb_dbg(
-                            rkb, PROTOCOL, "SEND",
-                            "Sent partial %sRequest "
-                            "(v%hd, "
-                            "%" PRIdsz "+%" PRIdsz "/%" PRIusz
-                            " bytes, "
-                            "CorrId %" PRId32 ")",
-                            rd_kafka_ApiKey2str(rkbuf->rkbuf_reqhdr.ApiKey),
-                            rkbuf->rkbuf_reqhdr.ApiVersion, (ssize_t)pre_of, r,
-                            rd_slice_size(&rkbuf->rkbuf_reader),
-                            rkbuf->rkbuf_corrid);
+                        if (rd_rkb_is_dbg(rkb, PROTOCOL)) {
+                                char md_info[256];
+                                const char *md_suffix =
+                                    rd_kafka_buf_metadata_log_suffix(
+                                        rkbuf, md_info, sizeof(md_info));
+                                rd_rkb_dbg(
+                                    rkb, PROTOCOL, "SEND",
+                                    "Sent partial %sRequest "
+                                    "(v%hd, "
+                                    "%" PRIdsz "+%" PRIdsz "/%" PRIusz
+                                    " bytes, "
+                                    "CorrId %" PRId32 ")%s",
+                                    rd_kafka_ApiKey2str(
+                                        rkbuf->rkbuf_reqhdr.ApiKey),
+                                    rkbuf->rkbuf_reqhdr.ApiVersion,
+                                    (ssize_t)pre_of, r,
+                                    rd_slice_size(&rkbuf->rkbuf_reader),
+                                    rkbuf->rkbuf_corrid, md_suffix);
+                        }
                         return 0;
                 }
 
-                rd_rkb_dbg(rkb, PROTOCOL, "SEND",
-                           "Sent %sRequest (v%hd, %" PRIusz " bytes @ %" PRIusz
-                           ", "
-                           "CorrId %" PRId32 ")",
-                           rd_kafka_ApiKey2str(rkbuf->rkbuf_reqhdr.ApiKey),
-                           rkbuf->rkbuf_reqhdr.ApiVersion,
-                           rd_slice_size(&rkbuf->rkbuf_reader), pre_of,
-                           rkbuf->rkbuf_corrid);
+                if (rd_rkb_is_dbg(rkb, PROTOCOL)) {
+                        char md_info[256];
+                        const char *md_suffix =
+                            rd_kafka_buf_metadata_log_suffix(rkbuf, md_info,
+                                                             sizeof(md_info));
+                        rd_rkb_dbg(
+                            rkb, PROTOCOL, "SEND",
+                            "Sent %sRequest (v%hd, %" PRIusz " bytes @ %" PRIusz
+                            ", "
+                            "CorrId %" PRId32 ")%s",
+                            rd_kafka_ApiKey2str(rkbuf->rkbuf_reqhdr.ApiKey),
+                            rkbuf->rkbuf_reqhdr.ApiVersion,
+                            rd_slice_size(&rkbuf->rkbuf_reader), pre_of,
+                            rkbuf->rkbuf_corrid, md_suffix);
+                }
 
                 rd_atomic64_add(&rkb->rkb_c.reqtype[rkbuf->rkbuf_reqhdr.ApiKey],
                                 1);
@@ -3842,6 +4093,9 @@ rd_kafka_broker_op_serve(rd_kafka_broker_t *rkb, rd_kafka_op_t *rko) {
                                : "(none)",
                            rktp);
 
+                if (rkb->rkb_rk->rk_type == RD_KAFKA_PRODUCER)
+                        rd_kafka_broker_batch_collector_del(rkb, rktp);
+
                 /* Insert xmitq(broker-local) messages to the msgq(global)
                  * at their sorted position to maintain ordering. */
                 rd_kafka_msgq_insert_msgq(
@@ -4326,8 +4580,9 @@ static int rd_kafka_toppar_producer_serve(rd_kafka_broker_t *rkb,
          * increase throughput.
          * This comes at no latency cost since there are already
          * buffers enqueued waiting for transmission. */
-        if (rd_kafka_broker_outbufs_space(rkb) == 0)
+        if (rd_kafka_broker_outbufs_space(rkb) == 0) {
                 produce_enabled = 0;
+        }
 
         rd_kafka_toppar_lock(rktp);
 
@@ -4337,6 +4592,20 @@ static int rd_kafka_toppar_producer_serve(rd_kafka_broker_t *rkb,
         if (unlikely(rktp->rktp_broker != rkb)) {
                 /* Currently migrating away from this
                  * broker. */
+                rd_rkb_dbg(rkb, BROKER, "TOPPAR",
+                           "%.*s [%" PRId32
+                           "] skip serve: rktp broker mismatch "
+                           "(rktp_broker=%s next_broker=%s "
+                           "in_batch_collector=%d)",
+                           RD_KAFKAP_STR_PR(rktp->rktp_rkt->rkt_topic),
+                           rktp->rktp_partition,
+                           rktp->rktp_broker
+                               ? rd_kafka_broker_name(rktp->rktp_broker)
+                               : "none",
+                           rktp->rktp_next_broker
+                               ? rd_kafka_broker_name(rktp->rktp_next_broker)
+                               : "none",
+                           rktp->rktp_in_batch_collector);
                 rd_kafka_toppar_unlock(rktp);
                 return 0;
         }
@@ -4383,21 +4652,40 @@ static int rd_kafka_toppar_producer_serve(rd_kafka_broker_t *rkb,
         if (unlikely(!may_send)) {
                 /* Sends prohibited on the broker or instance level */
                 produce_enabled = 0;
+                rd_rkb_dbg(rkb, QUEUE, "TOPPAR",
+                           "%.*s [%" PRId32
+                           "] produce disabled: may_send=false",
+                           RD_KAFKAP_STR_PR(rktp->rktp_rkt->rkt_topic),
+                           rktp->rktp_partition);
         } else if (unlikely(rd_kafka_fatal_error_code(rkb->rkb_rk))) {
                 /* Fatal error has been raised, don't produce. */
                 produce_enabled = 0;
+                rd_rkb_dbg(rkb, QUEUE, "TOPPAR",
+                           "%.*s [%" PRId32
+                           "] produce disabled: fatal error",
+                           RD_KAFKAP_STR_PR(rktp->rktp_rkt->rkt_topic),
+                           rktp->rktp_partition);
         } else if (unlikely(RD_KAFKA_TOPPAR_IS_PAUSED(rktp))) {
                 /* Partition is paused */
                 produce_enabled = 0;
+                rd_rkb_dbg(rkb, QUEUE, "TOPPAR",
+                           "%.*s [%" PRId32
+                           "] produce disabled: partition paused",
+                           RD_KAFKAP_STR_PR(rktp->rktp_rkt->rkt_topic),
+                           rktp->rktp_partition);
         } else if (unlikely(rd_kafka_is_transactional(rkb->rkb_rk) &&
                             !rd_kafka_txn_toppar_may_send_msg(rktp))) {
                 /* Partition not registered in transaction yet */
                 produce_enabled = 0;
+                rd_rkb_dbg(rkb, QUEUE, "TOPPAR",
+                           "%.*s [%" PRId32
+                           "] produce disabled: transaction gating",
+                           RD_KAFKAP_STR_PR(rktp->rktp_rkt->rkt_topic),
+                           rktp->rktp_partition);
         } else if (produce_enabled > 0) {
                 /* Move messages from locked partition produce queue
                  * to broker-local xmit queue. */
                 if ((move_cnt = rd_kafka_msgq_len(&rktp->rktp_msgq)) > 0) {
-
                         rd_kafka_msgq_insert_msgq(
                             &rktp->rktp_xmit_msgq, &rktp->rktp_msgq,
                             rktp->rktp_rkt->rkt_conf.msg_order_cmp);
@@ -4407,20 +4695,23 @@ static int rd_kafka_toppar_producer_serve(rd_kafka_broker_t *rkb,
                                 rktp->rktp_ts_xmit_enq = now;
                 }
 
-                /* With broker-level batching, the collector handles when to send.
-                 * But we still need partition-level timing to wake the broker
-                 * thread so it can add partitions to the collector.
-                 *
-                 * We pass next_wakeup so the broker wakes up when linger expires,
-                 * then the collector decides when to actually send. */
-                batch_ready = rd_kafka_msgq_allow_wakeup_at(
-                    &rktp->rktp_msgq, &rktp->rktp_xmit_msgq, next_wakeup, now,
-                    flushing ? 1 : rd_kafka_adaptive_get_linger_us(rkb),
-                    /* Batch message count threshold */
-                    rkb->rkb_rk->rk_conf.batch_num_messages,
-                    /* Batch total size threshold */
-                    rkb->rkb_rk->rk_conf.batch_size);
         }
+
+        /* Always update wakeup state, even when produce is disabled.
+        * This prevents the signalled flag from getting stuck at true
+        * (e.g., after backpressure disables produce) which would block
+        * producer-side wakeups. In rdkafka_partition.c, we call
+        * rd_kafka_msgq_may_wakeup to decide whether to wakeup the broker
+        * thread, and that will return false if signalled is true.
+        * So it can prevent new messages coming in from waking up the broker.
+        */
+        batch_ready = rd_kafka_msgq_allow_wakeup_at(
+            &rktp->rktp_msgq, &rktp->rktp_xmit_msgq, next_wakeup, now,
+            flushing ? 1 : rd_kafka_adaptive_get_linger_us(rkb),
+            /* Batch message count threshold */
+            rkb->rkb_rk->rk_conf.batch_num_messages,
+            /* Batch total size threshold */
+            rkb->rkb_rk->rk_conf.batch_size);
 
         rd_kafka_toppar_unlock(rktp);
 
@@ -4466,12 +4757,29 @@ static int rd_kafka_toppar_producer_serve(rd_kafka_broker_t *rkb,
 
 
         /* Check if allowed to create and enqueue a ProduceRequest */
-        if (!produce_enabled)
+        int msgq_len  = rd_kafka_msgq_len(&rktp->rktp_msgq);
+        int xmitq_len = rd_kafka_msgq_len(&rktp->rktp_xmit_msgq);
+        if (msgq_len + xmitq_len == 0)
                 return 0;
 
-        r = rd_kafka_msgq_len(&rktp->rktp_xmit_msgq);
-        if (r == 0)
+        if (!produce_enabled) {
+                rd_rkb_dbg(rkb, QUEUE, "TOPPAR",
+                           "%.*s [%" PRId32
+                           "] produce disabled: msgq=%d xmitq=%d "
+                           "outbufs=%d threshold=%d waitresps=%d state=%s",
+                           RD_KAFKAP_STR_PR(rktp->rktp_rkt->rkt_topic),
+                           rktp->rktp_partition, msgq_len, xmitq_len,
+                           rd_atomic32_get(&rkb->rkb_outbufs.rkbq_cnt),
+                           rkb->rkb_rk->rk_conf.queue_backpressure_thres,
+                           rd_kafka_bufq_cnt(&rkb->rkb_waitresps),
+                           rd_kafka_broker_state_names[rkb->rkb_state]);
                 return 0;
+        }
+
+        r = xmitq_len;
+        if (r == 0) {
+                return 0;
+        }
 
         rd_kafka_msgq_verify_order(rktp, &rktp->rktp_xmit_msgq, 0, rd_false);
 
@@ -4509,10 +4817,13 @@ static int rd_kafka_toppar_producer_serve(rd_kafka_broker_t *rkb,
                 /* There are messages to send but connection is not up. */
                 rd_rkb_dbg(rkb, BROKER, "TOPPAR",
                            "%.*s [%" PRId32
-                           "] "
-                           "%d message(s) queued but broker not up",
+                           "] %d message(s) queued but broker not up "
+                           "(state=%s outbufs=%d waitresps=%d)",
                            RD_KAFKAP_STR_PR(rktp->rktp_rkt->rkt_topic),
-                           rktp->rktp_partition, r);
+                           rktp->rktp_partition, r,
+                           rd_kafka_broker_state_names[rkb->rkb_state],
+                           rd_atomic32_get(&rkb->rkb_outbufs.rkbq_cnt),
+                           rd_kafka_bufq_cnt(&rkb->rkb_waitresps));
                 rkb->rkb_persistconn.internal++;
                 return 0;
         }
@@ -4522,14 +4833,30 @@ static int rd_kafka_toppar_producer_serve(rd_kafka_broker_t *rkb,
         if (!batch_ready) {
                 rd_rkb_dbg(rkb, QUEUE, "TOPPAR",
                            "%.*s [%" PRId32
-                           "] batch not ready",
+                           "] batch not ready: msgq=%d xmitq=%d "
+                           "xmit_bytes=%" PRIusz " linger=%" PRId64 "ms",
                            RD_KAFKAP_STR_PR(rktp->rktp_rkt->rkt_topic),
-                           rktp->rktp_partition);
+                           rktp->rktp_partition,
+                           rd_kafka_msgq_len(&rktp->rktp_msgq),
+                           rd_kafka_msgq_len(&rktp->rktp_xmit_msgq),
+                           rd_kafka_msgq_size(&rktp->rktp_xmit_msgq),
+                           rd_kafka_adaptive_get_linger_us(rkb) / 1000);
 
                 /* Wait for more messages or queue.buffering.max.ms
                  * to expire. */
                 return 0;
         }
+        rd_rkb_dbg(rkb, QUEUE, "TOPPAR",
+                   "%.*s [%" PRId32
+                   "] batch ready: msgq=%d xmitq=%d "
+                   "outbufs=%d waitresps=%d state=%s",
+                   RD_KAFKAP_STR_PR(rktp->rktp_rkt->rkt_topic),
+                   rktp->rktp_partition,
+                   rd_kafka_msgq_len(&rktp->rktp_msgq),
+                   rd_kafka_msgq_len(&rktp->rktp_xmit_msgq),
+                   rd_atomic32_get(&rkb->rkb_outbufs.rkbq_cnt),
+                   rd_kafka_bufq_cnt(&rkb->rkb_waitresps),
+                   rd_kafka_broker_state_names[rkb->rkb_state]);
         return 1;
 }
 
@@ -4542,13 +4869,13 @@ static int rd_kafka_broker_produce_toppars(rd_kafka_broker_t *rkb,
         rd_kafka_pid_t pid      = RD_KAFKA_PID_INITIALIZER;
         rd_bool_t may_send      = rd_true;
         rd_bool_t flushing      = rd_false;
-        int xmit_msg_cnt  = 0;
+        int sent_msg_cnt  = 0;
         int total_msg_cnt = 0;
 
         /* Round-robin serve each toppar. */
         rktp = rkb->rkb_active_toppar_next;
         if (unlikely(!rktp))
-                return 0;
+                goto done;
 
         if (rd_kafka_is_idempotent(rkb->rkb_rk)) {
                 /* Idempotent producer: get a copy of the current pid. */
@@ -4585,7 +4912,7 @@ static int rd_kafka_broker_produce_toppars(rd_kafka_broker_t *rkb,
                         may_send = rd_false;
 
                 if (!may_send && !do_timeout_scan)
-                        return 0;
+                        goto done;
 
                 /* Cache current producer pid */
                 rkb->rkb_produce_pid = pid;
@@ -4636,7 +4963,7 @@ static int rd_kafka_broker_produce_toppars(rd_kafka_broker_t *rkb,
         /* Check collector criteria and send if met.
          * This implements broker-level batching where we collect partitions
          * and send when broker.linger.ms expires or thresholds are reached. */
-        xmit_msg_cnt =
+        sent_msg_cnt =
             rd_kafka_broker_batch_collector_maybe_send(rkb, now, flushing);
 
         /* Update wakeup time based on collector's next deadline */
@@ -4648,21 +4975,19 @@ static int rd_kafka_broker_produce_toppars(rd_kafka_broker_t *rkb,
                                                  collector_wakeup);
         }
 
-        /* Wake up immediately if there is still data ready
-         * to be sent and there is capacity to do so. */
-        if (rkb->rkb_batch_collector.rkbbcol_partition_cnt > 0 &&
-            rd_kafka_broker_outbufs_space(rkb) > 0 && xmit_msg_cnt == 0) {
-                /* Collector has pending partitions but didn't send -
-                 * schedule wakeup for when broker.linger.ms expires */
-                rd_ts_t collector_wakeup =
-                    rd_kafka_broker_batch_collector_next_wakeup(rkb);
-                if (collector_wakeup > 0 && collector_wakeup < ret_next_wakeup)
-                        ret_next_wakeup = collector_wakeup;
-        }
-
         *next_wakeup = ret_next_wakeup;
 
-        return xmit_msg_cnt;
+done:
+        rd_rkb_dbg(rkb, BROKER, "HEARTBEAT",
+                "outbufs=%d/%d waitresps=%d collector_parts=%d "
+                "xmit_msgs=%d sent=%d",
+                rd_kafka_bufq_cnt(&rkb->rkb_outbufs),
+                rkb->rkb_rk->rk_conf.queue_backpressure_thres,
+                rd_kafka_bufq_cnt(&rkb->rkb_waitresps),
+                rkb->rkb_batch_collector.rkbbcol_active_partition_cnt,
+                total_msg_cnt,
+                sent_msg_cnt);
+        return sent_msg_cnt;
 }
 
 /**

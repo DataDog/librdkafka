@@ -203,8 +203,8 @@ static void test_envelope_max_partitions(void) {
                         produce_reqcnt++;
         rd_kafka_mock_request_destroy_array(requests, reqcnt);
 
-        TEST_ASSERT(produce_reqcnt == 2,
-                    "expected 2 Produce requests, got %" PRId64, produce_reqcnt);
+        TEST_ASSERT(produce_reqcnt == 3,
+                    "expected 3 Produce requests, got %" PRId64, produce_reqcnt);
 
         rd_kafka_destroy(rk);
         SUB_TEST_PASS();
