@@ -1645,7 +1645,7 @@ int rd_kafka_produce_calculator_add(rd_kafka_produce_calculator_t *rkpca,
         int added_batch_cnt;
 
 
-        if (rkpca->rkpca_partition_cnt >
+        if (rkpca->rkpca_partition_cnt >=
             rktp->rktp_rkt->rkt_rk->rk_conf.produce_request_max_partitions) {
                 return 0;
         }

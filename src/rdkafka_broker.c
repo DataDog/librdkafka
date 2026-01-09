@@ -4496,7 +4496,7 @@ static int rd_kafka_broker_produce_toppars(rd_kafka_broker_t *rkb,
         rd_kafka_pid_t pid      = RD_KAFKA_PID_INITIALIZER;
         rd_bool_t may_send      = rd_true;
         rd_bool_t flushing      = rd_false;
-        int xmit_msg_cnt  = 0;
+        int sent_msg_cnt  = 0;
         int total_msg_cnt = 0;
 
         /* Round-robin serve each toppar. */
@@ -4590,7 +4590,7 @@ static int rd_kafka_broker_produce_toppars(rd_kafka_broker_t *rkb,
         /* Check collector criteria and send if met.
          * This implements broker-level batching where we collect partitions
          * and send when broker.linger.ms expires or thresholds are reached. */
-        xmit_msg_cnt =
+        sent_msg_cnt =
             rd_kafka_broker_batch_collector_maybe_send(rkb, now, flushing);
 
         /* Update wakeup time based on collector's next deadline */
@@ -4602,21 +4602,9 @@ static int rd_kafka_broker_produce_toppars(rd_kafka_broker_t *rkb,
                                                  collector_wakeup);
         }
 
-        /* Wake up immediately if there is still data ready
-         * to be sent and there is capacity to do so. */
-        if (rkb->rkb_batch_collector.rkbbcol_active_partition_cnt > 0 &&
-            rd_kafka_broker_outbufs_space(rkb) > 0 && xmit_msg_cnt == 0) {
-                /* Collector has pending partitions but didn't send -
-                 * schedule wakeup for when broker.linger.ms expires */
-                rd_ts_t collector_wakeup =
-                    rd_kafka_broker_batch_collector_next_wakeup(rkb);
-                if (collector_wakeup > 0 && collector_wakeup < ret_next_wakeup)
-                        ret_next_wakeup = collector_wakeup;
-        }
-
         *next_wakeup = ret_next_wakeup;
 
-        return xmit_msg_cnt;
+        return sent_msg_cnt;
 }
 
 /**
