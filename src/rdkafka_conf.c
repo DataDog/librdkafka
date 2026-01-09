@@ -528,6 +528,7 @@ static const struct rd_kafka_property rd_kafka_properties[] = {
              {RD_KAFKA_DBG_ASSIGNOR, "assignor"},
              {RD_KAFKA_DBG_CONF, "conf"},
              {RD_KAFKA_DBG_TELEMETRY, "telemetry"},
+             {RD_KAFKA_DBG_BATCHCOL, "batchcol"},
              {RD_KAFKA_DBG_ALL, "all"}}},
     {_RK_GLOBAL, "socket.timeout.ms", _RK_C_INT, _RK(socket_timeout_ms),
      "Default timeout for network requests. "
@@ -1551,19 +1552,9 @@ static const struct rd_kafka_property rd_kafka_properties[] = {
      "sending a produce request. This is the broker-level equivalent of "
      "the deprecated `linger.ms` setting. Messages are collected across "
      "all partitions and sent when this timeout expires, or when "
-     "`broker.batch.max.partitions` or `broker.batch.max.bytes` thresholds "
-     "are reached, whichever comes first. "
+     "`broker.batch.max.bytes` is reached "
      "This setting controls the maximum latency for message delivery.",
      .dmin = 0, .dmax = 900.0 * 1000.0, .ddef = 5.0},
-
-    {_RK_GLOBAL | _RK_PRODUCER, "broker.batch.max.partitions", _RK_C_INT,
-     _RK(broker_batch_max_partitions),
-     "Maximum number of partitions to collect before sending a produce "
-     "request, regardless of `broker.linger.ms`. Set to -1 to disable "
-     "this threshold (default). When enabled, a produce request is sent "
-     "as soon as this many partitions have messages ready, which can "
-     "reduce latency for high-throughput workloads.",
-     -1, 10000000, -1},
 
     {_RK_GLOBAL | _RK_PRODUCER, "broker.batch.max.bytes", _RK_C_INT,
      _RK(broker_batch_max_bytes),

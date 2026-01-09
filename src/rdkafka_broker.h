@@ -87,7 +87,7 @@ typedef struct rd_kafka_broker_batch_collector_s {
                                           *   added to this collection cycle.
                                           *   Used for broker.linger.ms check.
                                           *   Reset to 0 after each send. */
-        int rkbbcol_partition_cnt;       /**< Number of partitions in collector */
+        int rkbbcol_active_partition_cnt; // number of partitions with messages ready to send
         int64_t rkbbcol_total_bytes;     /**< Estimated total bytes across
                                           *   all collected partitions */
 

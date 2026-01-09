@@ -450,7 +450,6 @@ struct rd_kafka_conf_s {
         /* Broker-level batching configuration */
         double broker_linger_ms_dbl;    /**< broker.linger.ms configured value */
         rd_ts_t broker_linger_us;       /**< broker.linger.ms in microseconds */
-        int broker_batch_max_partitions; /**< broker.batch.max.partitions (-1 = disabled) */
         int broker_batch_max_bytes;     /**< broker.batch.max.bytes (-1 = disabled) */
 
         /* Adaptive batching configuration */
