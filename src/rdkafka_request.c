@@ -5179,10 +5179,9 @@ static void rd_kafka_handle_Produce(rd_kafka_t *rk,
                 batch.pid         = toppar->rkprt_pid;
                 rd_kafka_msgq_init(&batch.msgq);
 
-
                 rkm = toppar->rkprt_base_rkm;
                 int pulled_msgs = 0;
-                for (int i = 0; i < toppar->rkprt_msg_cnt && rkm; i++) {
+                for (int j = 0; j < toppar->rkprt_msg_cnt && rkm; j++) {
                         rkm_next = TAILQ_NEXT(rkm, rkm_link);
                         rd_kafka_msgq_deq(&request->rkbuf_batch.msgq, rkm, 1);
                         rd_kafka_msgq_enq(&batch.msgq, rkm);
@@ -5190,6 +5189,17 @@ static void rd_kafka_handle_Produce(rd_kafka_t *rk,
                         rkm = rkm_next;
                 }
 
+                /* Debug: warn if we couldn't pull expected message count */
+                if (unlikely(pulled_msgs != toppar->rkprt_msg_cnt)) {
+                        rd_rkb_dbg(rkb, MSG, "PRODUCE",
+                                   "%s [%" PRId32 "]: pulled %d/%d messages "
+                                   "(base_rkm=%p, err=%s)",
+                                   rktp->rktp_rkt->rkt_topic->str,
+                                   rktp->rktp_partition,
+                                   pulled_msgs, toppar->rkprt_msg_cnt,
+                                   (void *)toppar->rkprt_base_rkm,
+                                   rd_kafka_err2name(err));
+                }
 
                 /* Unit test interface: inject errors */
                 if (unlikely(rk->rk_conf.ut.handle_ProduceResponse != NULL)) {
@@ -5233,6 +5243,52 @@ static void rd_kafka_handle_Produce(rd_kafka_t *rk,
                 rd_kafka_toppar_destroy(toppar->rkprt_s_rktp);
                 toppar->rkprt_assigned = 0;
         }
+
+        /* Safety check: drain any orphaned messages that weren't pulled.
+         * This shouldn't happen, but if it does (e.g., rkprt_base_rkm was NULL
+         * or message counts were wrong), we need to handle them gracefully
+         * to avoid the assertion failure in rd_kafka_msgbatch_destroy.
+         *
+         * We must trigger delivery reports so the application knows these
+         * messages failed - silent data loss is unacceptable. */
+        if (unlikely(!RD_KAFKA_MSGQ_EMPTY(&request->rkbuf_batch.msgq))) {
+                int orphaned = rd_kafka_msgq_len(&request->rkbuf_batch.msgq);
+                rd_rkb_log(rkb, LOG_WARNING, "PRODUCE",
+                           "BUG: %d orphaned message(s) left in ProduceRequest "
+                           "batch after handling response (err=%s). "
+                           "Triggering delivery reports with failure.",
+                           orphaned, rd_kafka_err2name(err));
+
+                /* Group orphaned messages by topic and trigger delivery reports.
+                 * Messages from the same ProduceRequest are likely from the same
+                 * topic, but we handle mixed topics correctly. */
+                while (!RD_KAFKA_MSGQ_EMPTY(&request->rkbuf_batch.msgq)) {
+                        rd_kafka_msg_t *rkm = TAILQ_FIRST(&request->rkbuf_batch.msgq.rkmq_msgs);
+                        rd_kafka_topic_t *rkt = rkm->rkm_rkmessage.rkt;
+                        rd_kafka_msgq_t topic_msgq = RD_KAFKA_MSGQ_INITIALIZER(topic_msgq);
+                        rd_kafka_msg_t *next;
+
+                        /* Collect all messages for this topic */
+                        while (rkm) {
+                                next = TAILQ_NEXT(rkm, rkm_link);
+                                if (rkm->rkm_rkmessage.rkt == rkt) {
+                                        rd_kafka_msgq_deq(&request->rkbuf_batch.msgq, rkm, 1);
+                                        rd_kafka_msgq_enq(&topic_msgq, rkm);
+                                }
+                                rkm = next;
+                        }
+
+                        /* Trigger delivery reports for this topic's messages */
+                        if (rkt) {
+                                rd_kafka_dr_msgq(rkt, &topic_msgq,
+                                                 err ? err : RD_KAFKA_RESP_ERR__FAIL);
+                        } else {
+                                /* No topic reference - shouldn't happen, but purge safely */
+                                rd_kafka_msgq_purge(rk, &topic_msgq);
+                        }
+                }
+        }
+
         rd_free(rkprc);
 }
 
@@ -5366,7 +5422,15 @@ int rd_kafka_ProduceRequest_append(rd_kafka_produce_ctx_t *rkpc,
         req_toppar =
             assign_toppar_info(rkprc, rktp->rktp_rkt, rktp->rktp_partition);
         if (unlikely(!req_toppar)) {
-                /* Hash map full - should not happen if calculator is correct */
+                /* Hash map full - should not happen if calculator is correct.
+                 * This is a bug if it happens, log a warning. The messages
+                 * that were appended will be handled by the orphan check in
+                 * rd_kafka_handle_Produce. */
+                rd_rkb_log(rkpc->rkpc_rkb, LOG_WARNING, "PRODUCE",
+                           "BUG: Failed to assign toppar info for %s [%" PRId32
+                           "] - hash map full? %d messages may be orphaned",
+                           rktp->rktp_rkt->rkt_topic->str,
+                           rktp->rktp_partition, appended_msg_cnt);
                 return 0;
         }
         req_toppar->rkprt_s_rktp     = rd_kafka_toppar_keep(rktp);
@@ -7424,6 +7488,12 @@ static int unittest_idempotent_producer(void) {
 
         /* Produce messages */
         ut_create_msgs(&rkmq, 1, msgcnt);
+        rd_kafka_msg_t *rkm = NULL;
+        TAILQ_FOREACH(rkm, &rkmq.rkmq_msgs, rkm_link) {
+                rkm->rkm_rkmessage.rkt =
+                    rd_kafka_topic_keep(rktp->rktp_rkt);
+                rkm->rkm_rkmessage.partition = rktp->rktp_partition;
+        }
 
         /* Set the pid */
         rd_kafka_idemp_set_state(rk, RD_KAFKA_IDEMP_STATE_WAIT_PID);
@@ -7669,6 +7739,143 @@ static int unittest_handle_GetTelemetrySubscriptions(void) {
         return 0;
 }
 
+static int unittest_handle_Produce_orphaned_msg_drain(void) {
+        rd_kafka_t *rk;
+        rd_kafka_conf_t *conf;
+        rd_kafka_broker_t *rkb;
+        rd_kafka_toppar_t *rktp;
+        rd_kafka_queue_t *rkqu;
+        rd_kafka_event_t *rkev;
+        const rd_kafka_message_t *rkmessage;
+        rd_kafka_produce_ctx_t ctx;
+        rd_kafka_produce_req_ctx_t *rkprc;
+        rd_kafka_produce_req_toppar_t *req_toppar;
+        rd_kafka_buf_t *rkbuf;
+        rd_kafka_msgq_t rkmq = RD_KAFKA_MSGQ_INITIALIZER(rkmq);
+        rd_kafka_pid_t pid = {.id = 1000, .epoch =0};
+        const int msgcnt = 5;
+        const int orphaned_cnt = 2;
+        int expected_drcnt = 0;
+        int drcnt = 0;
+        int tries;
+        const char *tmp;
+
+        RD_UT_SAY("Verifying orphaned ProduceRequest drain path");
+
+        conf = rd_kafka_conf_new();
+        rd_kafka_conf_set_events(conf, RD_KAFKA_EVENT_DR);
+        if ((tmp = rd_getenv("TEST_DEBUG", NULL)))
+            rd_kafka_conf_set(conf, "debug", tmp, NULL, 0);
+        rd_kafka_conf_set_events(conf, RD_KAFKA_EVENT_DR);
+
+        rk = rd_kafka_new(RD_KAFKA_PRODUCER, conf, NULL, 0);
+        RD_UT_ASSERT(rk, "failed to create producer");
+
+        rkqu = rd_kafka_queue_get_main(rk);
+
+        rkb = rd_kafka_broker_add_logical(rk, "unittest");
+        rd_kafka_broker_lock(rkb);
+        rkb->rkb_features = RD_KAFKA_FEATURE_UNITTEST | RD_KAFKA_FEATURE_ALL;
+        rd_kafka_broker_unlock(rkb);
+
+        rktp = rd_kafka_toppar_get2(rk, "uttopic", 0, rd_false, rd_true);
+        RD_UT_ASSERT(rktp, "failed to get toppar");
+        rd_ut_kafka_topic_set_topic_exists(rktp->rktp_rkt, 1, -1);
+
+        ut_create_msgs(&rkmq, 1, msgcnt);
+        rd_kafka_msg_t *rkm = NULL;
+        TAILQ_FOREACH(rkm, &rkmq.rkmq_msgs, rkm_link) {
+                rkm->rkm_rkmessage.rkt =
+                    rd_kafka_topic_keep(rktp->rktp_rkt);
+                rkm->rkm_rkmessage.partition = rktp->rktp_partition;
+        }
+
+        RD_UT_ASSERT(
+                rd_kafka_ProduceRequest_init(
+                    &ctx, rkb, pid, 1, 1, rd_kafka_msgq_len(&rkmq),
+                    rd_kafka_msgq_size(&rkmq),
+                    rktp->rktp_rkt->rkt_conf.required_acks,
+                    rktp->rktp_rkt->rkt_conf.request_timeout_ms),
+                "ProduceRequest_init failed");
+
+        rd_kafka_toppar_lock(rktp);
+        rd_kafka_msgq_move(&rktp->rktp_xmit_msgq, &rkmq);
+        rd_kafka_toppar_unlock(rktp);
+
+        RD_UT_ASSERT(rd_kafka_ProduceRequest_append(&ctx, rktp),
+                "ProduceRequest_append failed");
+
+        rkbuf = rd_kafka_produce_ctx_finalize(&ctx);
+        RD_UT_ASSERT(rkbuf, "ProduceRequest_finalize failed");
+
+        rkprc = ctx.rkpc_opaque;
+        RD_UT_ASSERT(rkprc, "missing produce req ctx");
+
+        req_toppar =
+            get_toppar_info(rkprc, rktp->rktp_rkt, rktp->rktp_partition);
+        RD_UT_ASSERT(req_toppar, "missing toppar info");
+
+        int actual_cnt = req_toppar->rkprt_msg_cnt;
+        rd_atomic32_add(&rktp->rktp_msgs_inflight, actual_cnt);
+        expected_drcnt = actual_cnt;
+
+        /* Force orphaned drain: deflate the count of messages past what
+         * exists, which simulates mismanaged bookeeping:
+         * Flow:
+         *  Broker thread builds a ProduceRequest
+         *  for each toppar we append its messages into the request msgq and record:
+         *      rkprt_base_rkm (pointer to the first message in that partitions slice)
+         *      rkprt_msg_cnt (count of messages appended for that partition)
+         *  Response arrives, rd_kafka_handle_Produce walks the stored rkprt_* info
+         *   and deques exactly rkprt_msg_cnt messages starting from rkprt_base_rkm.
+         *   so here we'll only pull actual_cnt - 2 messages, which will leave a non-empty buffer
+         * So, mutating rkprt_base_rkm or rkprt_msg_cnt will trigger the orphan loop.
+         * Here we trigger the more likely scenario, which is a miscounting of messages
+         */
+        RD_UT_ASSERT(actual_cnt > orphaned_cnt,
+                     "need at least %d msgs to orphan %d",
+                     orphaned_cnt + 1, orphaned_cnt);
+        req_toppar->rkprt_msg_cnt = actual_cnt - orphaned_cnt;
+
+        rd_kafka_handle_Produce(rk, rkb, RD_KAFKA_RESP_ERR__FAIL, NULL, rkbuf, rkprc);
+
+        RD_UT_ASSERT(RD_KAFKA_MSGQ_EMPTY(&rkbuf->rkbuf_batch.msgq),
+                "expected request msgq to be empty after orphan drain");
+
+        rd_kafka_buf_destroy(rkbuf);
+
+        for (tries = 0; tries < 10 && drcnt < expected_drcnt; tries++) {
+            rkev = rd_kafka_queue_poll(rkqu, 1000);
+            if (!rkev)
+                continue;
+
+            if (rd_kafka_event_type(rkev) == RD_KAFKA_EVENT_DR) {
+                while ((rkmessage =
+                            rd_kafka_event_message_next(rkev))) {
+                        RD_UT_ASSERT(
+                                rkmessage->err ==
+                                    RD_KAFKA_RESP_ERR__FAIL,
+                                "expected DR error %s, got %s",
+                                rd_kafka_err2name(
+                                    RD_KAFKA_RESP_ERR__FAIL),
+                                rd_kafka_err2name(rkmessage->err));
+                        drcnt++;
+                }
+            }
+            rd_kafka_event_destroy(rkev);
+        }
+
+        RD_UT_ASSERT(drcnt == expected_drcnt,
+                     "expected %d DRs, not %d", expected_drcnt, drcnt);
+
+        rd_kafka_queue_destroy(rkqu);
+        rd_kafka_toppar_destroy(rktp);
+        rd_kafka_broker_destroy(rkb);
+        rd_kafka_destroy(rk);
+
+        return 0;
+}
+
 /**
  * @brief Request/response unit tests
  */
@@ -7677,6 +7884,7 @@ int unittest_request(void) {
 
         fails += unittest_idempotent_producer();
         fails += unittest_handle_GetTelemetrySubscriptions();
+        fails += unittest_handle_Produce_orphaned_msg_drain();
 
         return fails;
 }

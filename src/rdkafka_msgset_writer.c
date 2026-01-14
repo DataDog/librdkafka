@@ -2237,9 +2237,9 @@ static int unittest_msgset_writer_partition_limit(void) {
                 }
         }
 
-        /* Limit check is "> max", so max=5 allows indices 0-5 (6 partitions) */
-        RD_UT_ASSERT(added_count == 6,
-                     "Should add 6 partitions (limit > 5), added %d", added_count);
+        /* Limit check is ">= max", so max=5 allows indices 0-4 (5 partitions) */
+        RD_UT_ASSERT(added_count == 5,
+                     "Should add 5 partitions (limit >= 5), added %d", added_count);
 
         /* Cleanup - reset fake queue counts to avoid assertion failures */
         rktp->rktp_xmit_msgq.rkmq_msg_cnt = 0;
@@ -2582,17 +2582,13 @@ static int unittest_msgset_writer_exact_limit(void) {
         rktp->rktp_xmit_msgq.rkmq_msg_cnt   = 10;
         rktp->rktp_xmit_msgq.rkmq_msg_bytes = 2560;
 
-        /* First add should succeed (count=0, limit=1, check is count > limit) */
+        /* First add should succeed (count=0, limit=1, check is count >= limit) */
         result = rd_kafka_produce_calculator_add(&rkpca, rktp);
         RD_UT_ASSERT(result == 1, "First partition should be added (0 < 1)");
 
-        /* Second add should succeed (count=1, limit=1, 1 is not > 1) */
+        /* Second add should fail (count=1, limit=1, 1 >= 1) */
         result = rd_kafka_produce_calculator_add(&rkpca, rktp);
-        RD_UT_ASSERT(result == 1, "Second partition should be added (1 not > 1)");
-
-        /* Third add should fail (count=2, limit=1, 2 > 1) */
-        result = rd_kafka_produce_calculator_add(&rkpca, rktp);
-        RD_UT_ASSERT(result == 0, "Third partition should be rejected (2 > 1), got %d", result);
+        RD_UT_ASSERT(result == 0, "Second partition should be rejected (1 >= 1)");
 
         /* Cleanup - reset fake queue counts */
         rktp->rktp_xmit_msgq.rkmq_msg_cnt = 0;
