@@ -1,0 +1,66 @@
+Multibatch review notes
+=======================
+
+Plan: clear collector membership on broker migration
+----------------------------------------------------
+1) Add a helper to drop a toppar from a broker collector list:
+   - TAILQ_REMOVE(&rkb->rkb_batch_collector.rkbbcol_toppars, rktp, rktp_collector_link)
+   - rktp->rktp_in_batch_collector = rd_false
+2) Call the helper when a partition leaves a broker:
+   - In rd_kafka_broker.c during PARTITION_LEAVE handling (after removing
+     from rkb->rkb_toppars).
+3) Defensive cleanup in rd_kafka_broker_batch_collector_send():
+   - If rktp->rktp_broker != rkb, drop it and continue.
+4) Optional: add a debug log when a stale collector entry is removed.
+5) Add a regression test or targeted debug-only assert to ensure re-add works
+   after migration (if a unit test is feasible).
+
+Findings (current review)
+-------------------------
+1) Collector membership not cleared on broker migration:
+   - rktp_in_batch_collector is set but never cleared, which can strand a
+     partition on its new broker and keep a stale pointer in the old broker.
+     (src/rdkafka_broker.c:262, src/rdkafka_broker.c:3808)
+2) Calculator undercounts zero-copy messages:
+   - Uses msg_copy_max_size to cap payload bytes; large messages can exceed
+     max_msg_size even if the calculator allows them.
+     (src/rdkafka_msgset_writer.c:1697, src/rdkafka_msgset_writer.c:1725)
+3) Calculator undercounts partition array overhead:
+   - Adds "+1" for the partition array length; underestimates size for large
+     partition counts and flexible versions (varint sizes).
+     (src/rdkafka_msgset_writer.c:1686)
+4) Collector list never pruned for idle partitions:
+   - O(n) scans on every linger tick can be costly with large partition counts.
+     (src/rdkafka_broker.c:408)
+5) broker.batch.max.bytes is approximate:
+   - Uses msgq_size only and ignores per-partition/header overhead.
+     (src/rdkafka_broker.c:412)
+6) Topic grouping relies on append order:
+   - If partitions from the same topic are not contiguous, the request will
+     emit multiple topic sections and rkprc_topic_cnt will reflect that.
+     If broker responses de-duplicate topic names, parsing can fail.
+     (src/rdkafka_msgset_writer.c:1875, src/rdkafka_request.c:3936)
+7) Avg-size calculator can under-estimate for skewed sizes:
+   - Using a per-queue average can let a few large messages push the request
+     over max_msg_size.
+     (src/rdkafka_msgset_writer.c:1709)
+8) Calculator uses TOPIC_LENGTH_MAX for header sizing:
+   - Overestimates topic header size and can under-pack requests even when
+     the real topic name is short; this reduces packing efficiency.
+     (src/rdkafka_msgset_writer.c:318)
+9) Hash map for toppar info is a fixed-size open-addressing array:
+   - assign/get are O(n) in worst case; collisions increase probe length and
+     can cause assign_toppar_info() to fail even when close to capacity.
+   - Hash uses topic pointer + partition id; if partitions are skewed to one
+     topic, the distribution may be less uniform than a string hash.
+     (src/rdkafka_request.c:149, src/rdkafka_request.c:176)
+10) Topic ordering vs. protocol expectations:
+   - Multiple topic sections for the same topic are possible if append order
+     interleaves partitions. This relies on the broker returning the same
+     topic count and ordering as sent; if not, parse errors are possible.
+     (src/rdkafka_msgset_writer.c:1875, src/rdkafka_request.c:3936)
+11) Queue ownership during broker transitions:
+   - Message queues are broker-thread owned, but stale collector pointers
+     during partition migration can lead to scanning freed rktp entries.
+     Fixing collector cleanup on broker change is the key mitigation.
+     (src/rdkafka_broker.c:408, src/rdkafka_broker.c:3808)
