@@ -150,6 +150,56 @@ rd_kafka_produce_request_select_caps(rd_kafka_broker_t *rkb,
         rd_assert(*api_version >= min_ApiVersion);
 }
 
+static RD_INLINE size_t
+rd_kafka_arraycnt_wire_size(size_t cnt, rd_bool_t flexver) {
+        if (!flexver)
+            return sizeof(int32_t);
+        char buf[RD_UVARINT_ENC_SIZEOF(uint64_t)];
+        /* CompactArray count is encoded as cnt + 1 */
+        return rd_uvarint_enc_u64(buf, sizeof(buf), (uint64_t)cnt + 1);
+}
+
+static RD_INLINE size_t
+rd_kafka_arraycnt_wire_size_max(rd_bool_t flexver) {
+        if (!flexver)
+            return sizeof(int32_t);
+        return RD_UVARINT_ENC_SIZEOF(int32_t);
+}
+
+static RD_INLINE size_t
+rd_kafka_kstr_wire_size_max(size_t max_len, rd_bool_t flexver) {
+        if (!flexver)
+            return RD_KAFKAP_STR_SIZE0(max_len);
+        char buf[RD_UVARINT_ENC_SIZEOF(uint64_t)];
+        size_t len_sz =
+            rd_uvarint_enc_u64(buf, sizeof(buf), (uint64_t)max_len + 1);
+        return len_sz + max_len;
+}
+
+static RD_INLINE size_t
+rd_kafka_kstr_wire_size(const rd_kafkap_str_t *kstr, rd_bool_t flexver) {
+    if (!flexver)
+        return RD_KAFKAP_STR_SIZE(kstr);
+    if (!kstr || RD_KAFKAP_STR_IS_NULL(kstr))
+        return RD_UVARINT_ENC_SIZE_0();
+    return rd_kafka_kstr_wire_size_max(RD_KAFKAP_STR_LEN(kstr), rd_true);
+}
+
+static RD_INLINE size_t
+rd_kafka_msgq_bytes_prefix(const rd_kafka_msgq_t *rkmq, int cnt) {
+        int i = 0;
+        size_t bytes = 0;
+        const rd_kafka_msg_t *rkm;
+
+        RD_KAFKA_MSGQ_FOREACH(rkm, rkmq) {
+                if (i++ >= cnt)
+                        break;
+                bytes += rkm->rkm_len + rkm->rkm_key_len;
+        }
+
+        return bytes;
+}
+
 
 
 /**
@@ -274,7 +324,7 @@ rd_kafka_produce_request_get_header_sizes(rd_kafka_t *rk,
                                           size_t *msgset_hdr_size,
                                           size_t *msg_overhead) {
         *produce_hdr_size   = 0;
-        *topic_hdr_size     = 0;
+        *topic_hdr_size     = 0; // TODO(xvandish). Remove? alloc_buf callsite no longer uses
         *partition_hdr_size = 0;
         *msgset_hdr_size    = 0;
         *msg_overhead       = 0;
@@ -315,11 +365,7 @@ rd_kafka_produce_request_get_header_sizes(rd_kafka_t *rk,
                 *produce_hdr_size +=
                     /* RequiredAcks + Timeout + TopicCnt */
                     2 + 4 + 4;
-                *topic_hdr_size +=
-                    /* Topic + PartitionCnt */
-                    // TODO(xvandish): Don't be greedy here, use actual topic
-                    // name
-                    TOPIC_LENGTH_MAX + 4;
+                /* Topic name + PartitionArrayCnt are sized elsewhere. */
                 *partition_hdr_size +=
                     /* Partition + MessageSetSize */
                     4 + 4;
@@ -388,13 +434,17 @@ static void rd_kafka_produce_request_alloc_buf(rd_kafka_produce_ctx_t *rkpc) {
             rkpc->rkpc_rkb->rkb_rk, rkpc->rkpc_api_version,
             rkpc->rkpc_msg_version, &produce_hdr_size, &topic_hdr_size,
             &partition_hdr_size, &msgset_hdr_size, &msg_overhead);
+        rd_bool_t flexver = (rkpc->rkpc_api_version >= 9);
+        topic_hdr_size = rd_kafka_kstr_wire_size_max(TOPIC_LENGTH_MAX, flexver) +
+                         rd_kafka_arraycnt_wire_size_max(flexver);
 
         /*
          * Calculate total buffer size to allocate
          */
-        bufsize =
-            produce_hdr_size + (topic_hdr_size + rkpc->rkpc_topic_max) +
-            ((partition_hdr_size + msgset_hdr_size) * rkpc->rkpc_partition_max);
+        bufsize = produce_hdr_size +
+                    (topic_hdr_size * rkpc->rkpc_topic_max) +
+                    ((partition_hdr_size + msgset_hdr_size) *
+                     rkpc->rkpc_partition_max);
 
         /* If copying for small payloads is enabled, allocate enough
          * space for each message to be copied based on this limit.
@@ -1610,6 +1660,7 @@ void rd_kafka_produce_calculator_init(rd_kafka_produce_calculator_t *rkpca,
             &rkpca->rkpca_partition_header_size,
             &rkpca->rkpca_message_set_header_size,
             &rkpca->rkpca_message_overhead);
+        rkpca->rkpca_flexver = (api_version >= 9);
 }
 
 /* Attempt to add a partition into the running size/count calculation for a
@@ -1640,11 +1691,16 @@ int rd_kafka_produce_calculator_add(rd_kafka_produce_calculator_t *rkpca,
         size_t calculated_size;
         size_t batch_msg_size;
         size_t batch_msg_cnt;
-        size_t avg_msg_size;
+        size_t topic_name_size = 0;
+        size_t partition_cnt_size_delta = 0;
+        size_t prev_partcnt_size = 0;
+        int prev_partcnt = 0;
         int batch_index;
         int added_batch_cnt;
 
 
+        // TODO(xvandish): Think about removing this. Why would anyone want to make
+        // their requests worse?
         if (rkpca->rkpca_partition_cnt >=
             rktp->rktp_rkt->rkt_rk->rk_conf.produce_request_max_partitions) {
                 return 0;
@@ -1663,6 +1719,8 @@ int rd_kafka_produce_calculator_add(rd_kafka_produce_calculator_t *rkpca,
                 /* Can't add messages from topics that don't match current
                  * batches settings
                  */
+                // TODO(xvandish): Should we return something here different than 0 to indicate
+                // that this will never be possibly? Would this cause a spin-loop?
                 return 0;
         }
 
@@ -1678,13 +1736,18 @@ int rd_kafka_produce_calculator_add(rd_kafka_produce_calculator_t *rkpca,
         /* Produce header */
         calculated_size = rkpca->rkpca_produce_header_size;
 
-        /* Topic headers */
-        calculated_size += rkpca->rkpca_topic_header_size *
-                           (rkpca->rkpca_topic_cnt + topic_changed);
+        /* Topic name sizes + PartitionArrayCnt field sizes */
+        calculated_size += rkpca->rkpca_topic_name_size;
+        calculated_size += rkpca->rkpca_partition_cnt_size;
+        if (topic_changed) {
+            topic_name_size = rd_kafka_kstr_wire_size(
+                    rktp->rktp_rkt->rkt_topic, rkpca->rkpca_flexver);
+            calculated_size += topic_name_size;
+        }
 
         /* Partition headers */
         calculated_size +=
-            rkpca->rkpca_partition_header_size * rkpca->rkpca_partition_cnt + 1;
+            rkpca->rkpca_partition_header_size * rkpca->rkpca_partition_cnt;
 
         /* Message set headers */
         calculated_size +=
@@ -1695,9 +1758,7 @@ int rd_kafka_produce_calculator_add(rd_kafka_produce_calculator_t *rkpca,
             rkpca->rkpca_message_overhead * rkpca->rkpca_message_cnt;
 
         /* Messages */
-        calculated_size += RD_MIN(rkpca->rkpca_message_size,
-                                  (size_t)rk->rk_conf.msg_copy_max_size *
-                                      rkpca->rkpca_message_cnt);
+        calculated_size += rkpca->rkpca_message_size;
 
         // TODO(xvandish): This would be a good spot to add tolerance
         if (calculated_size > rk->rk_conf.max_msg_size)
@@ -1706,8 +1767,6 @@ int rd_kafka_produce_calculator_add(rd_kafka_produce_calculator_t *rkpca,
         /* If one batch of messages fits, the return success.
          * Calculate for the entire set of batches afterwards. */
         int xmit_msgq_len = rd_kafka_msgq_len(&rktp->rktp_xmit_msgq);
-        avg_msg_size =
-            rd_kafka_msgq_size(&rktp->rktp_xmit_msgq) / xmit_msgq_len;
         added_batch_cnt = 0;
         batch_msg_size  = 0;
         batch_msg_cnt   = 0;
@@ -1715,6 +1774,9 @@ int rd_kafka_produce_calculator_add(rd_kafka_produce_calculator_t *rkpca,
         for (batch_index = 0; batch_index < batch_cnt; batch_index++) {
                 int pass_msg_cnt = RD_MIN((xmit_msgq_len - batch_msg_cnt),
                                           rk->rk_conf.batch_num_messages);
+                prev_partcnt = topic_changed ? 0 : rkpca->rkpca_active_topic_partition_cnt;
+                prev_partcnt_size = topic_changed ? 0 : rkpca->rkpca_active_topic_partition_cnt_size;
+                partition_cnt_size_delta = rd_kafka_arraycnt_wire_size(prev_partcnt + 1, rkpca->rkpca_flexver) - prev_partcnt_size;
 
                 size_t pass_partition_header =
                     rkpca->rkpca_partition_header_size;
@@ -1722,13 +1784,13 @@ int rd_kafka_produce_calculator_add(rd_kafka_produce_calculator_t *rkpca,
                     rkpca->rkpca_message_set_header_size;
                 size_t pass_msg_overhead =
                     rkpca->rkpca_message_overhead * pass_msg_cnt;
-                size_t pass_msg_size = RD_MIN(
-                    pass_msg_cnt * avg_msg_size,
-                    (size_t)rk->rk_conf.msg_copy_max_size * pass_msg_cnt);
+                size_t pass_msg_size = rd_kafka_msgq_bytes_prefix(
+                    &rktp->rktp_xmit_msgq, pass_msg_cnt);
 
                 /* Don't factor in individual messages into the
                  * calculation so that partial batches can be written */
-                size_t pass_total = pass_partition_header + pass_msg_set_header;
+                size_t pass_total = pass_partition_header + pass_msg_set_header +
+                                    partition_cnt_size_delta;
 
                 if (calculated_size + pass_total > rk->rk_conf.max_msg_size)
                         break;
@@ -1771,6 +1833,14 @@ int rd_kafka_produce_calculator_add(rd_kafka_produce_calculator_t *rkpca,
         rkpca->rkpca_partition_cnt += added_batch_cnt;
         rkpca->rkpca_message_cnt += batch_msg_cnt;
         rkpca->rkpca_message_size += batch_msg_size;
+        if (topic_changed) {
+            rkpca->rkpca_topic_name_size += topic_name_size;
+        }
+        rkpca->rkpca_partition_cnt_size += partition_cnt_size_delta;
+        rkpca->rkpca_active_topic_partition_cnt = prev_partcnt +1;
+        rkpca->rkpca_active_topic_partition_cnt_size =
+            rd_kafka_arraycnt_wire_size(rkpca->rkpca_active_topic_partition_cnt,
+                                        rkpca->rkpca_flexver);
         rkpca->rkpca_rkt_prev = rktp->rktp_rkt;
         return 1;
 }
@@ -2093,6 +2163,30 @@ rd_kafka_buf_t *rd_kafka_msgset_create_ProduceRequest(rd_kafka_broker_t *rkb,
 
 
 /**
+ * @brief Test helpers
+ */
+static void unittest_fill_msgq(rd_kafka_msgq_t *rkmq,
+                               int cnt,
+                               size_t msg_size) {
+        int i;
+
+        for (i = 0; i < cnt; i++) {
+                rd_kafka_msg_t *rkm = ut_rd_kafka_msg_new(0);
+                if (msg_size > 0) {
+                        rkm->rkm_payload = rd_malloc(msg_size);
+                        rkm->rkm_len     = msg_size;
+                        rkm->rkm_flags |= RD_KAFKA_MSG_F_FREE;
+                }
+                rkm->rkm_ts_enq     = rd_clock();
+                rd_kafka_msgq_enq(rkmq, rkm);
+        }
+}
+
+static void unittest_clear_msgq(rd_kafka_msgq_t *rkmq) {
+        ut_rd_kafka_msgq_purge(rkmq);
+}
+
+/**
  * @brief Test: Empty partition should be rejected
  */
 static int unittest_msgset_writer_empty_partition(void) {
@@ -2125,7 +2219,6 @@ static int unittest_msgset_writer_empty_partition(void) {
         rkpca.rkpca_message_overhead = 30;
 
         /* Test: Empty partition should return 0 */
-        rktp->rktp_xmit_msgq.rkmq_msg_cnt = 0;
         result = rd_kafka_produce_calculator_add(&rkpca, rktp);
         RD_UT_ASSERT(result == 0, "Empty partition should be rejected, got %d", result);
 
@@ -2170,17 +2263,15 @@ static int unittest_msgset_writer_add_partition(void) {
         rkpca.rkpca_message_overhead = 30;
 
         /* Simulate 100 messages */
-        rktp->rktp_xmit_msgq.rkmq_msg_cnt   = 100;
-        rktp->rktp_xmit_msgq.rkmq_msg_bytes = 25600;
+        unittest_fill_msgq(&rktp->rktp_xmit_msgq, 100, 256);
         result = rd_kafka_produce_calculator_add(&rkpca, rktp);
 
         RD_UT_ASSERT(result == 1, "Should accept partition with messages, got %d", result);
         RD_UT_ASSERT(rkpca.rkpca_partition_cnt >= 1,
                      "Partition count should be >= 1, got %d", rkpca.rkpca_partition_cnt);
 
-        /* Cleanup - reset fake queue counts to avoid assertion failures */
-        rktp->rktp_xmit_msgq.rkmq_msg_cnt = 0;
-        rktp->rktp_xmit_msgq.rkmq_msg_bytes = 0;
+        /* Cleanup */
+        unittest_clear_msgq(&rktp->rktp_xmit_msgq);
         rd_kafka_toppar_destroy(rktp);
         rd_kafka_topic_destroy(rkt);
         rd_kafka_destroy(rk);
@@ -2223,8 +2314,7 @@ static int unittest_msgset_writer_partition_limit(void) {
         rkpca.rkpca_message_overhead = 30;
 
         /* Simulate small partition */
-        rktp->rktp_xmit_msgq.rkmq_msg_cnt   = 10;
-        rktp->rktp_xmit_msgq.rkmq_msg_bytes = 2560;
+        unittest_fill_msgq(&rktp->rktp_xmit_msgq, 10, 256);
 
         /* Add partitions until limit is hit */
         added_count = 0;
@@ -2241,9 +2331,8 @@ static int unittest_msgset_writer_partition_limit(void) {
         RD_UT_ASSERT(added_count == 5,
                      "Should add 5 partitions (limit >= 5), added %d", added_count);
 
-        /* Cleanup - reset fake queue counts to avoid assertion failures */
-        rktp->rktp_xmit_msgq.rkmq_msg_cnt = 0;
-        rktp->rktp_xmit_msgq.rkmq_msg_bytes = 0;
+        /* Cleanup */
+        unittest_clear_msgq(&rktp->rktp_xmit_msgq);
         rd_kafka_toppar_destroy(rktp);
         rd_kafka_topic_destroy(rkt);
         rd_kafka_destroy(rk);
@@ -2323,8 +2412,7 @@ static int unittest_msgset_writer_multiple_partitions(void) {
         rkpca.rkpca_message_overhead = 30;
 
         /* Simulate small partition */
-        rktp->rktp_xmit_msgq.rkmq_msg_cnt   = 10;
-        rktp->rktp_xmit_msgq.rkmq_msg_bytes = 2560;
+        unittest_fill_msgq(&rktp->rktp_xmit_msgq, 10, 256);
 
         /* Add 100 small partitions */
         added_count = 0;
@@ -2342,9 +2430,8 @@ static int unittest_msgset_writer_multiple_partitions(void) {
         RD_UT_ASSERT(rkpca.rkpca_partition_cnt == 100,
                      "Calculator should track 100 partitions, got %d", rkpca.rkpca_partition_cnt);
 
-        /* Cleanup - reset fake queue counts */
-        rktp->rktp_xmit_msgq.rkmq_msg_cnt = 0;
-        rktp->rktp_xmit_msgq.rkmq_msg_bytes = 0;
+        /* Cleanup */
+        unittest_clear_msgq(&rktp->rktp_xmit_msgq);
         rd_kafka_toppar_destroy(rktp);
         rd_kafka_topic_destroy(rkt);
         rd_kafka_destroy(rk);
@@ -2393,23 +2480,19 @@ static int unittest_msgset_writer_config_mismatch(void) {
         rkpca.rkpca_message_overhead = 30;
 
         /* Add first partition with acks=1 */
-        rktp1->rktp_xmit_msgq.rkmq_msg_cnt   = 10;
-        rktp1->rktp_xmit_msgq.rkmq_msg_bytes = 2560;
+        unittest_fill_msgq(&rktp1->rktp_xmit_msgq, 10, 256);
         result = rd_kafka_produce_calculator_add(&rkpca, rktp1);
         RD_UT_ASSERT(result == 1, "First partition should be added, got %d", result);
 
         /* Try to add second partition with different acks=-1 (should fail) */
-        rktp2->rktp_xmit_msgq.rkmq_msg_cnt   = 10;
-        rktp2->rktp_xmit_msgq.rkmq_msg_bytes = 2560;
+        unittest_fill_msgq(&rktp2->rktp_xmit_msgq, 10, 256);
         result = rd_kafka_produce_calculator_add(&rkpca, rktp2);
         RD_UT_ASSERT(result == 0,
                      "Should reject partition with different acks config, got %d", result);
 
-        /* Cleanup - reset fake queue counts */
-        rktp1->rktp_xmit_msgq.rkmq_msg_cnt = 0;
-        rktp1->rktp_xmit_msgq.rkmq_msg_bytes = 0;
-        rktp2->rktp_xmit_msgq.rkmq_msg_cnt = 0;
-        rktp2->rktp_xmit_msgq.rkmq_msg_bytes = 0;
+        /* Cleanup */
+        unittest_clear_msgq(&rktp1->rktp_xmit_msgq);
+        unittest_clear_msgq(&rktp2->rktp_xmit_msgq);
         rd_kafka_toppar_destroy(rktp1);
         rd_kafka_toppar_destroy(rktp2);
         rd_kafka_topic_destroy(rkt1);
@@ -2458,8 +2541,7 @@ static int unittest_msgset_writer_batch_count(void) {
         rkpca.rkpca_message_overhead = 30;
 
         /* Simulate 250 messages (should create 3 batches: 100+100+50) */
-        rktp->rktp_xmit_msgq.rkmq_msg_cnt   = 250;
-        rktp->rktp_xmit_msgq.rkmq_msg_bytes = 64000;
+        unittest_fill_msgq(&rktp->rktp_xmit_msgq, 250, 256);
         result = rd_kafka_produce_calculator_add(&rkpca, rktp);
 
         RD_UT_ASSERT(result == 1, "Should add partition with 250 messages, got %d", result);
@@ -2467,9 +2549,8 @@ static int unittest_msgset_writer_batch_count(void) {
         RD_UT_ASSERT(rkpca.rkpca_partition_cnt >= 1,
                      "Should track partition, got %d", rkpca.rkpca_partition_cnt);
 
-        /* Cleanup - reset fake queue counts */
-        rktp->rktp_xmit_msgq.rkmq_msg_cnt = 0;
-        rktp->rktp_xmit_msgq.rkmq_msg_bytes = 0;
+        /* Cleanup */
+        unittest_clear_msgq(&rktp->rktp_xmit_msgq);
         rd_kafka_toppar_destroy(rktp);
         rd_kafka_topic_destroy(rkt);
         rd_kafka_destroy(rk);
@@ -2511,8 +2592,7 @@ static int unittest_msgset_writer_accumulation(void) {
         rkpca.rkpca_message_overhead = 30;
 
         /* Add first partition with 50 messages */
-        rktp->rktp_xmit_msgq.rkmq_msg_cnt   = 50;
-        rktp->rktp_xmit_msgq.rkmq_msg_bytes = 12800;
+        unittest_fill_msgq(&rktp->rktp_xmit_msgq, 50, 256);
         result = rd_kafka_produce_calculator_add(&rkpca, rktp);
         RD_UT_ASSERT(result == 1, "First partition should be added");
 
@@ -2520,8 +2600,8 @@ static int unittest_msgset_writer_accumulation(void) {
         size_t first_msg_size = rkpca.rkpca_message_size;
 
         /* Add second partition with 30 messages */
-        rktp->rktp_xmit_msgq.rkmq_msg_cnt   = 30;
-        rktp->rktp_xmit_msgq.rkmq_msg_bytes = 7680;
+        unittest_clear_msgq(&rktp->rktp_xmit_msgq);
+        unittest_fill_msgq(&rktp->rktp_xmit_msgq, 30, 256);
         result = rd_kafka_produce_calculator_add(&rkpca, rktp);
         RD_UT_ASSERT(result == 1, "Second partition should be added");
 
@@ -2535,9 +2615,8 @@ static int unittest_msgset_writer_accumulation(void) {
                      "Message size should accumulate: %zu > %zu",
                      rkpca.rkpca_message_size, first_msg_size);
 
-        /* Cleanup - reset fake queue counts */
-        rktp->rktp_xmit_msgq.rkmq_msg_cnt = 0;
-        rktp->rktp_xmit_msgq.rkmq_msg_bytes = 0;
+        /* Cleanup */
+        unittest_clear_msgq(&rktp->rktp_xmit_msgq);
         rd_kafka_toppar_destroy(rktp);
         rd_kafka_topic_destroy(rkt);
         rd_kafka_destroy(rk);
@@ -2579,8 +2658,7 @@ static int unittest_msgset_writer_exact_limit(void) {
         rkpca.rkpca_message_overhead = 30;
 
         /* Simulate small partition */
-        rktp->rktp_xmit_msgq.rkmq_msg_cnt   = 10;
-        rktp->rktp_xmit_msgq.rkmq_msg_bytes = 2560;
+        unittest_fill_msgq(&rktp->rktp_xmit_msgq, 10, 256);
 
         /* First add should succeed (count=0, limit=1, check is count >= limit) */
         result = rd_kafka_produce_calculator_add(&rkpca, rktp);
@@ -2590,9 +2668,8 @@ static int unittest_msgset_writer_exact_limit(void) {
         result = rd_kafka_produce_calculator_add(&rkpca, rktp);
         RD_UT_ASSERT(result == 0, "Second partition should be rejected (1 >= 1)");
 
-        /* Cleanup - reset fake queue counts */
-        rktp->rktp_xmit_msgq.rkmq_msg_cnt = 0;
-        rktp->rktp_xmit_msgq.rkmq_msg_bytes = 0;
+        /* Cleanup */
+        unittest_clear_msgq(&rktp->rktp_xmit_msgq);
         rd_kafka_toppar_destroy(rktp);
         rd_kafka_topic_destroy(rkt);
         rd_kafka_destroy(rk);

@@ -64,6 +64,10 @@ struct rd_kafka_produce_calculator_s {
         int rkpca_partition_cnt;
         int rkpca_message_cnt;
         size_t rkpca_message_size;
+        size_t rkpca_topic_name_size;
+        size_t rkpca_partition_cnt_size;
+        int rkpca_active_topic_partition_cnt;
+        size_t rkpca_active_topic_partition_cnt_size;
 
         /* Topic specific configurations
          * All topics in a batch must share the same settings.
@@ -77,6 +81,7 @@ struct rd_kafka_produce_calculator_s {
         size_t rkpca_partition_header_size;
         size_t rkpca_message_set_header_size;
         size_t rkpca_message_overhead;
+        rd_bool_t rkpca_flexver;
 
         /* Track previous topic added to check if changed */
         rd_kafka_topic_t *rkpca_rkt_prev;
