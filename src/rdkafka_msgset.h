@@ -66,6 +66,7 @@ struct rd_kafka_produce_calculator_s {
         size_t rkpca_message_size;
         size_t rkpca_topic_name_size;
         size_t rkpca_partition_cnt_size;
+        size_t rkpca_message_set_size_len;
         int rkpca_active_topic_partition_cnt;
         size_t rkpca_active_topic_partition_cnt_size;
 

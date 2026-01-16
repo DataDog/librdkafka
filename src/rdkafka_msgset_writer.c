@@ -367,8 +367,8 @@ rd_kafka_produce_request_get_header_sizes(rd_kafka_t *rk,
                     2 + 4 + 4;
                 /* Topic name + PartitionArrayCnt are sized elsewhere. */
                 *partition_hdr_size +=
-                    /* Partition + MessageSetSize */
-                    4 + 4;
+                    /* Partition (MessageSetSize length handled separately) */
+                    4;
                 break;
 
         default:
@@ -437,13 +437,14 @@ static void rd_kafka_produce_request_alloc_buf(rd_kafka_produce_ctx_t *rkpc) {
         rd_bool_t flexver = (rkpc->rkpc_api_version >= 9);
         topic_hdr_size = rd_kafka_kstr_wire_size_max(TOPIC_LENGTH_MAX, flexver) +
                          rd_kafka_arraycnt_wire_size_max(flexver);
+        size_t msgset_size_len = rd_kafka_arraycnt_wire_size_max(flexver);
 
         /*
          * Calculate total buffer size to allocate
          */
         bufsize = produce_hdr_size +
                     (topic_hdr_size * rkpc->rkpc_topic_max) +
-                    ((partition_hdr_size + msgset_hdr_size) *
+                    ((partition_hdr_size + msgset_hdr_size + msgset_size_len) *
                      rkpc->rkpc_partition_max);
 
         /* If copying for small payloads is enabled, allocate enough
@@ -1694,6 +1695,8 @@ int rd_kafka_produce_calculator_add(rd_kafka_produce_calculator_t *rkpca,
         size_t topic_name_size = 0;
         size_t partition_cnt_size_delta = 0;
         size_t prev_partcnt_size = 0;
+        size_t msgset_size_len = 0;
+        size_t msgset_payload_size = 0;
         int prev_partcnt = 0;
         int batch_index;
         int added_batch_cnt;
@@ -1739,6 +1742,7 @@ int rd_kafka_produce_calculator_add(rd_kafka_produce_calculator_t *rkpca,
         /* Topic name sizes + PartitionArrayCnt field sizes */
         calculated_size += rkpca->rkpca_topic_name_size;
         calculated_size += rkpca->rkpca_partition_cnt_size;
+        calculated_size += rkpca->rkpca_message_set_size_len;
         if (topic_changed) {
             topic_name_size = rd_kafka_kstr_wire_size(
                     rktp->rktp_rkt->rkt_topic, rkpca->rkpca_flexver);
@@ -1786,11 +1790,16 @@ int rd_kafka_produce_calculator_add(rd_kafka_produce_calculator_t *rkpca,
                     rkpca->rkpca_message_overhead * pass_msg_cnt;
                 size_t pass_msg_size = rd_kafka_msgq_bytes_prefix(
                     &rktp->rktp_xmit_msgq, pass_msg_cnt);
+                msgset_payload_size =
+                    pass_msg_set_header + pass_msg_overhead + pass_msg_size;
+                msgset_size_len =
+                    rd_kafka_arraycnt_wire_size(msgset_payload_size,
+                                                rkpca->rkpca_flexver);
 
                 /* Don't factor in individual messages into the
                  * calculation so that partial batches can be written */
-                size_t pass_total = pass_partition_header + pass_msg_set_header +
-                                    partition_cnt_size_delta;
+                size_t pass_total = pass_partition_header + msgset_size_len +
+                                    pass_msg_set_header + partition_cnt_size_delta;
 
                 if (calculated_size + pass_total > rk->rk_conf.max_msg_size)
                         break;
@@ -1837,6 +1846,7 @@ int rd_kafka_produce_calculator_add(rd_kafka_produce_calculator_t *rkpca,
             rkpca->rkpca_topic_name_size += topic_name_size;
         }
         rkpca->rkpca_partition_cnt_size += partition_cnt_size_delta;
+        rkpca->rkpca_message_set_size_len += msgset_size_len;
         rkpca->rkpca_active_topic_partition_cnt = prev_partcnt +1;
         rkpca->rkpca_active_topic_partition_cnt_size =
             rd_kafka_arraycnt_wire_size(rkpca->rkpca_active_topic_partition_cnt,

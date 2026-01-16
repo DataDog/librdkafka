@@ -99,6 +99,67 @@ typedef struct produce_batch_s {
         rd_kafka_produce_calculator_t batch_calculator;
 } produce_batch_t;
 
+typedef struct rd_kafka_produce_topic_bucket_s {
+        rd_kafka_topic_t *rkt;
+        rd_list_t toppars;
+} rd_kafka_produce_topic_bucket_t;
+
+static void
+rd_kafka_produce_topic_bucket_cleanup(void *ptr) {
+        rd_kafka_produce_topic_bucket_t *bucket = ptr;
+
+        rd_list_destroy(&bucket->toppars);
+}
+
+static rd_kafka_produce_topic_bucket_t *
+rd_kafka_produce_topic_bucket_find(rd_list_t *buckets,
+                                   const rd_kafka_topic_t *rkt) {
+        rd_kafka_produce_topic_bucket_t *bucket;
+        int i;
+
+        RD_LIST_FOREACH(bucket, buckets, i) {
+                if (bucket->rkt == rkt)
+                        return bucket;
+        }
+
+        return NULL;
+}
+
+static int
+rd_kafka_produce_topic_buckets_build(rd_list_t *buckets,
+                                     const produce_batch_t *batch) {
+        rd_kafka_toppar_t *rktp;
+        int topic_max = batch->batch_calculator.rkpca_topic_cnt;
+        int partition_cnt = batch->batch_calculator.rkpca_partition_cnt;
+        int bucket_prealloc;
+
+        if (unlikely(topic_max <= 0))
+                return 0;
+
+        rd_list_init(buckets, 0, rd_kafka_produce_topic_bucket_cleanup);
+        rd_list_prealloc_elems(buckets, sizeof(rd_kafka_produce_topic_bucket_t),
+                               topic_max, 1);
+
+        bucket_prealloc =
+            RD_MAX(1, partition_cnt / RD_MAX(1, topic_max));
+
+        TAILQ_FOREACH(rktp, &batch->batch_toppars, rktp_batch_link) {
+                rd_kafka_produce_topic_bucket_t *bucket;
+
+                bucket = rd_kafka_produce_topic_bucket_find(
+                    buckets, rktp->rktp_rkt);
+                if (!bucket) {
+                        bucket = rd_list_add(buckets, NULL);
+                        bucket->rkt = rktp->rktp_rkt;
+                        rd_list_init(&bucket->toppars, bucket_prealloc, NULL);
+                }
+
+                rd_list_add(&bucket->toppars, rktp);
+        }
+
+        return rd_list_cnt(buckets) > 0;
+}
+
 /* These rd_kafka_broker_produce_batch_* functions are helpers
 * for delaying the construction of a message batch until the
 * counts of messages, partitions, and topics are known 
@@ -143,8 +204,11 @@ rd_kafka_broker_produce_batch_append(produce_batch_t *batch,
 static int
 rd_kafka_broker_produce_batch_send(produce_batch_t *batch,
                                         rd_kafka_broker_t *rkb) {
-        rd_kafka_toppar_t *rktp;
         rd_kafka_produce_ctx_t ctx;
+        rd_list_t topic_buckets;
+        rd_kafka_produce_topic_bucket_t *bucket;
+        int i;
+        int ret = 0;
 
 
         if (unlikely(!batch->batch_initialized)) {
@@ -155,24 +219,40 @@ rd_kafka_broker_produce_batch_send(produce_batch_t *batch,
                 return 0;
         }
 
+        if (unlikely(!rd_kafka_produce_topic_buckets_build(&topic_buckets,
+                                                           batch))) {
+                return 0;
+        }
+
         if (unlikely(!rd_kafka_ProduceRequest_init(
                         &ctx, rkb,
                         rkb->rkb_produce_pid,
-                        batch->batch_calculator.rkpca_topic_cnt,
+                        rd_list_cnt(&topic_buckets),
                         batch->batch_calculator.rkpca_partition_cnt,
                         batch->batch_calculator.rkpca_message_cnt,
                         batch->batch_calculator.rkpca_message_size,
                         batch->batch_calculator.rkpca_request_required_acks,
                         batch->batch_calculator.rkpca_request_timeout_ms))) {
+                rd_list_destroy(&topic_buckets);
                 return 0;
         }
 
-        TAILQ_FOREACH(rktp, &batch->batch_toppars, rktp_batch_link) {
-                if (unlikely(!rd_kafka_ProduceRequest_append(&ctx, rktp)))
-                        break;
+        RD_LIST_FOREACH(bucket, &topic_buckets, i) {
+                rd_kafka_toppar_t *bucket_rktp;
+                int j;
+
+                RD_LIST_FOREACH(bucket_rktp, &bucket->toppars, j) {
+                        if (unlikely(!rd_kafka_ProduceRequest_append(
+                                &ctx, bucket_rktp)))
+                                goto finalize;
+                }
         }
 
-        return rd_kafka_ProduceRequest_finalize(&ctx);
+finalize:
+        ret = rd_kafka_ProduceRequest_finalize(&ctx);
+        rd_list_destroy(&topic_buckets);
+
+        return ret;
 }
 
 
