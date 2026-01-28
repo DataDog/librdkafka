@@ -346,10 +346,9 @@ void rd_kafka_broker_batch_collector_add(rd_kafka_broker_t *rkb,
                 rktp->rktp_in_batch_collector = rd_true;
                 rd_rkb_dbg(rkb, BATCHCOL, "BATCHCOL",
                            "Collector add: %s [%" PRId32
-                           "] rktp %p broker=%s",
+                           "]",
                            rktp->rktp_rkt->rkt_topic->str,
-                           rktp->rktp_partition, rktp,
-                           rd_kafka_broker_name(rkb));
+                           rktp->rktp_partition);
         } else if (unlikely(rktp->rktp_broker != rkb)) {
                 rd_rkb_dbg(rkb, BATCHCOL, "BATCHCOL",
                            "Collector add skipped (already in collector): "
@@ -572,11 +571,6 @@ int rd_kafka_broker_batch_collector_maybe_send(rd_kafka_broker_t *rkb,
         col->rkbbcol_first_add_ts = first_add_ts;
         col->rkbbcol_active_partition_cnt = active_partition_cnt;
 
-        rd_rkb_dbg(rkb, BATCHCOL, "BATCHCOL",
-                "first_add_ts=%" PRId64
-                "us active_partition_count=%d, rkb_state=%d, flushing=%d, should_send=%d",
-                (int64_t)first_add_ts, active_partition_cnt, rkb->rkb_state, flushing, should_send);
-
         if (active_partition_cnt == 0)
                 return 0;
 
@@ -607,8 +601,6 @@ int rd_kafka_broker_batch_collector_maybe_send(rd_kafka_broker_t *rkb,
         }
 
         if (should_send) {
-                int msg_cnt;
-
                 rd_rkb_dbg(rkb, BATCHCOL, "BATCHCOL",
                            "Batch collector send triggered: partitions=%d "
                            "bytes=%" PRId64 " collecting_for=%.1fms reason=%s",
@@ -4438,14 +4430,6 @@ static int rd_kafka_toppar_producer_serve(rd_kafka_broker_t *rkb,
          * buffers enqueued waiting for transmission. */
         if (rd_kafka_broker_outbufs_space(rkb) == 0) {
                 produce_enabled = 0;
-                rd_rkb_dbg(rkb, QUEUE, "TOPPAR",
-                           "%.*s [%" PRId32
-                           "] produce disabled: outbufs full "
-                           "(outbufs=%d threshold=%d)",
-                           RD_KAFKAP_STR_PR(rktp->rktp_rkt->rkt_topic),
-                           rktp->rktp_partition,
-                           rd_atomic32_get(&rkb->rkb_outbufs.rkbq_cnt),
-                           rkb->rkb_rk->rk_conf.queue_backpressure_thres);
         }
 
         rd_kafka_toppar_lock(rktp);
@@ -4547,13 +4531,9 @@ static int rd_kafka_toppar_producer_serve(rd_kafka_broker_t *rkb,
                            RD_KAFKAP_STR_PR(rktp->rktp_rkt->rkt_topic),
                            rktp->rktp_partition);
         } else if (produce_enabled > 0) {
-
-                rd_rkb_dbg(rkb, BATCHCOL, "BATCHCOL",
-                           "produce_enabled, going to try to move messages from partition q to broker xmit");
                 /* Move messages from locked partition produce queue
                  * to broker-local xmit queue. */
                 if ((move_cnt = rd_kafka_msgq_len(&rktp->rktp_msgq)) > 0) {
-
                         rd_kafka_msgq_insert_msgq(
                             &rktp->rktp_xmit_msgq, &rktp->rktp_msgq,
                             rktp->rktp_rkt->rkt_conf.msg_order_cmp);
@@ -4622,33 +4602,27 @@ static int rd_kafka_toppar_producer_serve(rd_kafka_broker_t *rkb,
 
 
         /* Check if allowed to create and enqueue a ProduceRequest */
+        int msgq_len  = rd_kafka_msgq_len(&rktp->rktp_msgq);
+        int xmitq_len = rd_kafka_msgq_len(&rktp->rktp_xmit_msgq);
+        if (msgq_len + xmitq_len == 0)
+                return 0;
+
         if (!produce_enabled) {
                 rd_rkb_dbg(rkb, QUEUE, "TOPPAR",
                            "%.*s [%" PRId32
                            "] produce disabled: msgq=%d xmitq=%d "
-                           "outbufs=%d waitresps=%d state=%s",
+                           "outbufs=%d threshold=%d waitresps=%d state=%s",
                            RD_KAFKAP_STR_PR(rktp->rktp_rkt->rkt_topic),
-                           rktp->rktp_partition,
-                           rd_kafka_msgq_len(&rktp->rktp_msgq),
-                           rd_kafka_msgq_len(&rktp->rktp_xmit_msgq),
+                           rktp->rktp_partition, msgq_len, xmitq_len,
                            rd_atomic32_get(&rkb->rkb_outbufs.rkbq_cnt),
+                           rkb->rkb_rk->rk_conf.queue_backpressure_thres,
                            rd_kafka_bufq_cnt(&rkb->rkb_waitresps),
                            rd_kafka_broker_state_names[rkb->rkb_state]);
                 return 0;
         }
 
-        r = rd_kafka_msgq_len(&rktp->rktp_xmit_msgq);
+        r = xmitq_len;
         if (r == 0) {
-                rd_rkb_dbg(rkb, QUEUE, "TOPPAR",
-                           "%.*s [%" PRId32
-                           "] no xmit messages: msgq=%d "
-                           "outbufs=%d waitresps=%d state=%s",
-                           RD_KAFKAP_STR_PR(rktp->rktp_rkt->rkt_topic),
-                           rktp->rktp_partition,
-                           rd_kafka_msgq_len(&rktp->rktp_msgq),
-                           rd_atomic32_get(&rkb->rkb_outbufs.rkbq_cnt),
-                           rd_kafka_bufq_cnt(&rkb->rkb_waitresps),
-                           rd_kafka_broker_state_names[rkb->rkb_state]);
                 return 0;
         }
 
