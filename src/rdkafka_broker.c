@@ -540,12 +540,6 @@ int rd_kafka_broker_batch_collector_maybe_send(rd_kafka_broker_t *rkb,
         rd_bool_t should_send = rd_false;
         const char *reason = NULL;
 
-        if (rd_kafka_broker_outbufs_space(rkb) == 0) {
-            rd_rkb_dbg(rkb, BATCHCOL, "BATCHCOL",
-                    "Outbufs full, exiting until next-wakeup");
-            return 0;
-        }
-
         /* Calculate current state by scanning partitions */
         int active_partition_cnt = 0;
         int64_t total_bytes = 0;
@@ -577,6 +571,20 @@ int rd_kafka_broker_batch_collector_maybe_send(rd_kafka_broker_t *rkb,
         /* Don't send until broker is fully connected with API versions */
         if (rkb->rkb_state != RD_KAFKA_BROKER_STATE_UP)
                 return 0;
+
+        /* Even when backpressured we must keep the collector state up to date,
+         * otherwise the broker thread may not schedule an appropriate wakeup
+         * once backpressure clears, which can lead to broker thread dormancy
+         * and producer starvation. That's why we don't check outbufs space
+         * until after we calculate the collector state */
+        if (rd_kafka_broker_outbufs_space(rkb) == 0) {
+                rd_rkb_dbg(rkb, BATCHCOL, "BATCHCOL",
+                           "Outbufs full, exiting until next-wakeup "
+                           "(outbufs=%d threshold=%d)",
+                           rd_kafka_bufq_cnt(&rkb->rkb_outbufs),
+                           conf->queue_backpressure_thres);
+                return 0;
+        }
 
         /* Priority 1: Flush requested */
         if (flushing) {
@@ -2484,6 +2492,9 @@ static rd_kafka_buf_t *rd_kafka_waitresp_find(rd_kafka_broker_t *rkb,
 /**
  * Map a response message to a request.
  */
+static const char *rd_kafka_buf_metadata_log_suffix(const rd_kafka_buf_t *rkbuf,
+                                                    char *dst,
+                                                    size_t dst_sz);
 static int rd_kafka_req_response(rd_kafka_broker_t *rkb,
                                  rd_kafka_buf_t *rkbuf) {
         rd_kafka_buf_t *req   = NULL;
@@ -2509,13 +2520,18 @@ static int rd_kafka_req_response(rd_kafka_broker_t *rkb,
                 return -1;
         }
 
-        rd_rkb_dbg(rkb, PROTOCOL, "RECV",
-                   "Received %sResponse (v%hd, %" PRIusz
-                   " bytes, CorrId %" PRId32 ", rtt %.2fms)",
-                   rd_kafka_ApiKey2str(req->rkbuf_reqhdr.ApiKey),
-                   req->rkbuf_reqhdr.ApiVersion, rkbuf->rkbuf_totlen,
-                   rkbuf->rkbuf_reshdr.CorrId,
-                   (float)req->rkbuf_ts_sent / 1000.0f);
+        if (rd_rkb_is_dbg(rkb, PROTOCOL)) {
+                char md_info[256];
+                const char *md_suffix = rd_kafka_buf_metadata_log_suffix(
+                    req, md_info, sizeof(md_info));
+                rd_rkb_dbg(rkb, PROTOCOL, "RECV",
+                           "Received %sResponse (v%hd, %" PRIusz
+                           " bytes, CorrId %" PRId32 ", rtt %.2fms)%s",
+                           rd_kafka_ApiKey2str(req->rkbuf_reqhdr.ApiKey),
+                           req->rkbuf_reqhdr.ApiVersion, rkbuf->rkbuf_totlen,
+                           rkbuf->rkbuf_reshdr.CorrId,
+                           (float)req->rkbuf_ts_sent / 1000.0f, md_suffix);
+        }
 
         /* Copy request's header and certain flags to response object's
          * reqhdr for convenience. */
@@ -3302,6 +3318,41 @@ static RD_INLINE int rd_kafka_broker_request_supported(rd_kafka_broker_t *rkb,
                rkbuf->rkbuf_reqhdr.ApiVersion <= ret->MaxVer;
 }
 
+static const char *rd_kafka_buf_metadata_log_suffix(const rd_kafka_buf_t *rkbuf,
+                                                    char *dst,
+                                                    size_t dst_sz) {
+        const char *reason;
+
+        if (rkbuf->rkbuf_reqhdr.ApiKey != RD_KAFKAP_Metadata)
+                return "";
+
+        reason = rkbuf->rkbuf_u.Metadata.reason;
+        if (!reason)
+                reason = "";
+
+        if (rkbuf->rkbuf_u.Metadata.all_topics) {
+                rd_snprintf(dst, dst_sz, " (reason: %s, all topics)", reason);
+                return dst;
+        }
+
+        if (rkbuf->rkbuf_u.Metadata.topics &&
+            rd_list_cnt(rkbuf->rkbuf_u.Metadata.topics) > 0) {
+                rd_snprintf(dst, dst_sz, " (reason: %s, topics=%d)", reason,
+                            rd_list_cnt(rkbuf->rkbuf_u.Metadata.topics));
+                return dst;
+        }
+
+        if (rkbuf->rkbuf_u.Metadata.topic_ids &&
+            rd_list_cnt(rkbuf->rkbuf_u.Metadata.topic_ids) > 0) {
+                rd_snprintf(dst, dst_sz, " (reason: %s, topic_ids=%d)", reason,
+                            rd_list_cnt(rkbuf->rkbuf_u.Metadata.topic_ids));
+                return dst;
+        }
+
+        rd_snprintf(dst, dst_sz, " (reason: %s, brokers only)", reason);
+        return dst;
+}
+
 
 /**
  * Send queued messages to broker
@@ -3415,28 +3466,43 @@ int rd_kafka_send(rd_kafka_broker_t *rkb) {
 
                 /* Partial send? Continue next time. */
                 if (rd_slice_remains(&rkbuf->rkbuf_reader) > 0) {
-                        rd_rkb_dbg(
-                            rkb, PROTOCOL, "SEND",
-                            "Sent partial %sRequest "
-                            "(v%hd, "
-                            "%" PRIdsz "+%" PRIdsz "/%" PRIusz
-                            " bytes, "
-                            "CorrId %" PRId32 ")",
-                            rd_kafka_ApiKey2str(rkbuf->rkbuf_reqhdr.ApiKey),
-                            rkbuf->rkbuf_reqhdr.ApiVersion, (ssize_t)pre_of, r,
-                            rd_slice_size(&rkbuf->rkbuf_reader),
-                            rkbuf->rkbuf_corrid);
+                        if (rd_rkb_is_dbg(rkb, PROTOCOL)) {
+                                char md_info[256];
+                                const char *md_suffix =
+                                    rd_kafka_buf_metadata_log_suffix(
+                                        rkbuf, md_info, sizeof(md_info));
+                                rd_rkb_dbg(
+                                    rkb, PROTOCOL, "SEND",
+                                    "Sent partial %sRequest "
+                                    "(v%hd, "
+                                    "%" PRIdsz "+%" PRIdsz "/%" PRIusz
+                                    " bytes, "
+                                    "CorrId %" PRId32 ")%s",
+                                    rd_kafka_ApiKey2str(
+                                        rkbuf->rkbuf_reqhdr.ApiKey),
+                                    rkbuf->rkbuf_reqhdr.ApiVersion,
+                                    (ssize_t)pre_of, r,
+                                    rd_slice_size(&rkbuf->rkbuf_reader),
+                                    rkbuf->rkbuf_corrid, md_suffix);
+                        }
                         return 0;
                 }
 
-                rd_rkb_dbg(rkb, PROTOCOL, "SEND",
-                           "Sent %sRequest (v%hd, %" PRIusz " bytes @ %" PRIusz
-                           ", "
-                           "CorrId %" PRId32 ")",
-                           rd_kafka_ApiKey2str(rkbuf->rkbuf_reqhdr.ApiKey),
-                           rkbuf->rkbuf_reqhdr.ApiVersion,
-                           rd_slice_size(&rkbuf->rkbuf_reader), pre_of,
-                           rkbuf->rkbuf_corrid);
+                if (rd_rkb_is_dbg(rkb, PROTOCOL)) {
+                        char md_info[256];
+                        const char *md_suffix =
+                            rd_kafka_buf_metadata_log_suffix(rkbuf, md_info,
+                                                             sizeof(md_info));
+                        rd_rkb_dbg(
+                            rkb, PROTOCOL, "SEND",
+                            "Sent %sRequest (v%hd, %" PRIusz " bytes @ %" PRIusz
+                            ", "
+                            "CorrId %" PRId32 ")%s",
+                            rd_kafka_ApiKey2str(rkbuf->rkbuf_reqhdr.ApiKey),
+                            rkbuf->rkbuf_reqhdr.ApiVersion,
+                            rd_slice_size(&rkbuf->rkbuf_reader), pre_of,
+                            rkbuf->rkbuf_corrid, md_suffix);
+                }
 
                 rd_atomic64_add(&rkb->rkb_c.reqtype[rkbuf->rkbuf_reqhdr.ApiKey],
                                 1);
@@ -4543,20 +4609,23 @@ static int rd_kafka_toppar_producer_serve(rd_kafka_broker_t *rkb,
                                 rktp->rktp_ts_xmit_enq = now;
                 }
 
-                /* With broker-level batching, the collector handles when to send.
-                 * But we still need partition-level timing to wake the broker
-                 * thread so it can add partitions to the collector.
-                 *
-                 * We pass next_wakeup so the broker wakes up when linger expires,
-                 * then the collector decides when to actually send. */
-                batch_ready = rd_kafka_msgq_allow_wakeup_at(
-                    &rktp->rktp_msgq, &rktp->rktp_xmit_msgq, next_wakeup, now,
-                    flushing ? 1 : rd_kafka_adaptive_get_linger_us(rkb),
-                    /* Batch message count threshold */
-                    rkb->rkb_rk->rk_conf.batch_num_messages,
-                    /* Batch total size threshold */
-                    rkb->rkb_rk->rk_conf.batch_size);
         }
+
+        /* Always update wakeup state, even when produce is disabled.
+        * This prevents the signalled flag from getting stuck at true
+        * (e.g., after backpressure disables produce) which would block
+        * producer-side wakeups. In rdkafka_partition.c, we call
+        * rd_kafka_msgq_may_wakeup to decide whether to wakeup the broker
+        * thread, and that will return false if signalled is true.
+        * So it can prevent new messages coming in from waking up the broker.
+        */
+        batch_ready = rd_kafka_msgq_allow_wakeup_at(
+            &rktp->rktp_msgq, &rktp->rktp_xmit_msgq, next_wakeup, now,
+            flushing ? 1 : rd_kafka_adaptive_get_linger_us(rkb),
+            /* Batch message count threshold */
+            rkb->rkb_rk->rk_conf.batch_num_messages,
+            /* Batch total size threshold */
+            rkb->rkb_rk->rk_conf.batch_size);
 
         rd_kafka_toppar_unlock(rktp);
 
@@ -4720,7 +4789,7 @@ static int rd_kafka_broker_produce_toppars(rd_kafka_broker_t *rkb,
         /* Round-robin serve each toppar. */
         rktp = rkb->rkb_active_toppar_next;
         if (unlikely(!rktp))
-                return 0;
+                goto done;
 
         if (rd_kafka_is_idempotent(rkb->rkb_rk)) {
                 /* Idempotent producer: get a copy of the current pid. */
@@ -4757,7 +4826,7 @@ static int rd_kafka_broker_produce_toppars(rd_kafka_broker_t *rkb,
                         may_send = rd_false;
 
                 if (!may_send && !do_timeout_scan)
-                        return 0;
+                        goto done;
 
                 /* Cache current producer pid */
                 rkb->rkb_produce_pid = pid;
@@ -4822,6 +4891,16 @@ static int rd_kafka_broker_produce_toppars(rd_kafka_broker_t *rkb,
 
         *next_wakeup = ret_next_wakeup;
 
+done:
+        rd_rkb_dbg(rkb, BROKER, "HEARTBEAT",
+                "outbufs=%d/%d waitresps=%d collector_parts=%d "
+                "xmit_msgs=%d sent=%d",
+                rd_kafka_bufq_cnt(&rkb->rkb_outbufs),
+                rkb->rkb_rk->rk_conf.queue_backpressure_thres,
+                rd_kafka_bufq_cnt(&rkb->rkb_waitresps),
+                rkb->rkb_batch_collector.rkbbcol_active_partition_cnt,
+                total_msg_cnt,
+                sent_msg_cnt);
         return sent_msg_cnt;
 }
 
