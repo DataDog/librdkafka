@@ -494,55 +494,88 @@ static void rd_kafka_produce_request_alloc_buf(rd_kafka_produce_ctx_t *rkpc) {
  * @brief Write the MessageSet header.
  * @remark Must only be called for MsgVersion 2
  */
+/**
+ * @brief Packed MessageSet v2 header struct for efficient single-write.
+ *
+ * This struct must match the Kafka wire format exactly:
+ * - BaseOffset: 8 bytes
+ * - Length: 4 bytes
+ * - PartitionLeaderEpoch: 4 bytes
+ * - Magic: 1 byte
+ * - CRC: 4 bytes
+ * - Attributes: 2 bytes
+ * - LastOffsetDelta: 4 bytes
+ * - BaseTimestamp: 8 bytes
+ * - MaxTimestamp: 8 bytes
+ * - ProducerId: 8 bytes
+ * - ProducerEpoch: 2 bytes
+ * - BaseSequence: 4 bytes
+ * - RecordCount: 4 bytes
+ * Total: 61 bytes (RD_KAFKAP_MSGSET_V2_SIZE)
+ */
+typedef struct __attribute__((packed)) rd_msgset_v2_hdr_s {
+        int64_t base_offset;            /* Will be updated later */
+        int32_t length;                 /* Will be updated later */
+        int32_t partition_leader_epoch;
+        int8_t  magic;
+        int32_t crc;                    /* Will be updated later */
+        int16_t attributes;             /* Will be updated later */
+        int32_t last_offset_delta;      /* Will be updated later */
+        int64_t base_timestamp;         /* Will be updated later */
+        int64_t max_timestamp;          /* Will be updated later */
+        int64_t producer_id;
+        int16_t producer_epoch;
+        int32_t base_sequence;          /* Will be updated later */
+        int32_t record_count;           /* Will be updated later */
+} rd_msgset_v2_hdr_t;
+
+/* Compile-time assert to ensure struct size matches wire format */
+_Static_assert(sizeof(rd_msgset_v2_hdr_t) == RD_KAFKAP_MSGSET_V2_SIZE,
+               "MessageSet v2 header struct size mismatch");
+
 static void rd_kafka_msgset_writer_write_MessageSet_v2_header(
     rd_kafka_msgset_writer_t *msetw) {
         rd_kafka_buf_t *rkbuf = msetw->msetw_rkbuf;
+        rd_kafka_toppar_t *rktp = msetw->msetw_rktp;
+        rd_msgset_v2_hdr_t hdr;
+
+        rd_rkb_dbg(msetw->msetw_rkb, MSG, "MSETW",
+                   "%s [%" PRId32 "]: v2_header entry buf_len=%" PRIusz,
+                   rktp->rktp_rkt->rkt_topic->str, rktp->rktp_partition,
+                   rd_buf_len(&rkbuf->rkbuf_buf));
 
         rd_kafka_assert(NULL, msetw->msetw_ApiVersion >= 3);
         rd_kafka_assert(NULL, msetw->msetw_MsgVersion == 2);
 
-        /* BaseOffset (also store the offset to the start of
-         * the messageset header fields) */
-        msetw->msetw_of_start = rd_kafka_buf_write_i64(rkbuf, 0);
+        /* Initialize header with default values.
+         * Fields that need updating later are set to 0 or -1 as appropriate. */
+        memset(&hdr, 0, sizeof(hdr));
+        hdr.magic          = msetw->msetw_MsgVersion;
+        hdr.producer_id    = htobe64(msetw->msetw_pid.id);
+        hdr.producer_epoch = htobe16(msetw->msetw_pid.epoch);
+        hdr.base_sequence  = htobe32(-1);  /* Updated later for idempotent */
 
-        /* Length: updated later */
-        rd_kafka_buf_write_i32(rkbuf, 0);
+        rd_rkb_dbg(msetw->msetw_rkb, MSG, "MSETW",
+                   "%s [%" PRId32 "]: v2_header before buf_write (size=%zu)",
+                   rktp->rktp_rkt->rkt_topic->str, rktp->rktp_partition,
+                   sizeof(hdr));
 
-        /* PartitionLeaderEpoch (KIP-101) */
-        rd_kafka_buf_write_i32(rkbuf, 0);
+        /* Write entire header in a single operation (replaces 13 separate writes).
+         * Store the start offset for later field updates. */
+        msetw->msetw_of_start = rd_kafka_buf_write(rkbuf, &hdr, sizeof(hdr));
 
-        /* Magic (MsgVersion) */
-        rd_kafka_buf_write_i8(rkbuf, msetw->msetw_MsgVersion);
+        rd_rkb_dbg(msetw->msetw_rkb, MSG, "MSETW",
+                   "%s [%" PRId32 "]: v2_header after buf_write of_start=%" PRIusz,
+                   rktp->rktp_rkt->rkt_topic->str, rktp->rktp_partition,
+                   msetw->msetw_of_start);
 
-        /* CRC (CRC32C): updated later.
-         * CRC needs to be done after the entire messageset+messages has
-         * been constructed and the following header fields updated. :(
-         * Save the offset for this position. so it can be udpated later. */
-        msetw->msetw_of_CRC = rd_kafka_buf_write_i32(rkbuf, 0);
+        /* Calculate CRC offset for later update */
+        msetw->msetw_of_CRC = msetw->msetw_of_start + RD_KAFKAP_MSGSET_V2_OF_CRC;
 
-        /* Attributes: updated later */
-        rd_kafka_buf_write_i16(rkbuf, 0);
-
-        /* LastOffsetDelta: updated later */
-        rd_kafka_buf_write_i32(rkbuf, 0);
-
-        /* BaseTimestamp: updated later */
-        rd_kafka_buf_write_i64(rkbuf, 0);
-
-        /* MaxTimestamp: updated later */
-        rd_kafka_buf_write_i64(rkbuf, 0);
-
-        /* ProducerId */
-        rd_kafka_buf_write_i64(rkbuf, msetw->msetw_pid.id);
-
-        /* ProducerEpoch */
-        rd_kafka_buf_write_i16(rkbuf, msetw->msetw_pid.epoch);
-
-        /* BaseSequence: updated later in case of Idempotent Producer */
-        rd_kafka_buf_write_i32(rkbuf, -1);
-
-        /* RecordCount: udpated later */
-        rd_kafka_buf_write_i32(rkbuf, 0);
+        rd_rkb_dbg(msetw->msetw_rkb, MSG, "MSETW",
+                   "%s [%" PRId32 "]: v2_header exit of_CRC=%" PRIusz,
+                   rktp->rktp_rkt->rkt_topic->str, rktp->rktp_partition,
+                   msetw->msetw_of_CRC);
 }
 
 
@@ -622,21 +655,44 @@ rd_kafka_produce_finalize_topic_header(rd_kafka_produce_ctx_t *rkpc) {
 static void
 rd_kafka_produce_write_partition_header(rd_kafka_msgset_writer_t *msetw) {
         rd_kafka_buf_t *rkbuf = msetw->msetw_rkbuf;
+        rd_kafka_toppar_t *rktp = msetw->msetw_rktp;
+
+        rd_rkb_dbg(msetw->msetw_rkb, MSG, "MSETW",
+                   "%s [%" PRId32 "]: partition_header entry",
+                   rktp->rktp_rkt->rkt_topic->str, rktp->rktp_partition);
 
         /* Partition */
         rd_kafka_buf_write_i32(rkbuf, msetw->msetw_rktp->rktp_partition);
 
+        rd_rkb_dbg(msetw->msetw_rkb, MSG, "MSETW",
+                   "%s [%" PRId32 "]: partition_header after partition_id write",
+                   rktp->rktp_rkt->rkt_topic->str, rktp->rktp_partition);
+
         /* MessageSetSize: Will be finalized later*/
         msetw->msetw_of_MessageSetSize = rd_kafka_buf_write_arraycnt_pos(rkbuf);
 
+        rd_rkb_dbg(msetw->msetw_rkb, MSG, "MSETW",
+                   "%s [%" PRId32 "]: partition_header after msgsetsize placeholder",
+                   rktp->rktp_rkt->rkt_topic->str, rktp->rktp_partition);
+
         if (msetw->msetw_MsgVersion == 2) {
+                rd_rkb_dbg(msetw->msetw_rkb, MSG, "MSETW",
+                           "%s [%" PRId32 "]: partition_header before v2_header",
+                           rktp->rktp_rkt->rkt_topic->str, rktp->rktp_partition);
                 /* MessageSet v2 header */
                 rd_kafka_msgset_writer_write_MessageSet_v2_header(msetw);
+                rd_rkb_dbg(msetw->msetw_rkb, MSG, "MSETW",
+                           "%s [%" PRId32 "]: partition_header after v2_header",
+                           rktp->rktp_rkt->rkt_topic->str, rktp->rktp_partition);
                 msetw->msetw_MessageSetSize = RD_KAFKAP_MSGSET_V2_SIZE;
         } else {
                 /* Older MessageSet */
                 msetw->msetw_MessageSetSize = RD_KAFKAP_MSGSET_V0_SIZE;
         }
+
+        rd_rkb_dbg(msetw->msetw_rkb, MSG, "MSETW",
+                   "%s [%" PRId32 "]: partition_header exit",
+                   rktp->rktp_rkt->rkt_topic->str, rktp->rktp_partition);
 }
 
 
@@ -660,6 +716,10 @@ static int rd_kafka_msgset_writer_init(rd_kafka_msgset_writer_t *msetw,
                                        rd_kafka_produce_ctx_t *rkpc) {
         int msgcnt = rd_kafka_msgq_len(
             rkmq);  // TODO(xvandish): is this the right thing to use?
+
+        rd_rkb_dbg(rkb, MSG, "MSETW",
+                   "%s [%" PRId32 "]: msetw_init entry msgcnt=%d",
+                   rktp->rktp_rkt->rkt_topic->str, rktp->rktp_partition, msgcnt);
 
         if (msgcnt == 0)
                 return 0;
@@ -686,8 +746,16 @@ static int rd_kafka_msgset_writer_init(rd_kafka_msgset_writer_t *msetw,
         /* Select topic level message set configuration to use */
         rd_kafka_msgset_writer_select_caps(msetw);
 
+        rd_rkb_dbg(rkb, MSG, "MSETW",
+                   "%s [%" PRId32 "]: msetw_init before partition_header",
+                   rktp->rktp_rkt->rkt_topic->str, rktp->rktp_partition);
+
         /* Write the partition header */
         rd_kafka_produce_write_partition_header(msetw);
+
+        rd_rkb_dbg(rkb, MSG, "MSETW",
+                   "%s [%" PRId32 "]: msetw_init after partition_header",
+                   rktp->rktp_rkt->rkt_topic->str, rktp->rktp_partition);
 
 
         /* The current buffer position is now where the first message
@@ -1015,6 +1083,11 @@ static int rd_kafka_msgset_writer_write_msgq(rd_kafka_msgset_writer_t *msetw,
                 rd_kafka_msgbatch_set_first_msg(msetw->msetw_batch, rkm);
         }
 
+        rd_rkb_dbg(rkb, MSG, "MSETW",
+                   "%s [%" PRId32 "]: write_msgq entry: qlen=%d msgcntmax=%d",
+                   rktp->rktp_rkt->rkt_topic->str, rktp->rktp_partition,
+                   rd_kafka_msgq_len(rkmq), msetw->msetw_msgcntmax);
+
         /*
          * Write as many messages as possible until buffer is full
          * or limit reached.
@@ -1086,12 +1159,21 @@ static int rd_kafka_msgset_writer_write_msgq(rd_kafka_msgset_writer_t *msetw,
                         MaxTimestamp = rkm->rkm_timestamp;
 
                 /* Write message to buffer */
+                rd_rkb_dbg(rkb, MSG, "MSETW",
+                           "%s [%" PRId32 "]: write_msg iter=%d len=%" PRIusz,
+                           rktp->rktp_rkt->rkt_topic->str, rktp->rktp_partition,
+                           msgcnt, len);
                 len += rd_kafka_msgset_writer_write_msg(msetw, rkm, msgcnt, 0,
                                                         NULL);
 
                 msgcnt++;
 
         } while ((rkm = TAILQ_FIRST(&rkmq->rkmq_msgs)));
+
+        rd_rkb_dbg(rkb, MSG, "MSETW",
+                   "%s [%" PRId32 "]: write_msgq exit: msgcnt=%d qlen=%d",
+                   rktp->rktp_rkt->rkt_topic->str, rktp->rktp_partition,
+                   msgcnt, rd_kafka_msgq_len(rkmq));
 
         msetw->msetw_MaxTimestamp = MaxTimestamp;
 
@@ -1566,6 +1648,10 @@ rd_kafka_msgset_writer_finalize(rd_kafka_msgset_writer_t *msetw,
         size_t len;
         int cnt;
 
+        rd_rkb_dbg(msetw->msetw_rkb, MSG, "MSETW",
+                   "%s [%" PRId32 "]: finalize entry",
+                   rktp->rktp_rkt->rkt_topic->str, rktp->rktp_partition);
+
         /* No messages added, bail out early. */
         if (unlikely((cnt = rd_kafka_msgq_len(&rkbuf->rkbuf_batch.msgq)) ==
                      0)) {
@@ -1587,8 +1673,14 @@ rd_kafka_msgset_writer_finalize(rd_kafka_msgset_writer_t *msetw,
 
         /* Compress the message set */
         if (msetw->msetw_compression) {
+                rd_rkb_dbg(msetw->msetw_rkb, MSG, "MSETW",
+                           "%s [%" PRId32 "]: compressing (len=%" PRIusz ")",
+                           rktp->rktp_rkt->rkt_topic->str, rktp->rktp_partition, len);
                 if (rd_kafka_msgset_writer_compress(msetw, &len) == -1)
                         msetw->msetw_compression = 0;
+                rd_rkb_dbg(msetw->msetw_rkb, MSG, "MSETW",
+                           "%s [%" PRId32 "]: compress done (len=%" PRIusz ")",
+                           rktp->rktp_rkt->rkt_topic->str, rktp->rktp_partition, len);
         }
 
         msetw->msetw_messages_len = len;
