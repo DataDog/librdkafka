@@ -449,6 +449,7 @@ size_t rd_buf_write(rd_buf_t *rbuf, const void *payload, size_t size) {
         size_t remains = size;
         size_t initial_absof;
         const char *psrc = (const char *)payload;
+        int iter_count   = 0;
 
         initial_absof = rbuf->rbuf_len;
 
@@ -465,6 +466,24 @@ size_t rd_buf_write(rd_buf_t *rbuf, const void *payload, size_t size) {
                 rd_dassert(wlen > 0);
                 rd_dassert(seg->seg_p + seg->seg_of <= (char *)p &&
                            (char *)p < seg->seg_p + seg->seg_size);
+
+                /* Defensive check: prevent infinite loop if no writable space.
+                 * This can happen if all segments from wpos are read-only. */
+                if (unlikely(wlen == 0)) {
+                        /* Force allocate a new writable segment */
+                        rd_buf_alloc_segment(rbuf, remains, 0);
+                        iter_count++;
+                        /* Safety limit to prevent infinite loop */
+                        if (iter_count > 1000) {
+                                RD_BUG("rd_buf_write: infinite loop detected, "
+                                       "remains=%" PRIusz
+                                       " segremains=%" PRIusz
+                                       " wpos=%p seg=%p",
+                                       remains, segremains,
+                                       (void *)rbuf->rbuf_wpos, (void *)seg);
+                        }
+                        continue;
+                }
 
                 if (payload) {
                         memcpy(p, psrc, wlen);
