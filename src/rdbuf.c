@@ -470,9 +470,18 @@ size_t rd_buf_write(rd_buf_t *rbuf, const void *payload, size_t size) {
                 /* Defensive check: prevent infinite loop if no writable space.
                  * This can happen if all segments from wpos are read-only. */
                 if (unlikely(wlen == 0)) {
+                        iter_count++;
+                        /* Log when we need to allocate due to no writable space */
+                        fprintf(stderr,
+                                "rd_buf_write: no writable space, allocating "
+                                "new segment (iter=%d remains=%" PRIusz
+                                " segremains=%" PRIusz " wpos=%p seg=%p "
+                                "seg_flags=0x%x)\n",
+                                iter_count, remains, segremains,
+                                (void *)rbuf->rbuf_wpos, (void *)seg,
+                                seg ? seg->seg_flags : 0);
                         /* Force allocate a new writable segment */
                         rd_buf_alloc_segment(rbuf, remains, 0);
-                        iter_count++;
                         /* Safety limit to prevent infinite loop */
                         if (iter_count > 1000) {
                                 RD_BUG("rd_buf_write: infinite loop detected, "
