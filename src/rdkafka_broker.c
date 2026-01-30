@@ -209,6 +209,12 @@ rd_kafka_broker_produce_batch_send(produce_batch_t *batch,
         rd_kafka_produce_topic_bucket_t *bucket;
         int i;
         int ret = 0;
+        const int expected_topic_cnt = batch->batch_calculator.rkpca_topic_cnt;
+        const int expected_partition_cnt =
+            batch->batch_calculator.rkpca_partition_cnt;
+        const int expected_message_cnt = batch->batch_calculator.rkpca_message_cnt;
+        const size_t expected_message_bytes =
+            batch->batch_calculator.rkpca_message_size;
 
 
         if (unlikely(!batch->batch_initialized)) {
@@ -224,6 +230,11 @@ rd_kafka_broker_produce_batch_send(produce_batch_t *batch,
                 return 0;
         }
 
+        rd_rkb_dbg(rkb, BATCHCOL, "BATCHCOL",
+                   "produce_batch_send: topics=%d partitions=%d messages=%d bytes=%" PRIusz,
+                   rd_list_cnt(&topic_buckets), expected_partition_cnt,
+                   expected_message_cnt, expected_message_bytes);
+
         if (unlikely(!rd_kafka_ProduceRequest_init(
                         &ctx, rkb,
                         rkb->rkb_produce_pid,
@@ -237,11 +248,34 @@ rd_kafka_broker_produce_batch_send(produce_batch_t *batch,
                 return 0;
         }
 
+        if (unlikely(expected_topic_cnt != rd_list_cnt(&topic_buckets))) {
+                rd_rkb_dbg(rkb, BATCHCOL, "BATCHCOL",
+                           "produce_batch_send: calculator topic_cnt=%d "
+                           "but buckets topic_cnt=%d",
+                           expected_topic_cnt, rd_list_cnt(&topic_buckets));
+        }
+
+        int appended_partitions = 0;
         RD_LIST_FOREACH(bucket, &topic_buckets, i) {
                 rd_kafka_toppar_t *bucket_rktp;
                 int j;
 
                 RD_LIST_FOREACH(bucket_rktp, &bucket->toppars, j) {
+                        appended_partitions++;
+                        if (appended_partitions == 1 ||
+                            appended_partitions % 25 == 0 ||
+                            appended_partitions == expected_partition_cnt) {
+                                rd_rkb_dbg(
+                                    rkb, BATCHCOL, "BATCHCOL",
+                                    "produce_batch_send: append %d/%d: %s [%" PRId32
+                                    "] xmitq=%d xmit_bytes=%" PRIusz,
+                                    appended_partitions, expected_partition_cnt,
+                                    bucket_rktp->rktp_rkt->rkt_topic->str,
+                                    bucket_rktp->rktp_partition,
+                                    rd_kafka_msgq_len(&bucket_rktp->rktp_xmit_msgq),
+                                    rd_kafka_msgq_size(
+                                        &bucket_rktp->rktp_xmit_msgq));
+                        }
                         if (unlikely(!rd_kafka_ProduceRequest_append(
                                 &ctx, bucket_rktp)))
                                 goto finalize;
@@ -249,6 +283,14 @@ rd_kafka_broker_produce_batch_send(produce_batch_t *batch,
         }
 
 finalize:
+        if (unlikely(appended_partitions != expected_partition_cnt)) {
+                rd_rkb_dbg(
+                    rkb, BATCHCOL, "BATCHCOL",
+                    "produce_batch_send: finalize after %d/%d partitions "
+                    "(calculator messages=%d bytes=%" PRIusz ")",
+                    appended_partitions, expected_partition_cnt,
+                    expected_message_cnt, expected_message_bytes);
+        }
         ret = rd_kafka_ProduceRequest_finalize(&ctx);
         rd_list_destroy(&topic_buckets);
 
@@ -466,6 +508,10 @@ int rd_kafka_broker_batch_collector_send(rd_kafka_broker_t *rkb) {
                         next_rktp = TAILQ_FIRST(&col->rkbbcol_toppars);
 
                 if (rd_kafka_msgq_len(&rktp->rktp_xmit_msgq) == 0) {
+                    /* Move to next, but stop if we've wrapped back to start */
+                    if (next_rktp == start_rktp)
+                        break;
+
                     rktp = next_rktp;
                     continue;
                 }
@@ -500,7 +546,7 @@ int rd_kafka_broker_batch_collector_send(rd_kafka_broker_t *rkb) {
 
                 /* Move to next, but stop if we've wrapped back to start */
                 if (next_rktp == start_rktp)
-                        break;
+                    break;
                 rktp = next_rktp;
         }
 
