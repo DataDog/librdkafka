@@ -5489,14 +5489,15 @@ int rd_kafka_ProduceRequest_finalize(rd_kafka_produce_ctx_t *rkpc) {
         rd_rkb_dbg(rkpc->rkpc_rkb, MSG, "PRODUCE",
                    "ProduceRequest_finalize: topic_cnt=%d toppar_cnt=%d message_cnt=%d",
                    rkprc->rkprc_topic_cnt, rkprc->rkprc_toppar_cnt, rkpc->rkpc_appended_message_cnt);
-        rd_rkb_dbg(rkpc->rkpc_rkb, BATCHCOL, "BATCHCOL",
-                "ProduceRequest: partitions=%d messages=%d size=%zu bytes",
-                rkprc->rkprc_toppar_cnt, rkpc->rkpc_appended_message_cnt, req_size);
 
         /* Track per-broker request-level averages. */
         req_size = rkbuf->rkbuf_totlen;
         if (req_size == 0)
                 req_size = rd_buf_write_pos(&rkbuf->rkbuf_buf);
+        rd_rkb_dbg(rkpc->rkpc_rkb, BATCHCOL, "BATCHCOL",
+                   "ProduceRequest: partitions=%d messages=%d size=%zu bytes",
+                   rkprc->rkprc_toppar_cnt, rkpc->rkpc_appended_message_cnt,
+                   req_size);
         if (unlikely(req_size == 0)) {
                 rd_rkb_dbg(rkpc->rkpc_rkb, MSG, "PRODUCE",
                            "ProduceRequest_finalize: zero req_size, "
