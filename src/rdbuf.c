@@ -40,6 +40,25 @@ rd_buf_get_writable0(rd_buf_t *rbuf, rd_segment_t **segp, void **p);
 
 
 /**
+ * @returns writable bytes from wpos forward (reachable by rd_buf_get_writable0).
+ * @param min_size Stop early once we have at least this many bytes (0 = scan all).
+ */
+static size_t rd_buf_write_remains_forward(const rd_buf_t *rbuf,
+                                           size_t min_size) {
+        const rd_segment_t *seg;
+        size_t total = 0;
+
+        for (seg = rbuf->rbuf_wpos; seg; seg = TAILQ_NEXT(seg, seg_link)) {
+                total += rd_segment_write_remains(seg, NULL);
+                if (min_size && total >= min_size)
+                        return total;
+        }
+
+        return total;
+}
+
+
+/**
  * @brief Destroy the segment and free its payload.
  *
  * @remark Will NOT unlink from buffer.
@@ -199,7 +218,8 @@ void rd_buf_write_ensure_contig(rd_buf_t *rbuf, size_t size) {
  */
 void rd_buf_write_ensure(rd_buf_t *rbuf, size_t min_size, size_t max_size) {
         size_t remains;
-        while ((remains = rd_buf_write_remains(rbuf)) < min_size)
+        while ((remains = rd_buf_write_remains_forward(rbuf, min_size)) <
+               min_size)
                 rd_buf_alloc_segment(rbuf, min_size - remains,
                                      max_size ? max_size - remains : 0);
 }
@@ -468,13 +488,18 @@ size_t rd_buf_write(rd_buf_t *rbuf, const void *payload, size_t size) {
                            (char *)p < seg->seg_p + seg->seg_size);
 
                 /* Defensive check: prevent infinite loop if no writable space.
-                 * This can happen if all segments from wpos are read-only. */
+                 * This should not happen after the rd_buf_write_remains_forward()
+                 * fix, but kept as a safety net for:
+                 * - Read-only segments from wpos forward
+                 * - Any other edge cases we haven't considered
+                 */
                 if (unlikely(wlen == 0)) {
                         iter_count++;
-                        /* Log when we need to allocate due to no writable space */
+                        /* Log when we need to allocate due to no writable space.
+                         * This is rare and useful for diagnosis. */
                         fprintf(stderr,
-                                "rd_buf_write: no writable space, allocating "
-                                "new segment (iter=%d remains=%" PRIusz
+                                "rd_buf_write: no writable space from wpos, "
+                                "allocating new segment (iter=%d remains=%" PRIusz
                                 " segremains=%" PRIusz " wpos=%p seg=%p "
                                 "seg_flags=0x%x)\n",
                                 iter_count, remains, segremains,
@@ -1899,6 +1924,96 @@ static int do_unittest_erase(void) {
 }
 
 
+/**
+ * @brief Test that rd_buf_write_ensure_contig() followed by writes
+ *        that exhaust the contiguous segment, then additional writes,
+ *        doesn't cause infinite loops due to orphaned capacity.
+ *
+ * This tests the fix for the "orphaned capacity" bug where:
+ * 1. rd_buf_write_ensure_contig() moves wpos forward to a new segment
+ * 2. Remaining capacity in the old segment becomes unreachable
+ * 3. rd_buf_write_remains() (global) counts orphaned capacity
+ * 4. rd_buf_get_writable0() (forward-only) can't reach it
+ * 5. Without the fix, rd_buf_write() would infinite loop
+ */
+static int do_unittest_ensure_contig_orphan(void) {
+        rd_buf_t b;
+        char data[256];
+        size_t r;
+
+        memset(data, 'A', sizeof(data));
+
+        /* Start with a small pre-allocated buffer */
+        rd_buf_init(&b, 1, 200);
+
+        /* Write 150 bytes to leave 50 bytes remaining in first segment */
+        r = rd_buf_write(&b, data, 150);
+        RD_UT_ASSERT(r == 0, "write() returned position %" PRIusz, r);
+        RD_UT_ASSERT(rd_buf_len(&b) == 150,
+                     "len should be 150, got %" PRIusz, rd_buf_len(&b));
+
+        /* Now request 100 bytes contiguous - more than the 50 remaining.
+         * This will allocate a new segment and move wpos to it,
+         * orphaning the 50 bytes in the first segment. */
+        rd_buf_write_ensure_contig(&b, 100);
+
+        /* Fill the contiguous segment exactly */
+        memset(data, 'B', 100);
+        r = rd_buf_write(&b, data, 100);
+        RD_UT_ASSERT(rd_buf_len(&b) == 250,
+                     "len should be 250, got %" PRIusz, rd_buf_len(&b));
+
+        /* Now the critical test: write 10 more bytes.
+         * Before the fix:
+         *   - rd_buf_write_remains() returns ~50 (orphaned capacity)
+         *   - rd_buf_write_ensure() thinks there's space, doesn't allocate
+         *   - rd_buf_get_writable0() returns 0 (can't reach orphaned space)
+         *   - Infinite loop!
+         * After the fix:
+         *   - rd_buf_write_remains_forward() returns 0 (only counts from wpos)
+         *   - rd_buf_write_ensure() allocates a new segment
+         *   - Write succeeds
+         */
+        memset(data, 'C', 10);
+        r = rd_buf_write(&b, data, 10);
+        RD_UT_ASSERT(rd_buf_len(&b) == 260,
+                     "len should be 260, got %" PRIusz, rd_buf_len(&b));
+
+        /* Verify we can read back the data correctly */
+        {
+                rd_slice_t slice;
+                char buf[260];
+
+                rd_slice_init_full(&slice, &b);
+                r = rd_slice_read(&slice, buf, 260);
+                RD_UT_ASSERT(r == 260, "read returned %" PRIusz, r);
+
+                /* First 150 bytes should be 'A' */
+                for (size_t i = 0; i < 150; i++) {
+                        RD_UT_ASSERT(buf[i] == 'A',
+                                     "byte %zu should be 'A', got '%c'",
+                                     i, buf[i]);
+                }
+                /* Next 100 bytes should be 'B' */
+                for (size_t i = 150; i < 250; i++) {
+                        RD_UT_ASSERT(buf[i] == 'B',
+                                     "byte %zu should be 'B', got '%c'",
+                                     i, buf[i]);
+                }
+                /* Last 10 bytes should be 'C' */
+                for (size_t i = 250; i < 260; i++) {
+                        RD_UT_ASSERT(buf[i] == 'C',
+                                     "byte %zu should be 'C', got '%c'",
+                                     i, buf[i]);
+                }
+        }
+
+        rd_buf_destroy(&b);
+
+        RD_UT_PASS();
+}
+
+
 int unittest_rdbuf(void) {
         int fails = 0;
 
@@ -1907,6 +2022,7 @@ int unittest_rdbuf(void) {
         fails += do_unittest_write_read_payload_correctness();
         fails += do_unittest_write_iov();
         fails += do_unittest_erase();
+        fails += do_unittest_ensure_contig_orphan();
 
         return fails;
 }
