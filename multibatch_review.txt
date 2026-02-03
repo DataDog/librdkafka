@@ -3,16 +3,19 @@ Multibatch review notes
 
 Plan: clear collector membership on broker migration
 ----------------------------------------------------
-1) Add a helper to drop a toppar from a broker collector list:
+DONE - 1) Add a helper to drop a toppar from a broker collector list:
    - TAILQ_REMOVE(&rkb->rkb_batch_collector.rkbbcol_toppars, rktp, rktp_collector_link)
    - rktp->rktp_in_batch_collector = rd_false
-2) Call the helper when a partition leaves a broker:
+   In the “drop from collector” helper (plan step 1), also handle col->rkbbcol_next (if it points at the removed rktp, advance it to TAILQ_NEXT(...) or TAILQ_FIRST(...)) so the round-robin pointer never becomes stale.
+
+DONE - 2) Call the helper when a partition leaves a broker:
    - In rd_kafka_broker.c during PARTITION_LEAVE handling (after removing
      from rkb->rkb_toppars).
+     In the PARTITION_LEAVE site (src/rdkafka_broker.c:3808), call the removal helper before rd_kafka_broker_destroy(rktp->rktp_broker) / rktp->rktp_broker = NULL, so the collector unlink never touches a potentially freed broker-owned list.
 3) Defensive cleanup in rd_kafka_broker_batch_collector_send():
    - If rktp->rktp_broker != rkb, drop it and continue.
-4) Optional: add a debug log when a stale collector entry is removed.
-5) Add a regression test or targeted debug-only assert to ensure re-add works
+DONE - 4) Optional: add a debug log when a stale collector entry is removed.
+DONE - 5) Add a regression test or targeted debug-only assert to ensure re-add works
    after migration (if a unit test is feasible).
 
 Findings (current review)
@@ -21,11 +24,11 @@ Findings (current review)
    - rktp_in_batch_collector is set but never cleared, which can strand a
      partition on its new broker and keep a stale pointer in the old broker.
      (src/rdkafka_broker.c:262, src/rdkafka_broker.c:3808)
-2) Calculator undercounts zero-copy messages:
+DONE - 2) Calculator undercounts zero-copy messages:
    - Uses msg_copy_max_size to cap payload bytes; large messages can exceed
      max_msg_size even if the calculator allows them.
      (src/rdkafka_msgset_writer.c:1697, src/rdkafka_msgset_writer.c:1725)
-3) Calculator undercounts partition array overhead:
+DONE - 3) Calculator undercounts partition array overhead:
    - Adds "+1" for the partition array length; underestimates size for large
      partition counts and flexible versions (varint sizes).
      (src/rdkafka_msgset_writer.c:1686)
@@ -35,16 +38,16 @@ Findings (current review)
 5) broker.batch.max.bytes is approximate:
    - Uses msgq_size only and ignores per-partition/header overhead.
      (src/rdkafka_broker.c:412)
-6) Topic grouping relies on append order:
+DONE - 6) Topic grouping relies on append order:
    - If partitions from the same topic are not contiguous, the request will
      emit multiple topic sections and rkprc_topic_cnt will reflect that.
      If broker responses de-duplicate topic names, parsing can fail.
      (src/rdkafka_msgset_writer.c:1875, src/rdkafka_request.c:3936)
-7) Avg-size calculator can under-estimate for skewed sizes:
+DONE - 7) Avg-size calculator can under-estimate for skewed sizes:
    - Using a per-queue average can let a few large messages push the request
      over max_msg_size.
      (src/rdkafka_msgset_writer.c:1709)
-8) Calculator uses TOPIC_LENGTH_MAX for header sizing:
+DONE 8) Calculator uses TOPIC_LENGTH_MAX for header sizing:
    - Overestimates topic header size and can under-pack requests even when
      the real topic name is short; this reduces packing efficiency.
      (src/rdkafka_msgset_writer.c:318)
@@ -54,7 +57,7 @@ Findings (current review)
    - Hash uses topic pointer + partition id; if partitions are skewed to one
      topic, the distribution may be less uniform than a string hash.
      (src/rdkafka_request.c:149, src/rdkafka_request.c:176)
-10) Topic ordering vs. protocol expectations:
+DONE 10) Topic ordering vs. protocol expectations:
    - Multiple topic sections for the same topic are possible if append order
      interleaves partitions. This relies on the broker returning the same
      topic count and ordering as sent; if not, parse errors are possible.
