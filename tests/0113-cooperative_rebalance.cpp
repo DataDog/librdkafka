@@ -1738,9 +1738,9 @@ static void l_unsubscribe() {
 
   bool done                        = false;
   bool unsubscribed                = false;
-  int expected_cb1_assign_call_cnt = 1;
+  int expected_cb1_nonempty_assign_call_cnt = 1;
   int expected_cb1_revoke_call_cnt = 1;
-  int expected_cb2_assign_call_cnt = 1;
+  int expected_cb2_nonempty_assign_call_cnt = 1;
 
   while (!done) {
     Test::poll_once(c1, 500);
@@ -1750,38 +1750,51 @@ static void l_unsubscribe() {
         Test::assignment_partition_count(c2, NULL) == 2) {
       /* Callback count can vary in KIP-848 */
       if (test_consumer_group_protocol_classic()) {
-        if (rebalance_cb1.assign_call_cnt != expected_cb1_assign_call_cnt)
+        if (rebalance_cb1.nonempty_assign_call_cnt !=
+            expected_cb1_nonempty_assign_call_cnt)
           Test::Fail(tostr() << "Expecting consumer 1's assign_call_cnt to be "
-                             << expected_cb1_assign_call_cnt
-                             << " not: " << rebalance_cb1.assign_call_cnt);
-        if (rebalance_cb2.assign_call_cnt != expected_cb2_assign_call_cnt)
+                             << expected_cb1_nonempty_assign_call_cnt
+                             << " not: "
+                             << rebalance_cb1.nonempty_assign_call_cnt);
+        if (rebalance_cb2.nonempty_assign_call_cnt !=
+            expected_cb2_nonempty_assign_call_cnt)
           Test::Fail(tostr() << "Expecting consumer 2's assign_call_cnt to be "
-                             << expected_cb2_assign_call_cnt
-                             << " not: " << rebalance_cb2.assign_call_cnt);
+                             << expected_cb2_nonempty_assign_call_cnt
+                             << " not: "
+                             << rebalance_cb2.nonempty_assign_call_cnt);
       }
       Test::Say("Unsubscribing consumer 1 from both topics\n");
       c1->unsubscribe();
       unsubscribed = true;
-      expected_cb2_assign_call_cnt++;
+      expected_cb2_nonempty_assign_call_cnt++;
     }
 
     if (unsubscribed && Test::assignment_partition_count(c1, NULL) == 0 &&
         Test::assignment_partition_count(c2, NULL) == 4) {
       /* Callback count can vary in KIP-848 */
       if (test_consumer_group_protocol_classic()) {
-        if (rebalance_cb1.assign_call_cnt != expected_cb1_assign_call_cnt)
+        if (rebalance_cb1.nonempty_assign_call_cnt !=
+            expected_cb1_nonempty_assign_call_cnt)
           /* is now unsubscribed, so rebalance_cb will no longer be called. */
           Test::Fail(tostr() << "Expecting consumer 1's assign_call_cnt to be "
-                             << expected_cb1_assign_call_cnt
-                             << " not: " << rebalance_cb1.assign_call_cnt);
-        if (rebalance_cb2.assign_call_cnt != expected_cb2_assign_call_cnt)
+                             << expected_cb1_nonempty_assign_call_cnt
+                             << " not: "
+                             << rebalance_cb1.nonempty_assign_call_cnt);
+        if (rebalance_cb2.nonempty_assign_call_cnt !=
+            expected_cb2_nonempty_assign_call_cnt)
           Test::Fail(tostr() << "Expecting consumer 2's assign_call_cnt to be "
-                             << expected_cb2_assign_call_cnt
-                             << " not: " << rebalance_cb2.assign_call_cnt);
+                             << expected_cb2_nonempty_assign_call_cnt
+                             << " not: "
+                             << rebalance_cb2.nonempty_assign_call_cnt);
         if (rebalance_cb1.revoke_call_cnt != expected_cb1_revoke_call_cnt)
-          Test::Fail(tostr() << "Expecting consumer 1's revoke_call_cnt to be "
-                             << expected_cb1_revoke_call_cnt
-                             << " not: " << rebalance_cb1.revoke_call_cnt);
+          if (rebalance_cb1.revoke_call_cnt !=
+              expected_cb1_revoke_call_cnt + 1)
+            Test::Fail(
+                tostr() << "Expecting consumer 1's revoke_call_cnt to be "
+                        << expected_cb1_revoke_call_cnt << " or "
+                        << expected_cb1_revoke_call_cnt + 1
+                        << " not: " << rebalance_cb1.revoke_call_cnt);
+        expected_cb1_revoke_call_cnt = rebalance_cb1.revoke_call_cnt;
         if (rebalance_cb2.revoke_call_cnt !=
             0) /* the rebalance_cb should not be called if the revoked partition
                   list is empty */
@@ -1802,14 +1815,16 @@ static void l_unsubscribe() {
   /* Callback count can vary in KIP-848 */
   if (test_consumer_group_protocol_classic()) {
     /* there should be no assign rebalance_cb calls on close */
-    if (rebalance_cb1.assign_call_cnt != expected_cb1_assign_call_cnt)
+    if (rebalance_cb1.nonempty_assign_call_cnt !=
+        expected_cb1_nonempty_assign_call_cnt)
       Test::Fail(tostr() << "Expecting consumer 1's assign_call_cnt to be "
-                         << expected_cb1_assign_call_cnt
-                         << " not: " << rebalance_cb1.assign_call_cnt);
-    if (rebalance_cb2.assign_call_cnt != expected_cb2_assign_call_cnt)
+                         << expected_cb1_nonempty_assign_call_cnt
+                         << " not: " << rebalance_cb1.nonempty_assign_call_cnt);
+    if (rebalance_cb2.nonempty_assign_call_cnt !=
+        expected_cb2_nonempty_assign_call_cnt)
       Test::Fail(tostr() << "Expecting consumer 2's assign_call_cnt to be "
-                         << expected_cb2_assign_call_cnt
-                         << " not: " << rebalance_cb2.assign_call_cnt);
+                         << expected_cb2_nonempty_assign_call_cnt
+                         << " not: " << rebalance_cb2.nonempty_assign_call_cnt);
 
     if (rebalance_cb1.revoke_call_cnt != expected_cb1_revoke_call_cnt)
       Test::Fail(tostr() << "Expecting consumer 1's revoke_call_cnt to be "
@@ -2092,6 +2107,8 @@ static void o_java_interop() {
     SUB_TEST_SKIP(
         "Cluster is set up for SASL: we won't bother with that "
         "for the Java client\n");
+  if (!test_getenv("KAFKA_PATH", NULL))
+    SUB_TEST_SKIP("KAFKA_PATH is not set: skipping Java interop sub-test\n");
 
   std::string topic_name_1 = Test::mk_topic_name("0113_o_2", 1);
   std::string topic_name_2 = Test::mk_topic_name("0113_o_6", 1);

@@ -644,6 +644,22 @@ rd_kafka_produce_finalize_topic_header(rd_kafka_produce_ctx_t *rkpc) {
         rd_kafka_buf_write_tags_empty(rkbuf);
 }
 
+static RD_INLINE void
+rd_kafka_produce_ctx_clear_active_topic(rd_kafka_produce_ctx_t *rkpc) {
+        rkpc->rkpc_active_topic                      = NULL;
+        rkpc->rkpc_active_topic_partition_cnt        = 0;
+        rkpc->rkpc_active_topic_partition_cnt_offset = 0;
+}
+
+static RD_INLINE void
+rd_kafka_produce_ctx_rollback_new_topic_header(rd_kafka_produce_ctx_t *rkpc,
+                                               size_t new_topic_header_offset) {
+        rd_buf_write_seek(&rkpc->rkpc_buf->rkbuf_buf, new_topic_header_offset);
+        if (rkpc->rkpc_appended_topic_cnt > 0)
+                --rkpc->rkpc_appended_topic_cnt;
+        rd_kafka_produce_ctx_clear_active_topic(rkpc);
+}
+
 /**
  * @brief Write ProduceRequest partition header.
  */
@@ -2027,6 +2043,8 @@ int rd_kafka_produce_ctx_append_toppar(rd_kafka_produce_ctx_t *rkpc,
                                        size_t *appended_msg_bytes) {
         rd_kafka_msgq_t msgq;
         rd_kafka_msgq_init(&msgq);
+        rd_bool_t wrote_new_topic_header = rd_false;
+        size_t new_topic_header_offset  = 0;
 
 
         /* early out if there are no messages to append */
@@ -2042,6 +2060,11 @@ int rd_kafka_produce_ctx_append_toppar(rd_kafka_produce_ctx_t *rkpc,
                 if (rkpc->rkpc_active_topic) {
                         rd_kafka_produce_finalize_topic_header(rkpc);
                 }
+
+                wrote_new_topic_header =
+                    rd_true; /* may need to roll back on 0-msg append */
+                new_topic_header_offset =
+                    rd_buf_write_pos(&rkpc->rkpc_buf->rkbuf_buf);
 
                 /* Set up and write new topic header */
                 rkpc->rkpc_active_topic               = rktp->rktp_rkt;
@@ -2080,12 +2103,22 @@ int rd_kafka_produce_ctx_append_toppar(rd_kafka_produce_ctx_t *rkpc,
                 &msetw, rkpc->rkpc_rkb, rktp, &rktp->rktp_xmit_msgq, rkpc->rkpc_pid,
                 epoch_base_msgid,
                 rkpc))) {
+                if (wrote_new_topic_header &&
+                    rkpc->rkpc_active_topic_partition_cnt == 0) {
+                        rd_kafka_produce_ctx_rollback_new_topic_header(
+                            rkpc, new_topic_header_offset);
+                }
                 return 0;
         }
 
         rd_ts_t first_msg_timeout;
         rd_kafka_msg_t *first_msg = TAILQ_FIRST(&rktp->rktp_xmit_msgq.rkmq_msgs);
         if (unlikely(!first_msg)) {
+                if (wrote_new_topic_header &&
+                    rkpc->rkpc_active_topic_partition_cnt == 0) {
+                        rd_kafka_produce_ctx_rollback_new_topic_header(
+                            rkpc, new_topic_header_offset);
+                }
                 return 0;
         }
         first_msg_timeout = first_msg->rkm_ts_timeout;
@@ -2111,7 +2144,17 @@ int rd_kafka_produce_ctx_append_toppar(rd_kafka_produce_ctx_t *rkpc,
         /* If no messages were written, seek to the beginning of this write
          * so that the context can be finalized */
         if (queue_msg_cnt_start == queue_msg_cnt_end) {
-                rd_buf_write_seek(&rkpc->rkpc_buf->rkbuf_buf, write_offset);
+                /* If we started a new topic but didn't write any messages
+                 * (e.g., first message is in backoff), roll back the topic
+                 * header to avoid leaving an empty topic in the request. */
+                if (wrote_new_topic_header &&
+                    rkpc->rkpc_active_topic_partition_cnt == 0) {
+                        rd_kafka_produce_ctx_rollback_new_topic_header(
+                            rkpc, new_topic_header_offset);
+                } else {
+                        rd_buf_write_seek(&rkpc->rkpc_buf->rkbuf_buf,
+                                          write_offset);
+                }
                 return 0;
         }
 
@@ -2179,12 +2222,17 @@ int rd_kafka_produce_ctx_append_toppar(rd_kafka_produce_ctx_t *rkpc,
  */
 rd_kafka_buf_t *rd_kafka_produce_ctx_finalize(rd_kafka_produce_ctx_t *rkpc) {
         /* if nothing was generated, free the buffer and return NULL */
-        if (unlikely(rkpc->rkpc_appended_topic_cnt == 0)) {
+        /* the topic header can be written, but if messages are in backoff
+         * for all partitions, there might not be any messages written
+         */
+        if (unlikely(rkpc->rkpc_appended_topic_cnt == 0 ||
+                     rkpc->rkpc_appended_message_cnt == 0)) {
                 rd_kafka_buf_destroy(rkpc->rkpc_buf);
                 return NULL;
         }
 
-        rd_kafka_produce_finalize_topic_header(rkpc);
+        if (rkpc->rkpc_active_topic)
+                rd_kafka_produce_finalize_topic_header(rkpc);
         rd_kafka_produce_finalize_produce_header(rkpc);
 
         /* Update features since they may have had more added due to
@@ -2775,6 +2823,347 @@ static int unittest_msgset_writer_exact_limit(void) {
 }
 
 /**
+ * @brief Test: Topic header is rolled back if no partitions are appended.
+ */
+static int unittest_msgset_writer_rollback_empty_topic(void) {
+        rd_kafka_conf_t *conf;
+        rd_kafka_t *rk;
+        rd_kafka_broker_t *rkb;
+        rd_kafka_topic_t *rkt1, *rkt2;
+        rd_kafka_toppar_t *rktp1, *rktp2;
+        rd_kafka_produce_ctx_t ctx;
+        rd_kafka_pid_t pid = {.id = 1, .epoch = 0};
+        int appended_msg_cnt = 0;
+        size_t appended_msg_bytes = 0;
+        rd_kafka_buf_t *rkbuf;
+
+        RD_UT_BEGIN();
+
+        conf = rd_kafka_conf_new();
+        rd_kafka_conf_set(conf, "client.id", "unittest", NULL, 0);
+        rk = rd_kafka_new(RD_KAFKA_PRODUCER, conf, NULL, 0);
+        if (!rk)
+                RD_UT_FAIL("Failed to create producer");
+
+        rkb = rd_kafka_broker_add_logical(rk, "unittest");
+        rd_kafka_broker_lock(rkb);
+        rkb->rkb_features = RD_KAFKA_FEATURE_UNITTEST | RD_KAFKA_FEATURE_ALL;
+        rd_kafka_broker_unlock(rkb);
+
+        rkt1  = rd_kafka_topic_new(rk, "uttopic1", NULL);
+        RD_UT_ASSERT(rkt1, "failed to create topic uttopic1");
+        rktp1 = rd_kafka_toppar_new(rkt1, 0);
+        RD_UT_ASSERT(rktp1, "failed to get toppar for uttopic1");
+        rd_ut_kafka_topic_set_topic_exists(rktp1->rktp_rkt, 1, -1);
+
+        rkt2  = rd_kafka_topic_new(rk, "uttopic2", NULL);
+        RD_UT_ASSERT(rkt2, "failed to create topic uttopic2");
+        rktp2 = rd_kafka_toppar_new(rkt2, 0);
+        RD_UT_ASSERT(rktp2, "failed to get toppar for uttopic2");
+        rd_ut_kafka_topic_set_topic_exists(rktp2->rktp_rkt, 1, -1);
+
+        // put 1 message in topic 1 and 2s queues
+        size_t msg_size = 16;
+        unittest_fill_msgq(&rktp1->rktp_xmit_msgq, 1, msg_size);
+        unittest_fill_msgq(&rktp2->rktp_xmit_msgq, 1, msg_size);
+
+        // force topic 2's message in the future by setting backoff
+        // this simulates a block causing 0 messages to be written
+        rd_kafka_msg_t *first_msg =
+            TAILQ_FIRST(&rktp2->rktp_xmit_msgq.rkmq_msgs);
+        RD_UT_ASSERT(first_msg, "expected message in uttopic2 xmit_msgq");
+        first_msg->rkm_u.producer.ts_backoff = rd_clock() + (10 * 1000 * 1000);
+
+        // build a produce context and append the 1st (good topic)
+        RD_UT_ASSERT(
+            rd_kafka_produce_ctx_init(
+                &ctx, rkb, 2, 2, 10, 1024,
+                rktp1->rktp_rkt->rkt_conf.required_acks,
+                rktp1->rktp_rkt->rkt_conf.request_timeout_ms, pid, NULL),
+            "produce_ctx_init failed");
+        if (!rd_kafka_produce_ctx_append_toppar(&ctx, rktp1, &appended_msg_cnt,
+                                                &appended_msg_bytes)) {
+                rd_kafka_msg_t *msg =
+                    TAILQ_FIRST(&rktp1->rktp_xmit_msgq.rkmq_msgs);
+                RD_UT_FAIL(
+                    "append topic 1 failed: qlen=%d batch.num.messages=%d "
+                    "ctx.ApiVersion=%d ctx.MsgVersion=%d first.ts_backoff=%"
+                    PRId64 " now=%" PRId64,
+                    rd_kafka_msgq_len(&rktp1->rktp_xmit_msgq),
+                    rk->rk_conf.batch_num_messages, ctx.rkpc_api_version,
+                    ctx.rkpc_msg_version,
+                    msg ? (int64_t)msg->rkm_u.producer.ts_backoff : -1,
+                    (int64_t)rd_clock());
+        }
+        RD_UT_ASSERT(appended_msg_cnt > 0,
+                     "expected 1st topic to append messages");
+
+
+        // attempt to append the 2nd (slow topic), this should fail because
+        // of backoff, and 0 messages should be appended, and the topic-header
+        // write should be rolled back as well
+        appended_msg_cnt   = 0;
+        appended_msg_bytes = 0;
+        RD_UT_ASSERT(rd_kafka_produce_ctx_append_toppar(
+                         &ctx, rktp2, &appended_msg_cnt, &appended_msg_bytes) ==
+                         0,
+                     "expected 2nd topic to append 0 messages (backoff)");
+        RD_UT_ASSERT(ctx.rkpc_appended_topic_cnt == 1,
+                     "expected 2nd topic header rollback, topic_cnt=%d",
+                     ctx.rkpc_appended_topic_cnt);
+        RD_UT_ASSERT(ctx.rkpc_appended_message_cnt == 1,
+                     "expected final message_cnt=1, got %d",
+                     ctx.rkpc_appended_message_cnt);
+        RD_UT_ASSERT(ctx.rkpc_appended_message_bytes == msg_size,
+                     "expected final message_bytes=%zu, got %zu",
+                     msg_size, ctx.rkpc_appended_message_bytes);
+
+        // check that we only wrote 1 topic, 1 message, and msg_bytes bytes
+        // to the ProduceRequest
+        rkbuf = rd_kafka_produce_ctx_finalize(&ctx);
+        RD_UT_ASSERT(rkbuf, "expected request with 1st topic to finalize");
+        {
+                rd_slice_t slice;
+                const rd_bool_t is_flexver =
+                    (rkbuf->rkbuf_flags & RD_KAFKA_OP_F_FLEXVER) ? rd_true
+                                                                : rd_false;
+                int16_t api_key;
+                int16_t api_version;
+                int16_t required_acks;
+                int32_t req_size;
+                int32_t corrid;
+                int32_t timeout;
+                int32_t topic_cnt;
+                int32_t partition_cnt;
+                int32_t partition;
+                int32_t records_len;
+                int str_len;
+                int16_t str_len16;
+                uint64_t uva;
+                const char *expected_topic = "uttopic1";
+                char topic[64];
+
+                rd_slice_init_full(&slice, &rkbuf->rkbuf_buf);
+
+                /* Request header */
+                RD_UT_ASSERT(rd_slice_read(&slice, &req_size, sizeof(req_size)),
+                             "failed to parse request size");
+
+                RD_UT_ASSERT(rd_slice_read(&slice, &api_key, sizeof(api_key)),
+                             "failed to parse request api_key");
+                api_key = (int16_t)be16toh((uint16_t)api_key);
+                RD_UT_ASSERT(api_key == RD_KAFKAP_Produce,
+                             "expected Produce ApiKey, got %" PRId16, api_key);
+
+                RD_UT_ASSERT(
+                    rd_slice_read(&slice, &api_version, sizeof(api_version)),
+                    "failed to parse request api_version");
+
+                RD_UT_ASSERT(rd_slice_read(&slice, &corrid, sizeof(corrid)),
+                             "failed to parse request correlation id");
+
+                /* ClientId */
+                RD_UT_ASSERT(rd_slice_read(&slice, &str_len16, sizeof(str_len16)),
+                             "failed to parse ClientId length");
+                str_len = (int)(int16_t)be16toh((uint16_t)str_len16);
+                if (str_len > 0) {
+                        RD_UT_ASSERT(rd_slice_read(&slice, NULL, str_len),
+                                     "failed to skip ClientId bytes");
+                }
+
+                /* Header tags */
+                if (is_flexver) {
+                        RD_UT_ASSERT(
+                            !RD_UVARINT_UNDERFLOW(
+                                rd_slice_read_uvarint(&slice, &uva)),
+                            "failed to parse request header tag count");
+                        RD_UT_ASSERT(uva == 0,
+                                     "expected empty header tags, got %" PRIu64,
+                                     uva);
+                }
+
+                /* ProduceRequest header */
+                if (ctx.rkpc_api_version >= 3) {
+                        /* TransactionalId */
+                        if (is_flexver) {
+                                RD_UT_ASSERT(!RD_UVARINT_UNDERFLOW(
+                                                 rd_slice_read_uvarint(&slice,
+                                                                      &uva)),
+                                             "failed to parse TransactionalId "
+                                             "length");
+                                str_len = ((int32_t)uva) - 1;
+                        } else {
+                                RD_UT_ASSERT(
+                                    rd_slice_read(&slice, &str_len16,
+                                                  sizeof(str_len16)),
+                                    "failed to parse TransactionalId length");
+                                str_len = (int)(int16_t)be16toh((uint16_t)str_len16);
+                        }
+                        if (str_len > 0) {
+                                RD_UT_ASSERT(
+                                    rd_slice_read(&slice, NULL, str_len),
+                                    "failed to skip TransactionalId bytes");
+                        }
+                }
+
+                RD_UT_ASSERT(
+                    rd_slice_read(&slice, &required_acks, sizeof(required_acks)),
+                    "failed to parse required_acks");
+                required_acks = (int16_t)be16toh((uint16_t)required_acks);
+                RD_UT_ASSERT(required_acks == ctx.rkpc_request_required_acks,
+                             "expected required_acks=%" PRId16 ", got %" PRId16,
+                             ctx.rkpc_request_required_acks, required_acks);
+
+                RD_UT_ASSERT(rd_slice_read(&slice, &timeout, sizeof(timeout)),
+                             "failed to parse timeout");
+                timeout = (int32_t)be32toh(timeout);
+                RD_UT_ASSERT(timeout == ctx.rkpc_request_timeout_ms,
+                             "expected timeout=%" PRId32 ", got %" PRId32,
+                             ctx.rkpc_request_timeout_ms, timeout);
+
+                /* Topic array */
+                if (is_flexver) {
+                        RD_UT_ASSERT(!RD_UVARINT_UNDERFLOW(
+                                         rd_slice_read_uvarint(&slice, &uva)),
+                                     "failed to parse flex topic_cnt");
+                        topic_cnt = ((int32_t)uva) - 1;
+                } else {
+                        RD_UT_ASSERT(rd_slice_read(&slice, &topic_cnt,
+                                                   sizeof(topic_cnt)),
+                                     "failed to parse topic_cnt");
+                        topic_cnt = (int32_t)be32toh(topic_cnt);
+                }
+                RD_UT_ASSERT(topic_cnt == 1,
+                             "expected 1 topic in ProduceRequest, got %d",
+                             topic_cnt);
+
+                /* Topic name */
+                if (is_flexver) {
+                        RD_UT_ASSERT(!RD_UVARINT_UNDERFLOW(
+                                         rd_slice_read_uvarint(&slice, &uva)),
+                                     "failed to parse flex topic length");
+                        str_len = ((int32_t)uva) - 1;
+                } else {
+                        RD_UT_ASSERT(
+                            rd_slice_read(&slice, &str_len16, sizeof(str_len16)),
+                            "failed to parse topic length");
+                        str_len = (int)(int16_t)be16toh((uint16_t)str_len16);
+                }
+
+                RD_UT_ASSERT(str_len == (int)strlen(expected_topic),
+                             "expected topic name \"%s\", got length %d",
+                             expected_topic, str_len);
+                RD_UT_ASSERT(str_len < (int)sizeof(topic),
+                             "topic name too long: %d", str_len);
+                RD_UT_ASSERT(rd_slice_read(&slice, topic, str_len),
+                             "failed to read topic bytes");
+                topic[str_len] = '\0';
+                RD_UT_ASSERT(!strcmp(topic, expected_topic),
+                             "expected topic \"%s\", got \"%s\"",
+                             expected_topic, topic);
+
+                /* Partition array */
+                if (is_flexver) {
+                        RD_UT_ASSERT(!RD_UVARINT_UNDERFLOW(
+                                         rd_slice_read_uvarint(&slice, &uva)),
+                                     "failed to parse flex partition_cnt");
+                        partition_cnt = ((int32_t)uva) - 1;
+                } else {
+                        RD_UT_ASSERT(rd_slice_read(&slice, &partition_cnt,
+                                                   sizeof(partition_cnt)),
+                                     "failed to parse partition_cnt");
+                        partition_cnt = (int32_t)be32toh(partition_cnt);
+                }
+                RD_UT_ASSERT(partition_cnt == 1,
+                             "expected 1 partition in ProduceRequest, got %d",
+                             partition_cnt);
+
+                RD_UT_ASSERT(rd_slice_read(&slice, &partition, sizeof(partition)),
+                             "failed to parse partition id");
+                partition = (int32_t)be32toh(partition);
+                RD_UT_ASSERT(partition == 0,
+                             "expected partition 0 in ProduceRequest, got %d",
+                             partition);
+
+                /* Records */
+                if (is_flexver) {
+                        RD_UT_ASSERT(!RD_UVARINT_UNDERFLOW(
+                                         rd_slice_read_uvarint(&slice, &uva)),
+                                     "failed to parse flex records length");
+                        records_len = ((int32_t)uva) - 1;
+                } else {
+                        RD_UT_ASSERT(rd_slice_read(&slice, &records_len,
+                                                   sizeof(records_len)),
+                                     "failed to parse records length");
+                        records_len = (int32_t)be32toh(records_len);
+                }
+                RD_UT_ASSERT(records_len > 0,
+                             "expected non-empty records, got %d", records_len);
+                RD_UT_ASSERT(rd_slice_read(&slice, NULL, records_len),
+                             "failed to skip records bytes");
+
+                /* Partition/Topic/Request tags */
+                if (is_flexver) {
+                        /* Partition tags */
+                        RD_UT_ASSERT(
+                            !RD_UVARINT_UNDERFLOW(
+                                rd_slice_read_uvarint(&slice, &uva)),
+                            "failed to parse partition tag count");
+                        RD_UT_ASSERT(uva == 0,
+                                     "expected empty partition tags, got %" PRIu64,
+                                     uva);
+
+                        /* Topic tags */
+                        RD_UT_ASSERT(
+                            !RD_UVARINT_UNDERFLOW(
+                                rd_slice_read_uvarint(&slice, &uva)),
+                            "failed to parse topic tag count");
+                        RD_UT_ASSERT(uva == 0,
+                                     "expected empty topic tags, got %" PRIu64,
+                                     uva);
+
+                        /* Request tags */
+                        RD_UT_ASSERT(
+                            !RD_UVARINT_UNDERFLOW(
+                                rd_slice_read_uvarint(&slice, &uva)),
+                            "failed to parse request tag count");
+                        RD_UT_ASSERT(uva == 0,
+                                     "expected empty request tags, got %" PRIu64,
+                                     uva);
+                }
+
+                RD_UT_ASSERT(rd_slice_remains(&slice) == 0,
+                             "expected to parse full request, %" PRIusz
+                             " bytes remain",
+                             rd_slice_remains(&slice));
+        }
+        RD_UT_ASSERT(rkbuf->rkbuf_u.Produce.batch.msgq.rkmq_msg_cnt == 1,
+                     "expected 1 message in batch, got %d",
+                     rkbuf->rkbuf_u.Produce.batch.msgq.rkmq_msg_cnt);
+        RD_UT_ASSERT(rkbuf->rkbuf_u.Produce.batch.msgq.rkmq_msg_bytes == msg_size,
+                     "expected %zu message bytes in batch, got %zu",
+                     msg_size,
+                     rkbuf->rkbuf_u.Produce.batch.msgq.rkmq_msg_bytes);
+
+        /* The request buffer owns the messages in its batch msgq, mimic the
+         * normal request lifecycle by draining them before destroying the
+         * buffer. */
+        rd_kafka_msgq_purge(rk, &rkbuf->rkbuf_batch.msgq);
+        rd_kafka_buf_destroy(rkbuf);
+
+        unittest_clear_msgq(&rktp2->rktp_xmit_msgq);
+
+        rd_kafka_toppar_destroy(rktp2);
+        rd_kafka_toppar_destroy(rktp1);
+        rd_kafka_topic_destroy(rkt2);
+        rd_kafka_topic_destroy(rkt1);
+        rd_kafka_broker_destroy(rkb);
+        rd_kafka_destroy(rk);
+
+        RD_UT_PASS();
+}
+
+/**
  * @brief Unit tests for msgset writer - main entry point
  */
 int unittest_msgset_writer(void) {
@@ -2788,6 +3177,7 @@ int unittest_msgset_writer(void) {
         fails += unittest_msgset_writer_config_mismatch();
         fails += unittest_msgset_writer_accumulation();
         fails += unittest_msgset_writer_exact_limit();
+        fails += unittest_msgset_writer_rollback_empty_topic();
 
         return fails;
 }

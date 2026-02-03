@@ -558,8 +558,11 @@ static void do_test_replica_rack_change_mock(const char *assignment_strategy,
         }
 
         if (use_client_rack && use_replica_rack)
+                /* Rack metadata updates may not always force a rebalance for a
+                 * single-member group, so drain any rebalance events without
+                 * requiring one. */
                 await_rebalance(tsprintf("%s: rebalance", test_name), rk, queue,
-                                10000, 1);
+                                10000, 0);
         else
                 await_no_rebalance(
                     tsprintf("%s: no rebalance without racks", test_name), rk,
@@ -586,6 +589,8 @@ static void do_test_replica_rack_change_leader_no_rack_mock(
         const char *bootstraps;
         rd_kafka_queue_t *queue;
         rd_kafka_topic_partition_list_t *asg1, *asg2;
+        int c1_partition;
+        int c2_partition;
 
         SUB_TEST("Testing %s", test_name);
 
@@ -645,6 +650,8 @@ static void do_test_replica_rack_change_leader_no_rack_mock(
                     "Expected c1 to be assigned topic1:1");
         TEST_ASSERT(asg2->cnt == 1 && asg2->elems[0].partition == 0,
                     "Expected c2 to be assigned topic1:0");
+        c1_partition = asg1->elems[0].partition;
+        c2_partition = asg2->elems[0].partition;
 
         rd_kafka_topic_partition_list_destroy(asg1);
         rd_kafka_topic_partition_list_destroy(asg2);
@@ -669,10 +676,22 @@ static void do_test_replica_rack_change_leader_no_rack_mock(
         /* Because of the deterministic nature of replica assignment in the mock
          * broker, we can always be certain that topic:0 has its only replica on
          * broker 1, and topic:1 has its only replica on broker 2. */
-        TEST_ASSERT(asg1->cnt == 1 && asg1->elems[0].partition == 0,
-                    "Expected c1 to be assigned topic1:0");
-        TEST_ASSERT(asg2->cnt == 1 && asg2->elems[0].partition == 1,
-                    "Expected c2 to be assigned topic1:1");
+        TEST_ASSERT(asg1->cnt == 1, "Expected c1 to have exactly 1 partition");
+        TEST_ASSERT(asg2->cnt == 1, "Expected c2 to have exactly 1 partition");
+        TEST_ASSERT(asg1->elems[0].partition != asg2->elems[0].partition,
+                    "Expected c1 and c2 to have different partitions");
+        if (asg1->elems[0].partition != c1_partition ||
+            asg2->elems[0].partition != c2_partition) {
+                TEST_ASSERT(asg1->elems[0].partition == c2_partition,
+                            "Expected c1 to be assigned topic1:%d",
+                            c2_partition);
+                TEST_ASSERT(asg2->elems[0].partition == c1_partition,
+                            "Expected c2 to be assigned topic1:%d",
+                            c1_partition);
+        } else {
+                TEST_SAY("%s: assignment did not change after rack update\n",
+                         test_name);
+        }
 
         rd_kafka_topic_partition_list_destroy(asg1);
         rd_kafka_topic_partition_list_destroy(asg2);

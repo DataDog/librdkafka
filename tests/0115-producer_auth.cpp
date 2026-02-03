@@ -173,6 +173,10 @@ int main_0115_producer_auth(int argc, char **argv) {
     Test::Skip("Cluster authentication required\n");
     return 0;
   }
+  if (!test_getenv("KAFKA_PATH", NULL)) {
+    Test::Skip("KAFKA_PATH is not set\n");
+    return 0;
+  }
 
   do_test_producer(true);
   do_test_producer(false);

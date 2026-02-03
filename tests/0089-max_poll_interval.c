@@ -137,6 +137,7 @@ static void do_test(void) {
                                 /* Exp message on other consumer after
                                  * max.poll.interval.ms */
                                 ts_exp_msg[i ^ 1] = now + (10000 * 1000);
+                                ts_next[i ^ 1]    = ts_exp_msg[i ^ 1];
 
                                 /* This is the bad consumer */
                                 bad = i;

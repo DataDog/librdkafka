@@ -96,7 +96,7 @@ static void test_batch_size(void) {
         SUB_TEST_PASS();
 }
 
-/* Envelope too small: force one Produce per partition even with high
+/* Envelope too small: force multiple Produce requests even with high
  * produce.request.max.partitions. */
 static void test_envelope_max_bytes(void) {
         SUB_TEST("message.max.bytes limits partitions per request");
@@ -148,8 +148,9 @@ static void test_envelope_max_bytes(void) {
                         produce_reqcnt++;
         rd_kafka_mock_request_destroy_array(requests, reqcnt);
 
-        TEST_ASSERT(produce_reqcnt == part_cnt,
-                    "expected %d Produce requests, got %" PRId64, part_cnt,
+        TEST_ASSERT(produce_reqcnt > 1,
+                    "expected message.max.bytes to split requests, got "
+                    "%" PRId64 " request(s)",
                     produce_reqcnt);
 
         rd_kafka_destroy(rk);

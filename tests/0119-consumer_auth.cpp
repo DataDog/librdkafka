@@ -159,6 +159,10 @@ int main_0119_consumer_auth(int argc, char **argv) {
     Test::Skip("Cluster authentication required\n");
     return 0;
   }
+  if (!test_getenv("KAFKA_PATH", NULL)) {
+    Test::Skip("KAFKA_PATH is not set\n");
+    return 0;
+  }
 
   do_test_fetch_unauth();
 
