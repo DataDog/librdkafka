@@ -638,7 +638,7 @@ rd_kafka_produce_finalize_topic_header(rd_kafka_produce_ctx_t *rkpc) {
         /* Update PartitionArrayCnt (handles both regular and compact arrays) */
         rd_kafka_buf_finalize_arraycnt(rkbuf,
                                        rkpc->rkpc_active_topic_partition_cnt_offset,
-                                       rkpc->rkpc_appended_partition_cnt);
+                                       rkpc->rkpc_active_topic_partition_cnt);
 
         /* Topic tags (written after all partitions for this topic) */
         rd_kafka_buf_write_tags_empty(rkbuf);
