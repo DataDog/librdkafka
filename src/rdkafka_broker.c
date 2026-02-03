@@ -320,6 +320,7 @@ void rd_kafka_broker_batch_collector_init(rd_kafka_broker_t *rkb) {
 
         TAILQ_INIT(&col->rkbbcol_toppars);
         col->rkbbcol_first_add_ts  = 0;
+        col->rkbbcol_earliest_backoff = 0;
         col->rkbbcol_active_partition_cnt = 0;
         col->rkbbcol_total_bytes   = 0;
         col->rkbbcol_next          = NULL;
@@ -516,6 +517,23 @@ int rd_kafka_broker_batch_collector_send(rd_kafka_broker_t *rkb) {
                     continue;
                 }
 
+                /* Check if first message is in backoff - if so, skip this
+                 * partition for now. The message will be retried when the
+                 * backoff expires. Don't remove from collector as it still
+                 * has messages pending. */
+                {
+                    rd_kafka_msg_t *first_msg =
+                        TAILQ_FIRST(&rktp->rktp_xmit_msgq.rkmq_msgs);
+                    if (first_msg &&
+                        first_msg->rkm_u.producer.ts_backoff > rd_clock()) {
+                            /* Move to next, but stop if we've wrapped back */
+                            if (next_rktp == start_rktp)
+                                    break;
+                            rktp = next_rktp;
+                            continue;
+                    }
+                }
+
                 /* Try to initialize a batch if not already */
                 if (!rd_kafka_broker_produce_batch_try_init(&batch, rkb)) {
                         /* Can't send (e.g., backpressure) - stop here.
@@ -588,27 +606,40 @@ int rd_kafka_broker_batch_collector_maybe_send(rd_kafka_broker_t *rkb,
 
         /* Calculate current state by scanning partitions */
         int active_partition_cnt = 0;
+        int sendable_partition_cnt = 0;
         int64_t total_bytes = 0;
         rd_ts_t first_add_ts = 0;
+        rd_ts_t earliest_backoff = 0;
         rd_kafka_toppar_t *rktp;
 
         TAILQ_FOREACH(rktp, &col->rkbbcol_toppars, rktp_collector_link) {
             int msgq_len = rd_kafka_msgq_len(&rktp->rktp_xmit_msgq);
             if (msgq_len > 0) {
                 active_partition_cnt++;
-                total_bytes += rd_kafka_msgq_size(&rktp->rktp_xmit_msgq);
 
                 rd_kafka_msg_t *first_msg = TAILQ_FIRST(&rktp->rktp_xmit_msgq.rkmq_msgs);
                 if (first_msg) {
-                    rd_ts_t enq_time = first_msg->rkm_ts_enq;
-                    if (first_add_ts == 0 || enq_time < first_add_ts) {
-                        first_add_ts = enq_time;
+                    /* Check if first message is in backoff */
+                    if (first_msg->rkm_u.producer.ts_backoff > now) {
+                        /* Track earliest backoff time for wakeup scheduling */
+                        if (earliest_backoff == 0 ||
+                            first_msg->rkm_u.producer.ts_backoff < earliest_backoff)
+                            earliest_backoff = first_msg->rkm_u.producer.ts_backoff;
+                    } else {
+                        /* Message is sendable - count partition and track enq time */
+                        sendable_partition_cnt++;
+                        total_bytes += rd_kafka_msgq_size(&rktp->rktp_xmit_msgq);
+                        rd_ts_t enq_time = first_msg->rkm_ts_enq;
+                        if (first_add_ts == 0 || enq_time < first_add_ts) {
+                            first_add_ts = enq_time;
+                        }
                     }
                 }
             }
         }
 
         col->rkbbcol_first_add_ts = first_add_ts;
+        col->rkbbcol_earliest_backoff = earliest_backoff;
         col->rkbbcol_active_partition_cnt = active_partition_cnt;
 
         if (active_partition_cnt == 0)
@@ -683,14 +714,23 @@ int rd_kafka_broker_batch_collector_maybe_send(rd_kafka_broker_t *rkb,
  */
 rd_ts_t rd_kafka_broker_batch_collector_next_wakeup(rd_kafka_broker_t *rkb) {
         rd_kafka_broker_batch_collector_t *col = &rkb->rkb_batch_collector;
-        rd_ts_t wakeup, now;
+        rd_ts_t wakeup = 0, now;
         rd_ts_t linger = rd_kafka_adaptive_get_linger_us(rkb);
 
-        if (col->rkbbcol_first_add_ts == 0)
-                return 0;
+        /* If we have sendable messages, calculate wakeup based on linger */
+        if (col->rkbbcol_first_add_ts != 0) {
+                wakeup = col->rkbbcol_first_add_ts + linger;
+        }
 
-        /* Use adaptive linger if enabled, otherwise static config */
-        wakeup = col->rkbbcol_first_add_ts + linger;
+        /* If we have messages in backoff, consider earliest backoff time.
+         * Use whichever is earlier: linger expiry or backoff expiry. */
+        if (col->rkbbcol_earliest_backoff != 0) {
+                if (wakeup == 0 || col->rkbbcol_earliest_backoff < wakeup)
+                        wakeup = col->rkbbcol_earliest_backoff;
+        }
+
+        if (wakeup == 0)
+                return 0;
 
         /* Don't return a time in the past - this can happen if we've been
          * collecting for longer than linger (e.g., blocked on max_in_flight).

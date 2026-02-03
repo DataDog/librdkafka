@@ -87,6 +87,11 @@ typedef struct rd_kafka_broker_batch_collector_s {
                                           *   added to this collection cycle.
                                           *   Used for broker.linger.ms check.
                                           *   Reset to 0 after each send. */
+        rd_ts_t rkbbcol_earliest_backoff; /**< Earliest backoff expiry time
+                                           *   across all collected partitions.
+                                           *   Used for wakeup scheduling when
+                                           *   messages are in retry backoff.
+                                           *   0 means no messages in backoff. */
         int rkbbcol_active_partition_cnt; // number of partitions with messages ready to send
         int64_t rkbbcol_total_bytes;     /**< Estimated total bytes across
                                           *   all collected partitions */
