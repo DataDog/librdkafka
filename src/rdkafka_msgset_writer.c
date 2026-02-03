@@ -637,9 +637,6 @@ static void
 rd_kafka_produce_finalize_topic_header(rd_kafka_produce_ctx_t *rkpc) {
         rd_kafka_buf_t *rkbuf = rkpc->rkpc_buf;
 
-                rkpc->rkpc_appended_partition_cnt,
-                rkpc->rkpc_active_topic ? rkpc->rkpc_active_topic->rkt_topic->str : "(null)",
-
         /* Update PartitionArrayCnt (handles both regular and compact arrays) */
         rd_kafka_buf_finalize_arraycnt(rkbuf,
                                        rkpc->rkpc_active_topic_partition_cnt_offset,
