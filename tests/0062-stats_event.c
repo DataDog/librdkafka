@@ -116,13 +116,55 @@ static int json_stats_cb(rd_kafka_t *rk, char *json, size_t json_len, void *opaq
         return 0; /* Don't take ownership */
 }
 
+static void test_stats_event_typed_only(void) {
+        rd_kafka_t *rk;
+        rd_kafka_conf_t *conf;
+        rd_kafka_queue_t *rkqu;
+        rd_kafka_event_t *rkev = NULL;
+        int i;
+
+        conf = rd_kafka_conf_new();
+        const char *test_debug = getenv("TEST_DEBUG");
+        if (test_debug && *test_debug)
+            test_conf_set(conf, "debug", test_debug);
+
+        rd_kafka_conf_set(conf, "statistics.interval.ms", "100", NULL, 0);
+        rd_kafka_conf_set_events(conf, RD_KAFKA_EVENT_STATS);
+
+        rk   = test_create_handle(RD_KAFKA_PRODUCER, conf);
+        rkqu = rd_kafka_queue_get_main(rk);
+
+        for (i = 0; i < 20 && !rkev; i++) {
+                rkev = rd_kafka_queue_poll(rkqu, 500);
+                if (rkev && rd_kafka_event_type(rkev) != RD_KAFKA_EVENT_STATS) {
+                        rd_kafka_event_destroy(rkev);
+                        rkev = NULL;
+                }
+        }
+
+        if (!rkev)
+                TEST_FAIL("Expected stats event but none received\n");
+
+        if (!rd_kafka_event_stats_typed(rkev))
+                TEST_FAIL("Expected typed stats for stats event\n");
+
+        if (rd_kafka_event_stats(rkev) != NULL)
+                TEST_FAIL(
+                    "Expected JSON stats to be NULL when no JSON callback is set\n");
+
+        rd_kafka_event_destroy(rkev);
+        rd_kafka_queue_destroy(rkqu);
+        rd_kafka_destroy(rk);
+}
+
 int main_0062_stats_event(int argc, char **argv) {
         rd_kafka_t *rk;
         rd_kafka_conf_t *conf;
         test_timing_t t_delivery;
         const int iterations = 5;
         int i;
-        test_conf_init(NULL, NULL, 10);
+        test_conf_init(&conf, NULL, 10);
+        rd_kafka_conf_set(conf, "statistics.interval.ms", "100", NULL, 0);
 
         /* Reset typed stats state */
         typed_stats_count    = 0;
@@ -130,10 +172,6 @@ int main_0062_stats_event(int argc, char **argv) {
         last_typed_msg_max   = 0;
         last_typed_client_id[0] = '\0';
         stats_count          = 0;
-
-        /* Set up a global config object */
-        conf = rd_kafka_conf_new();
-        rd_kafka_conf_set(conf, "statistics.interval.ms", "100", NULL, 0);
 
         /* Use callback API (not events) to test both JSON and typed callbacks.
          * Both callbacks are invoked via rd_kafka_poll() on the app's thread. */
@@ -194,6 +232,7 @@ int main_0062_stats_event(int argc, char **argv) {
                           typed_stats_count, iterations);
         }
 
+        test_stats_event_typed_only();
         TEST_SAY("Typed stats callback verification: PASSED\n");
 
         return 0;
