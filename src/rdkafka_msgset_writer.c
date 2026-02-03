@@ -610,8 +610,6 @@ static void
 rd_kafka_produce_finalize_produce_header(rd_kafka_produce_ctx_t *rkpc) {
         rd_kafka_buf_t *rkbuf = rkpc->rkpc_buf;
 
-                rkpc->rkpc_appended_topic_cnt,
-
         /* Update TopicArrayCnt (handles both regular and compact arrays) */
         rd_kafka_buf_finalize_arraycnt(rkbuf, rkpc->rkpc_topic_cnt_offset,
                                        rkpc->rkpc_appended_topic_cnt);
