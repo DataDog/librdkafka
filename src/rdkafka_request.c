@@ -3947,6 +3947,9 @@ rd_kafka_handle_Produce_parse(rd_kafka_produce_req_ctx_t *rkprc,
                 rd_kafka_topic_t *s_rkt;
 
                 rd_kafka_buf_read_str(rkbuf, &topic);
+                if (unlikely(RD_KAFKAP_STR_IS_NULL(&topic)))
+                        rd_kafka_buf_parse_fail(rkbuf,
+                                                "ProduceResponse topic is NULL");
                 rd_kafka_buf_read_arraycnt(rkbuf, &partition_array_cnt,
                                           RD_KAFKAP_PARTITIONS_MAX);
                 total_partitions += partition_array_cnt;
@@ -4080,6 +4083,26 @@ rd_kafka_handle_Produce_parse(rd_kafka_produce_req_ctx_t *rkprc,
                                 }
 
                         } else {
+                                if (request->rkbuf_reqhdr.ApiVersion >= 8) {
+                                        int32_t record_errors_cnt;
+                                        rd_kafka_buf_read_arraycnt(
+                                            rkbuf, &record_errors_cnt, -1);
+                                        while (record_errors_cnt-- > 0) {
+                                                rd_kafka_buf_skip(
+                                                    rkbuf, sizeof(int32_t));
+                                                rd_kafka_buf_skip_str(rkbuf);
+                                                rd_kafka_buf_skip_tags(rkbuf);
+                                        }
+
+                                        /* ErrorMessage */
+                                        rd_kafka_buf_skip_str(rkbuf);
+                                }
+
+                                if (request->rkbuf_reqhdr.ApiVersion >= 10)
+                                        rd_kafka_buf_skip_tags(rkbuf);
+                                else
+                                        rd_kafka_buf_skip_tags(rkbuf);
+
                                 rd_rkb_dbg(
                                     rkb, MSG, "MSGSET",
                                     "Received Produce response (error %hu) "
@@ -4090,8 +4113,7 @@ rd_kafka_handle_Produce_parse(rd_kafka_produce_req_ctx_t *rkprc,
                         }
                 }
 
-                if (request->rkbuf_reqhdr.ApiVersion >= 10)
-                        rd_kafka_buf_skip_tags(rkbuf);
+                rd_kafka_buf_skip_tags(rkbuf);
 
                 if (likely(s_rkt != NULL))
                         rd_kafka_topic_destroy0(s_rkt);
@@ -4231,6 +4253,39 @@ static void rd_kafka_handle_idempotent_Produce_error(
                 r = batch->first_seq - perr->next_ack_seq;
 
                 if (r == 0) {
+                        if (firstmsg->rkm_u.producer.retries > 0 &&
+                            last_err.base_seq == toppar_info->rkprt_base_seq &&
+                            (last_err.err == RD_KAFKA_RESP_ERR__TIMED_OUT ||
+                             last_err.err ==
+                                 RD_KAFKA_RESP_ERR__TIMED_OUT_QUEUE ||
+                             last_err.err == RD_KAFKA_RESP_ERR__TRANSPORT) &&
+                            (last_err.actions &
+                             RD_KAFKA_ERR_ACTION_MSG_POSSIBLY_PERSISTED)) {
+                                rd_rkb_dbg(
+                                    rkb, MSG | RD_KAFKA_DBG_EOS, "IMPLICITACK",
+                                    "ProduceRequest for %.*s [%" PRId32
+                                    "] "
+                                    "with %d message(s) got out-of-order "
+                                    "for retried head batch "
+                                    "(%s, base seq %" PRId32
+                                    ", retries %d): "
+                                    "treating as successful implicit ack",
+                                    RD_KAFKAP_STR_PR(toppar_info->rkprt_s_rktp
+                                                         ->rktp_rkt->rkt_topic),
+                                    toppar_info->rkprt_s_rktp->rktp_partition,
+                                    rd_kafka_msgq_len(&batch->msgq),
+                                    rd_kafka_pid2str(toppar_info->rkprt_pid),
+                                    toppar_info->rkprt_base_seq,
+                                    firstmsg->rkm_u.producer.retries);
+
+                                perr->err             = RD_KAFKA_RESP_ERR_NO_ERROR;
+                                perr->actions         = 0;
+                                perr->status          = RD_KAFKA_MSG_STATUS_PERSISTED;
+                                perr->update_next_ack = rd_true;
+                                perr->update_next_err = rd_true;
+                                break;
+                        }
+
                         /* R1 failed:
                          * If this was the head-of-line request in-flight it
                          * means there is a state desynchronization between the

@@ -57,10 +57,16 @@ static void do_test_consumer(bool allow_auto_create_topics,
   bool has_acl_cli = test_broker_version >= TEST_BRKVER(2, 1, 0, 0) &&
                      !test_needs_auth(); /* We can't bother passing Java
                                           * security config to kafka-acls.sh */
+  bool has_kafka_path = std::getenv("KAFKA_PATH") != NULL;
   if (test_unauthorized_topic && !has_acl_cli) {
     Test::Say(
         "Skipping unauthorized topic test since kafka-acls.sh is not "
         "available\n");
+    return;
+  }
+  if (test_unauthorized_topic && !has_kafka_path) {
+    Test::Say(
+        "Skipping unauthorized topic test since KAFKA_PATH is not set\n");
     return;
   }
   if (!test_consumer_group_protocol_classic() && allow_auto_create_topics) {

@@ -138,7 +138,8 @@ static void execute_java_produce_cli(std::string &bootstrapServers,
   argv[i] = NULL;
 
   int pid = test_run_java("TransactionProducerCli", (const char **)argv);
-  test_waitpid(pid);
+  TEST_ASSERT(pid > 0, "Failed to start TransactionProducerCli");
+  TEST_ASSERT(test_waitpid(pid) == 0, "TransactionProducerCli failed");
 }
 
 static std::vector<RdKafka::Message *>
@@ -428,10 +429,21 @@ static void txn_producer(const std::string &brokers,
 
         /* Init transactions if producer is transactional */
         if (txntype != TransactionType_None) {
-          RdKafka::Error *error = producer->init_transactions(20 * 1000);
-          if (error) {
-            Test::Fail("init_transactions() failed: " + error->str());
+          const int init_timeout_ms = tmout_multip(20 * 1000);
+          for (int attempt = 1;; attempt++) {
+            RdKafka::Error *error = producer->init_transactions(init_timeout_ms);
+            if (!error)
+              break;
+
+            const bool retriable = error->is_retriable();
+            const std::string err = error->str();
             delete error;
+
+            if (!retriable || attempt >= 3)
+              Test::Fail("init_transactions() failed: " + err);
+
+            Test::Say(tostr() << "init_transactions() retry #" << attempt
+                              << " after retriable error: " << err << "\n");
           }
         }
 
@@ -1208,7 +1220,10 @@ int main_0098_consumer_txn(int argc, char **argv) {
     return 0;
   }
 #if WITH_RAPIDJSON
-  do_test_consumer_txn_test(true /* with java producer */);
+  if (test_getenv("KAFKA_PATH", NULL))
+    do_test_consumer_txn_test(true /* with java producer */);
+  else
+    Test::Say("Skipping java producer variant: KAFKA_PATH is not set\n");
   do_test_consumer_txn_test(false /* with librdkafka producer */);
 #else
   Test::Skip("RapidJSON >=1.1.0 not available\n");

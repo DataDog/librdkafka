@@ -6883,20 +6883,18 @@ rd_kafka_resp_err_t test_AlterConfigs_simple(rd_kafka_t *rk,
                 const char *entry_name =
                     rd_kafka_ConfigEntry_name(configents[i]);
 
-                if (test_broker_version >= TEST_BRKVER(3, 2, 0, 0)) {
-                        /* Skip entries that are overwritten to
-                         * avoid duplicates, that cause an error since
-                         * this broker version. */
-                        size_t j;
-                        for (j = 0; j < config_cnt; j += 2) {
-                                if (!strcmp(configs[j], entry_name)) {
-                                        break;
-                                }
+                /* Skip entries that are overwritten by the explicit
+                 * config set below to avoid duplicate keys in the
+                 * AlterConfigs request. */
+                size_t j;
+                for (j = 0; j < config_cnt; j += 2) {
+                        if (!strcmp(configs[j], entry_name)) {
+                                break;
                         }
-
-                        if (j < config_cnt)
-                                continue;
                 }
+
+                if (j < config_cnt)
+                        continue;
 
                 err = rd_kafka_ConfigResource_set_config(
                     confres, entry_name,

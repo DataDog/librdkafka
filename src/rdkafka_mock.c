@@ -2796,12 +2796,19 @@ rd_kafka_mock_cluster_t *rd_kafka_mock_cluster_new(rd_kafka_t *rk,
                                                    int broker_cnt) {
         rd_kafka_mock_cluster_t *mcluster;
         rd_kafka_mock_broker_t *mrkb;
+        thrd_t dummy_rkb_thread;
+        rd_bool_t lock_initialized         = rd_false;
+        rd_bool_t pids_initialized         = rd_false;
+        rd_bool_t request_list_initialized = rd_false;
+        rd_bool_t timers_initialized       = rd_false;
         int i, r;
         size_t bootstraps_len = 0;
         size_t of;
 
         mcluster     = rd_calloc(1, sizeof(*mcluster));
         mcluster->rk = rk;
+        mcluster->wakeup_fds[0] = -1;
+        mcluster->wakeup_fds[1] = -1;
 
         mcluster->dummy_rkb =
             rd_kafka_broker_add(rk, RD_KAFKA_INTERNAL, RD_KAFKA_PROTO_PLAINTEXT,
@@ -2813,8 +2820,7 @@ rd_kafka_mock_cluster_t *rd_kafka_mock_cluster_new(rd_kafka_t *rk,
 
         for (i = 1; i <= broker_cnt; i++) {
                 if (!(mrkb = rd_kafka_mock_broker_new(mcluster, i, NULL))) {
-                        rd_kafka_mock_cluster_destroy(mcluster);
-                        return NULL;
+                        goto fail;
                 }
 
                 /* advertised listener + ":port" + "," */
@@ -2822,6 +2828,7 @@ rd_kafka_mock_cluster_t *rd_kafka_mock_cluster_new(rd_kafka_t *rk,
         }
 
         mtx_init(&mcluster->lock, mtx_plain);
+        lock_initialized = rd_true;
 
         TAILQ_INIT(&mcluster->topics);
         mcluster->defaults.partition_cnt      = 4;
@@ -2838,6 +2845,7 @@ rd_kafka_mock_cluster_t *rd_kafka_mock_cluster_new(rd_kafka_t *rk,
         TAILQ_INIT(&mcluster->coords);
 
         rd_list_init(&mcluster->pids, 16, rd_free);
+        pids_initialized = rd_true;
 
         TAILQ_INIT(&mcluster->errstacks);
 
@@ -2845,6 +2853,7 @@ rd_kafka_mock_cluster_t *rd_kafka_mock_cluster_new(rd_kafka_t *rk,
                sizeof(mcluster->api_handlers));
 
         rd_list_init(&mcluster->request_list, 0, rd_kafka_mock_request_free);
+        request_list_initialized = rd_true;
 
         /* Use an op queue for controlling the cluster in
          * a thread-safe manner without locking. */
@@ -2853,6 +2862,7 @@ rd_kafka_mock_cluster_t *rd_kafka_mock_cluster_new(rd_kafka_t *rk,
         mcluster->ops->rkq_opaque = mcluster;
 
         rd_kafka_timers_init(&mcluster->timers, rk, mcluster->ops);
+        timers_initialized = rd_true;
 
         if ((r = rd_pipe_nonblocking(mcluster->wakeup_fds)) == -1) {
                 rd_kafka_log(rk, LOG_ERR, "MOCK",
@@ -2871,8 +2881,7 @@ rd_kafka_mock_cluster_t *rd_kafka_mock_cluster_new(rd_kafka_t *rk,
                 rd_kafka_log(rk, LOG_CRIT, "MOCK",
                              "Failed to create mock cluster thread: %s",
                              rd_strerror(errno));
-                rd_kafka_mock_cluster_destroy(mcluster);
-                return NULL;
+                goto fail;
         }
 
 
@@ -2894,6 +2903,44 @@ rd_kafka_mock_cluster_t *rd_kafka_mock_cluster_new(rd_kafka_t *rk,
         rd_atomic32_add(&rk->rk_mock.cluster_cnt, 1);
 
         return mcluster;
+
+fail:
+        while ((mrkb = TAILQ_FIRST(&mcluster->brokers)))
+                rd_kafka_mock_broker_destroy(mrkb);
+
+        if (request_list_initialized)
+                rd_list_destroy(&mcluster->request_list);
+        if (pids_initialized)
+                rd_list_destroy(&mcluster->pids);
+
+        if (mcluster->ops)
+                rd_kafka_q_destroy_owner(mcluster->ops);
+        if (timers_initialized)
+                rd_kafka_timers_destroy(&mcluster->timers);
+
+        if (mcluster->fd_size > 0) {
+                rd_free(mcluster->fds);
+                rd_free(mcluster->handlers);
+        }
+
+        if (lock_initialized)
+                mtx_destroy(&mcluster->lock);
+
+        rd_free(mcluster->bootstraps);
+
+        if (mcluster->wakeup_fds[0] != -1)
+                rd_socket_close(mcluster->wakeup_fds[0]);
+        if (mcluster->wakeup_fds[1] != -1)
+                rd_socket_close(mcluster->wakeup_fds[1]);
+
+        dummy_rkb_thread = mcluster->dummy_rkb->rkb_thread;
+        rd_kafka_q_enq(mcluster->dummy_rkb->rkb_ops,
+                       rd_kafka_op_new(RD_KAFKA_OP_TERMINATE));
+        if (thrd_join(dummy_rkb_thread, &r) != thrd_success)
+                rd_assert(!*"failed to join mock dummy broker thread");
+
+        rd_free(mcluster);
+        return NULL;
 }
 
 

@@ -46,6 +46,7 @@ typedef struct _consumer_s {
         int64_t assigned_at;
         int64_t revoked_at;
         int partition_cnt;
+        rd_bool_t allow_unexpected_rebalance;
         rd_kafka_resp_err_t expected_rb_event;
         int curr_line;
 } _consumer_t;
@@ -104,11 +105,19 @@ static void rebalance_cb(rd_kafka_t *rk,
                          void *opaque) {
         _consumer_t *c = opaque;
 
-        TEST_ASSERT(c->expected_rb_event == err,
-                    "line %d: %s: Expected rebalance event %s got %s\n",
-                    c->curr_line, rd_kafka_name(rk),
-                    rd_kafka_err2name(c->expected_rb_event),
-                    rd_kafka_err2name(err));
+        if (c->expected_rb_event != err) {
+                rd_bool_t allow =
+                    c->allow_unexpected_rebalance &&
+                    c->expected_rb_event == RD_KAFKA_RESP_ERR_NO_ERROR &&
+                    (err == RD_KAFKA_RESP_ERR__ASSIGN_PARTITIONS ||
+                     err == RD_KAFKA_RESP_ERR__REVOKE_PARTITIONS);
+
+                TEST_ASSERT(allow,
+                            "line %d: %s: Expected rebalance event %s got %s\n",
+                            c->curr_line, rd_kafka_name(rk),
+                            rd_kafka_err2name(c->expected_rb_event),
+                            rd_kafka_err2name(err));
+        }
 
         switch (err) {
         case RD_KAFKA_RESP_ERR__ASSIGN_PARTITIONS:
@@ -124,6 +133,7 @@ static void rebalance_cb(rd_kafka_t *rk,
 
         case RD_KAFKA_RESP_ERR__REVOKE_PARTITIONS:
                 c->revoked_at = test_clock();
+                c->partition_cnt = 0;
                 rd_kafka_assign(rk, NULL);
                 TEST_SAY("line %d: %s revoked %d partitions\n", c->curr_line,
                          rd_kafka_name(c->rk), parts->cnt);
@@ -188,6 +198,9 @@ static void do_test_static_group_rebalance(void) {
 
         test_wait_topic_exists(c[1].rk, topic, 5000);
 
+        c[0].allow_unexpected_rebalance = rd_true;
+        c[1].allow_unexpected_rebalance = rd_true;
+
         test_consumer_subscribe(c[0].rk, topics);
         test_consumer_subscribe(c[1].rk, topics);
 
@@ -210,8 +223,32 @@ static void do_test_static_group_rebalance(void) {
                 test_consumer_poll_once(c[1].rk, &mv, 0);
         }
 
-        static_member_expect_rebalance(&c[1], rebalance_start,
-                                       &c[1].assigned_at, -1);
+        while (!static_member_wait_rebalance(&c[1], rebalance_start,
+                                             &c[1].assigned_at, 1000)) {
+                /* keep consumer 1 alive while consumer 2 awaits
+                 * its assignment
+                 */
+                c[0].curr_line = __LINE__;
+                if (c[0].expected_rb_event == RD_KAFKA_RESP_ERR_NO_ERROR)
+                        c[0].expected_rb_event =
+                            c[0].partition_cnt > 0
+                                ? RD_KAFKA_RESP_ERR__REVOKE_PARTITIONS
+                                : RD_KAFKA_RESP_ERR__ASSIGN_PARTITIONS;
+                test_consumer_poll_once(c[0].rk, &mv, 0);
+        }
+
+        if (c[0].partition_cnt == 0) {
+                int64_t assign_wait_start = test_clock();
+
+                c[0].expected_rb_event = RD_KAFKA_RESP_ERR__ASSIGN_PARTITIONS;
+                while (!static_member_wait_rebalance(&c[0], assign_wait_start,
+                                                     &c[0].assigned_at, 1000)) {
+                        c[1].curr_line = __LINE__;
+                        test_consumer_poll_once(c[1].rk, &mv, 0);
+                }
+        }
+
+        c[0].expected_rb_event = RD_KAFKA_RESP_ERR_NO_ERROR;
 
         /*
          * Consume all the messages so we can watch for duplicates
@@ -225,6 +262,8 @@ static void do_test_static_group_rebalance(void) {
                            0, -1, &mv);
 
         test_msgver_verify("first.verify", &mv, TEST_MSGVER_ALL, 0, msgcnt);
+        c[0].allow_unexpected_rebalance = rd_false;
+        c[1].allow_unexpected_rebalance = rd_false;
 
         TEST_SAY("== Testing consumer restart ==\n");
         conf = rd_kafka_conf_dup(rd_kafka_conf(c[1].rk));

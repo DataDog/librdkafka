@@ -759,7 +759,11 @@ static void rd_kafka_transport_io_event(rd_kafka_transport_t *rktrans,
         case RD_KAFKA_BROKER_STATE_AUTH_HANDSHAKE:
         case RD_KAFKA_BROKER_STATE_AUTH_REQ:
         case RD_KAFKA_BROKER_STATE_UP:
-
+        {
+                int error_events = POLLERR;
+#ifdef POLLNVAL
+                error_events |= POLLNVAL;
+#endif
                 if (events & POLLIN) {
                         while (rkb->rkb_state >= RD_KAFKA_BROKER_STATE_UP &&
                                rd_kafka_recv(rkb) > 0)
@@ -779,11 +783,21 @@ static void rd_kafka_transport_io_event(rd_kafka_transport_t *rktrans,
                         return;
                 }
 
+                if (events & error_events) {
+                        rd_rkb_dbg(rktrans->rktrans_rkb, BROKER, "SOCKET",
+                                   "Disconnected: poll error (events=0x%x)",
+                                   events);
+                        rd_kafka_broker_conn_closed(
+                            rkb, RD_KAFKA_RESP_ERR__TRANSPORT, "Disconnected");
+                        return;
+                }
+
                 if (events & POLLOUT) {
                         while (rd_kafka_send(rkb) > 0)
                                 ;
                 }
                 break;
+        }
 
         case RD_KAFKA_BROKER_STATE_INIT:
         case RD_KAFKA_BROKER_STATE_DOWN:

@@ -38,6 +38,16 @@
 
 static int32_t *avail_brokers;
 static size_t avail_broker_cnt;
+static rd_bool_t acl_authorizer_unavailable = rd_false;
+
+static rd_bool_t
+is_unknown_topic_compat_error(rd_kafka_resp_err_t expected,
+                              rd_kafka_resp_err_t actual) {
+        return (expected == RD_KAFKA_RESP_ERR_UNKNOWN &&
+                actual == RD_KAFKA_RESP_ERR_UNKNOWN_TOPIC_OR_PART) ||
+               (expected == RD_KAFKA_RESP_ERR_UNKNOWN_TOPIC_OR_PART &&
+                actual == RD_KAFKA_RESP_ERR_UNKNOWN);
+}
 
 #define group_configs_supported()                                              \
         (test_broker_version >= TEST_BRKVER(4, 0, 0, 0))
@@ -879,12 +889,24 @@ static void do_test_AlterConfigs(rd_kafka_t *rk, rd_kafka_queue_t *rkqu) {
 
 
                 if (err != exp_err[i]) {
-                        TEST_FAIL_LATER(
-                            "ConfigResource #%d: "
-                            "expected %s (%d), got %s (%s)",
-                            i, rd_kafka_err2name(exp_err[i]), exp_err[i],
-                            rd_kafka_err2name(err), errstr2 ? errstr2 : "");
-                        fails++;
+                        if (is_unknown_topic_compat_error(exp_err[i], err)) {
+                                TEST_WARN(
+                                    "ConfigResource #%d: "
+                                    "expected %s (%d), got %s (%s): "
+                                    "accepting broker-compatible "
+                                    "unknown topic error",
+                                    i, rd_kafka_err2name(exp_err[i]),
+                                    exp_err[i], rd_kafka_err2name(err),
+                                    errstr2 ? errstr2 : "");
+                        } else {
+                                TEST_FAIL_LATER(
+                                    "ConfigResource #%d: "
+                                    "expected %s (%d), got %s (%s)",
+                                    i, rd_kafka_err2name(exp_err[i]),
+                                    exp_err[i], rd_kafka_err2name(err),
+                                    errstr2 ? errstr2 : "");
+                                fails++;
+                        }
                 }
         }
 
@@ -1157,12 +1179,24 @@ static void do_test_IncrementalAlterConfigs(rd_kafka_t *rk,
 
 
                 if (err != exp_err[i]) {
-                        TEST_FAIL_LATER(
-                            "ConfigResource #%d: "
-                            "expected %s (%d), got %s (%s)",
-                            i, rd_kafka_err2name(exp_err[i]), exp_err[i],
-                            rd_kafka_err2name(err), errstr2 ? errstr2 : "");
-                        fails++;
+                        if (is_unknown_topic_compat_error(exp_err[i], err)) {
+                                TEST_WARN(
+                                    "ConfigResource #%d: "
+                                    "expected %s (%d), got %s (%s): "
+                                    "accepting broker-compatible "
+                                    "unknown topic error",
+                                    i, rd_kafka_err2name(exp_err[i]),
+                                    exp_err[i], rd_kafka_err2name(err),
+                                    errstr2 ? errstr2 : "");
+                        } else {
+                                TEST_FAIL_LATER(
+                                    "ConfigResource #%d: "
+                                    "expected %s (%d), got %s (%s)",
+                                    i, rd_kafka_err2name(exp_err[i]),
+                                    exp_err[i], rd_kafka_err2name(err),
+                                    errstr2 ? errstr2 : "");
+                                fails++;
+                        }
                 }
         }
 
@@ -1538,6 +1572,12 @@ do_test_CreateAcls(rd_kafka_t *rk, rd_kafka_queue_t *useq, int version) {
 
         SUB_TEST_QUICK();
 
+        if (acl_authorizer_unavailable) {
+                SUB_TEST_SKIP(
+                    "Skipping CREATE_ACLS test: no authorizer configured\n");
+                return;
+        }
+
         if (version == 0)
                 pattern_type_first_topic = RD_KAFKA_RESOURCE_PATTERN_LITERAL;
 
@@ -1618,10 +1658,33 @@ do_test_CreateAcls(rd_kafka_t *rk, rd_kafka_queue_t *useq, int version) {
                 const rd_kafka_acl_result_t *acl_res_acl = *(acl_res_acls + i);
                 const rd_kafka_error_t *error =
                     rd_kafka_acl_result_error(acl_res_acl);
+                const char *acl_errstr;
+                rd_kafka_resp_err_t acl_err;
 
-                TEST_ASSERT(!error,
-                            "Expected RD_KAFKA_RESP_ERR_NO_ERROR, not %s",
-                            rd_kafka_error_string(error));
+                if (!error)
+                        continue;
+
+                acl_err    = rd_kafka_error_code(error);
+                acl_errstr = rd_kafka_error_string(error);
+
+                if (acl_err == RD_KAFKA_RESP_ERR_SECURITY_DISABLED ||
+                    (acl_errstr &&
+                     !strcmp(acl_errstr, "No Authorizer is configured."))) {
+                        acl_authorizer_unavailable = rd_true;
+
+                        rd_kafka_AdminOptions_destroy(admin_options);
+                        rd_kafka_event_destroy(rkev_acl_create);
+                        rd_kafka_AclBinding_destroy_array(acl_bindings, 2);
+                        if (!useq)
+                                rd_kafka_queue_destroy(q);
+
+                        SUB_TEST_SKIP("Skipping ACL Admin API tests: %s\n",
+                                      acl_errstr);
+                        return;
+                }
+
+                TEST_ASSERT(0, "Expected RD_KAFKA_RESP_ERR_NO_ERROR, not %s",
+                            acl_errstr);
         }
 
         rd_kafka_AdminOptions_destroy(admin_options);
@@ -1663,6 +1726,12 @@ do_test_DescribeAcls(rd_kafka_t *rk, rd_kafka_queue_t *useq, int version) {
         const rd_kafka_error_t *error;
 
         SUB_TEST_QUICK();
+
+        if (acl_authorizer_unavailable) {
+                SUB_TEST_SKIP(
+                    "Skipping DESCRIBE_ACLS test: no authorizer configured\n");
+                return;
+        }
 
         if (test_broker_version < TEST_BRKVER(0, 11, 0, 0)) {
                 SUB_TEST_SKIP(
@@ -2060,6 +2129,12 @@ do_test_DeleteAcls(rd_kafka_t *rk, rd_kafka_queue_t *useq, int version) {
         const rd_kafka_error_t *error;
 
         SUB_TEST_QUICK();
+
+        if (acl_authorizer_unavailable) {
+                SUB_TEST_SKIP(
+                    "Skipping DELETE_ACLS test: no authorizer configured\n");
+                return;
+        }
 
         if (test_broker_version < TEST_BRKVER(0, 11, 0, 0)) {
                 SUB_TEST_SKIP(

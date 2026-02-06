@@ -160,6 +160,21 @@ static void produce_compactable_msgs(const char *topic,
 
 static void do_test_compaction(int msgs_per_key, const char *compression) {
         const char *topic = test_mk_topic_name(__FILE__, 1);
+        const char *topic_configs[] = {"cleanup.policy",
+                                       "compact",
+                                       "segment.ms",
+                                       "10000",
+                                       "segment.bytes",
+                                       "10000",
+                                       "min.cleanable.dirty.ratio",
+                                       "0.01",
+                                       "delete.retention.ms",
+                                       "86400",
+                                       "file.delete.delay.ms",
+                                       "10000",
+                                       "max.compaction.lag.ms",
+                                       "100",
+                                       NULL};
 #define _KEY_CNT 4
         const char *keys[_KEY_CNT] = {"k1", "k2", "k3",
                                       NULL /*generate unique*/};
@@ -182,18 +197,22 @@ static void do_test_compaction(int msgs_per_key, const char *compression) {
             "Test compaction on topic %s with %s compression (%d messages)\n",
             topic, compression ? compression : "no", msgcnt);
 
-        test_kafka_topics(
-            "--create --topic \"%s\" "
-            "--partitions %d "
-            "--replication-factor 1 "
-            "--config cleanup.policy=compact "
-            "--config segment.ms=10000 "
-            "--config segment.bytes=10000 "
-            "--config min.cleanable.dirty.ratio=0.01 "
-            "--config delete.retention.ms=86400 "
-            "--config file.delete.delay.ms=10000 "
-            "--config max.compaction.lag.ms=100",
-            topic, partition + 1);
+        if (test_broker_version < TEST_BRKVER(0, 10, 2, 0))
+                test_kafka_topics(
+                    "--create --topic \"%s\" "
+                    "--partitions %d "
+                    "--replication-factor 1 "
+                    "--config cleanup.policy=compact "
+                    "--config segment.ms=10000 "
+                    "--config segment.bytes=10000 "
+                    "--config min.cleanable.dirty.ratio=0.01 "
+                    "--config delete.retention.ms=86400 "
+                    "--config file.delete.delay.ms=10000 "
+                    "--config max.compaction.lag.ms=100",
+                    topic, partition + 1);
+        else
+                test_admin_create_topic(NULL, topic, partition + 1, 1,
+                                        topic_configs);
         test_wait_topic_exists(NULL, topic, 5000);
 
         test_conf_init(&conf, NULL, 120);
