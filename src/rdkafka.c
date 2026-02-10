@@ -2635,6 +2635,11 @@ rd_kafka_t *rd_kafka_new(rd_kafka_type_t type,
                         rk->rk_cgrp = rd_kafka_cgrp_new(
                             rk, rk->rk_conf.group_protocol, rk->rk_group_id,
                             rk->rk_client_id);
+
+                        rd_kafka_dbg(rk, CGRP, "CGRP_NEW",
+                           "Setting rk->rk_cgrp for group_id=%s ",
+                           rk->rk_group_id ? rk->rk_group_id->str : "(null)");
+
                         rk->rk_consumer.q =
                             rd_kafka_q_keep(rk->rk_cgrp->rkcg_q);
                 } else {

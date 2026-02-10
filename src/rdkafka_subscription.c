@@ -73,11 +73,38 @@ rd_kafka_subscribe(rd_kafka_t *rk,
                    const rd_kafka_topic_partition_list_t *topics) {
 
         rd_kafka_op_t *rko;
+        rd_kafka_op_t *reply;
         rd_kafka_cgrp_t *rkcg;
         rd_kafka_topic_partition_list_t *topics_cpy;
+        rd_kafka_resp_err_t err;
+        int64_t ts0;
+        const char *cfg_gid =
+            rk->rk_conf.group_id_str ? rk->rk_conf.group_id_str : "<null>";
+        const char *gid =
+            (rk->rk_group_id && rk->rk_group_id->str) ? rk->rk_group_id->str
+                                                      : "<null>";
+        int gid_len   = rk->rk_group_id ? (int)RD_KAFKAP_STR_LEN(rk->rk_group_id)
+                                        : -1;
+        int topics_cnt = topics ? topics->cnt : -1;
 
-        if (!(rkcg = rd_kafka_cgrp_get(rk)))
+        if (!(rkcg = rd_kafka_cgrp_get(rk))) {
+                rd_kafka_dbg(rk, CGRP, "CGRP_SUBSCRIBE",
+                             "NO_CGRP name=%s type=%s term=%d topics=%d "
+                             "conf.group.id=%s rk_group_id=%s rk_group_id_len=%d",
+                             rk->rk_name, rd_kafka_type2str(rk->rk_type),
+                             rd_kafka_terminating(rk), topics_cnt, cfg_gid, gid,
+                             gid_len);
                 return RD_KAFKA_RESP_ERR__UNKNOWN_GROUP;
+        }
+
+        rd_kafka_dbg(rk, CGRP, "CGRP_SUBSCRIBE",
+                     "WITH_CGRP state=%s join_state=%s flags=0x%x "
+                     "cgrp_term=%d coord_id=%d topics=%d subver=%d",
+                     rd_kafka_cgrp_state_names[rkcg->rkcg_state],
+                     rd_kafka_cgrp_join_state_names[rkcg->rkcg_join_state],
+                     rkcg->rkcg_flags, rd_atomic32_get(&rkcg->rkcg_terminated),
+                     (int)rkcg->rkcg_coord_id, topics_cnt,
+                     rd_atomic32_get(&rkcg->rkcg_subscription_version));
 
         /* Validate topics */
         if (topics->cnt == 0 || rd_kafka_topic_partition_list_sum(
@@ -94,8 +121,39 @@ rd_kafka_subscribe(rd_kafka_t *rk,
         rko                         = rd_kafka_op_new(RD_KAFKA_OP_SUBSCRIBE);
         rko->rko_u.subscribe.topics = topics_cpy;
 
-        return rd_kafka_op_err_destroy(
-            rd_kafka_op_req(rkcg->rkcg_ops, rko, RD_POLL_INFINITE));
+        ts0 = rd_clock();
+        rd_kafka_dbg(rk, CGRP, "CGRP_SUBSCRIBE_REQ",
+                     "enqueue state=%s join_state=%s "
+                     "opsqlen=%d topics=%d subver=%d",
+                     rd_kafka_cgrp_state_names[rkcg->rkcg_state],
+                     rd_kafka_cgrp_join_state_names[rkcg->rkcg_join_state],
+                     rd_kafka_q_len(rkcg->rkcg_ops), topics_cnt,
+                     rd_atomic32_get(&rkcg->rkcg_subscription_version));
+
+        reply = rd_kafka_op_req(rkcg->rkcg_ops, rko, RD_POLL_INFINITE);
+        if (!reply) {
+                rd_kafka_dbg(
+                    rk, CGRP, "CGRP_SUBSCRIBE_REPLY",
+                    "reply=NULL wait_us=%lld state=%s join_state=%s",
+                    (long long)(rd_clock() - ts0),
+                    rd_kafka_cgrp_state_names[rkcg->rkcg_state],
+                    rd_kafka_cgrp_join_state_names[rkcg->rkcg_join_state]);
+                return RD_KAFKA_RESP_ERR__TIMED_OUT;
+        }
+
+        err = reply->rko_err;
+        rd_kafka_dbg(rk, CGRP, "CGRP_SUBSCRIBE_REPLY",
+                     "reply_op=%s err=%s(%d) wait_us=%lld state=%s "
+                     "join_state=%s opsqlen=%d subver=%d",
+                     rd_kafka_op2str(reply->rko_type), rd_kafka_err2name(err),
+                     err, (long long)(rd_clock() - ts0),
+                     rd_kafka_cgrp_state_names[rkcg->rkcg_state],
+                     rd_kafka_cgrp_join_state_names[rkcg->rkcg_join_state],
+                     rd_kafka_q_len(rkcg->rkcg_ops),
+                     rd_atomic32_get(&rkcg->rkcg_subscription_version));
+        rd_kafka_op_destroy(reply);
+
+        return err;
 }
 
 

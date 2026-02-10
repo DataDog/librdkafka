@@ -352,16 +352,28 @@ const char *rd_kafka_cgrp_join_state_names[] = {
  * @returns 1 if the state was changed, else 0.
  */
 static int rd_kafka_cgrp_set_state(rd_kafka_cgrp_t *rkcg, int state) {
+        int64_t since_prev_state_ms = -1;
+
         if ((int)rkcg->rkcg_state == state)
                 return 0;
 
+        if (rkcg->rkcg_ts_statechange)
+                since_prev_state_ms =
+                    (int64_t)((rd_clock() - rkcg->rkcg_ts_statechange) / 1000);
+
         rd_kafka_dbg(rkcg->rkcg_rk, CGRP, "CGRPSTATE",
                      "Group \"%.*s\" changed state %s -> %s "
-                     "(join-state %s)",
+                     "(join-state %s, coord_id=%" PRId32 ", "
+                     "flags=0x%x, subver=%d, last_err=%s(%d), "
+                     "since_prev_state_ms=%" PRId64 ")",
                      RD_KAFKAP_STR_PR(rkcg->rkcg_group_id),
                      rd_kafka_cgrp_state_names[rkcg->rkcg_state],
                      rd_kafka_cgrp_state_names[state],
-                     rd_kafka_cgrp_join_state_names[rkcg->rkcg_join_state]);
+                     rd_kafka_cgrp_join_state_names[rkcg->rkcg_join_state],
+                     rkcg->rkcg_coord_id, rkcg->rkcg_flags,
+                     rd_atomic32_get(&rkcg->rkcg_subscription_version),
+                     rd_kafka_err2name(rkcg->rkcg_last_err),
+                     rkcg->rkcg_last_err, since_prev_state_ms);
         rkcg->rkcg_state          = state;
         rkcg->rkcg_ts_statechange = rd_clock();
 
@@ -376,6 +388,21 @@ static int rd_kafka_cgrp_set_state(rd_kafka_cgrp_t *rkcg, int state) {
  */
 static void rd_kafka_cgrp_set_last_err(rd_kafka_cgrp_t *rkcg,
                                        rd_kafka_resp_err_t rkcg_last_err) {
+        rd_kafka_resp_err_t prev = rkcg->rkcg_last_err;
+
+        if (unlikely(prev != rkcg_last_err || rkcg->rkcg_ts_last_err == 0))
+                rd_kafka_dbg(
+                    rkcg->rkcg_rk, CGRP, "CGRP_LASTERR",
+                    "Group \"%.*s\": last_err %s(%d) -> %s(%d) "
+                    "(state=%s join_state=%s flags=0x%x subver=%d)",
+                    RD_KAFKAP_STR_PR(rkcg->rkcg_group_id),
+                    rd_kafka_err2name(prev), prev,
+                    rd_kafka_err2name(rkcg_last_err), rkcg_last_err,
+                    rd_kafka_cgrp_state_names[rkcg->rkcg_state],
+                    rd_kafka_cgrp_join_state_names[rkcg->rkcg_join_state],
+                    rkcg->rkcg_flags,
+                    rd_atomic32_get(&rkcg->rkcg_subscription_version));
+
         rkcg->rkcg_last_err    = rkcg_last_err;
         rkcg->rkcg_ts_last_err = rd_clock();
 }
@@ -398,6 +425,70 @@ rd_kafka_cgrp_maybe_clear_heartbeat_failed_err(rd_kafka_cgrp_t *rkcg) {
             RD_KAFKA_RESP_ERR_TOPIC_AUTHORIZATION_FAILED) {
                 rd_kafka_cgrp_clear_last_err(rkcg);
         }
+}
+
+static void rd_kafka_cgrp_coord_query_broker_summary(
+    rd_kafka_t *rk,
+    int required_features,
+    int *total_brokers,
+    int *logical_brokers,
+    int *nonlogical_brokers,
+    int *up_nonlogical,
+    int *up_with_required_features,
+    int *up_missing_required_features,
+    int *init_nonlogical,
+    int *down_nonlogical,
+    int *connecting_nonlogical) {
+        rd_kafka_broker_t *rkb;
+
+        *total_brokers                = 0;
+        *logical_brokers              = 0;
+        *nonlogical_brokers           = 0;
+        *up_nonlogical                = 0;
+        *up_with_required_features    = 0;
+        *up_missing_required_features = 0;
+        *init_nonlogical              = 0;
+        *down_nonlogical              = 0;
+        *connecting_nonlogical        = 0;
+
+        rd_kafka_rdlock(rk);
+        TAILQ_FOREACH(rkb, &rk->rk_brokers, rkb_link) {
+                rd_kafka_broker_state_t state;
+                rd_kafka_confsource_t source;
+                int features;
+
+                rd_kafka_broker_lock(rkb);
+                state    = rkb->rkb_state;
+                source   = rkb->rkb_source;
+                features = rkb->rkb_features;
+                rd_kafka_broker_unlock(rkb);
+
+                (*total_brokers)++;
+
+                if (source == RD_KAFKA_LOGICAL) {
+                        (*logical_brokers)++;
+                        continue;
+                }
+
+                (*nonlogical_brokers)++;
+
+                if (state == RD_KAFKA_BROKER_STATE_UP) {
+                        (*up_nonlogical)++;
+                        if (!required_features ||
+                            (features & required_features) ==
+                                required_features)
+                                (*up_with_required_features)++;
+                        else
+                                (*up_missing_required_features)++;
+                } else if (state == RD_KAFKA_BROKER_STATE_INIT) {
+                        (*init_nonlogical)++;
+                } else if (state == RD_KAFKA_BROKER_STATE_DOWN) {
+                        (*down_nonlogical)++;
+                } else {
+                        (*connecting_nonlogical)++;
+                }
+        }
+        rd_kafka_rdunlock(rk);
 }
 
 
@@ -825,25 +916,62 @@ err:
 void rd_kafka_cgrp_coord_query(rd_kafka_cgrp_t *rkcg, const char *reason) {
         rd_kafka_broker_t *rkb;
         rd_kafka_resp_err_t err;
+        int total_brokers;
+        int logical_brokers;
+        int nonlogical_brokers;
+        int up_nonlogical;
+        int up_with_required_features;
+        int up_missing_required_features;
+        int init_nonlogical;
+        int down_nonlogical;
+        int connecting_nonlogical;
 
         rkb = rd_kafka_broker_any_usable(
             rkcg->rkcg_rk, RD_POLL_NOWAIT, RD_DO_LOCK,
             RD_KAFKA_FEATURE_BROKER_GROUP_COORD, "coordinator query");
 
         if (!rkb) {
+                rd_kafka_cgrp_coord_query_broker_summary(
+                    rkcg->rkcg_rk, RD_KAFKA_FEATURE_BROKER_GROUP_COORD,
+                    &total_brokers, &logical_brokers, &nonlogical_brokers,
+                    &up_nonlogical, &up_with_required_features,
+                    &up_missing_required_features, &init_nonlogical,
+                    &down_nonlogical, &connecting_nonlogical);
+
                 /* Reset the interval because there were no brokers. When a
                  * broker becomes available, we want to query it immediately. */
                 rd_interval_reset(&rkcg->rkcg_coord_query_intvl);
                 rd_kafka_dbg(rkcg->rkcg_rk, CGRP, "CGRPQUERY",
                              "Group \"%.*s\": "
-                             "no broker available for coordinator query: %s",
-                             RD_KAFKAP_STR_PR(rkcg->rkcg_group_id), reason);
+                             "no usable broker for coordinator query (%s): %s "
+                             "(state=%s join-state=%s coord_id=%" PRId32
+                             " flags=0x%x subver=%d "
+                             "brokers total=%d logical=%d nonlogical=%d "
+                             "up=%d up_with_feature=%d up_missing_feature=%d "
+                             "init=%d down=%d connecting=%d)",
+                             RD_KAFKAP_STR_PR(rkcg->rkcg_group_id), reason,
+                             rd_kafka_features2str(
+                                 RD_KAFKA_FEATURE_BROKER_GROUP_COORD),
+                             rd_kafka_cgrp_state_names[rkcg->rkcg_state],
+                             rd_kafka_cgrp_join_state_names[rkcg->rkcg_join_state],
+                             rkcg->rkcg_coord_id, rkcg->rkcg_flags,
+                             rd_atomic32_get(&rkcg->rkcg_subscription_version),
+                             total_brokers, logical_brokers, nonlogical_brokers,
+                             up_nonlogical, up_with_required_features,
+                             up_missing_required_features, init_nonlogical,
+                             down_nonlogical, connecting_nonlogical);
                 return;
         }
 
         rd_rkb_dbg(rkb, CGRP, "CGRPQUERY",
-                   "Group \"%.*s\": querying for coordinator: %s",
-                   RD_KAFKAP_STR_PR(rkcg->rkcg_group_id), reason);
+                   "Group \"%.*s\": querying for coordinator: %s "
+                   "(state=%s join-state=%s coord_id=%" PRId32
+                   " flags=0x%x subver=%d)",
+                   RD_KAFKAP_STR_PR(rkcg->rkcg_group_id), reason,
+                   rd_kafka_cgrp_state_names[rkcg->rkcg_state],
+                   rd_kafka_cgrp_join_state_names[rkcg->rkcg_join_state],
+                   rkcg->rkcg_coord_id, rkcg->rkcg_flags,
+                   rd_atomic32_get(&rkcg->rkcg_subscription_version));
 
         err = rd_kafka_FindCoordinatorRequest(
             rkb, RD_KAFKA_COORD_GROUP, rkcg->rkcg_group_id->str,
@@ -853,9 +981,15 @@ void rd_kafka_cgrp_coord_query(rd_kafka_cgrp_t *rkcg, const char *reason) {
         if (err) {
                 rd_rkb_dbg(rkb, CGRP, "CGRPQUERY",
                            "Group \"%.*s\": "
-                           "unable to send coordinator query: %s",
+                           "unable to send coordinator query: %s "
+                           "(state=%s join-state=%s coord_id=%" PRId32
+                           " flags=0x%x subver=%d)",
                            RD_KAFKAP_STR_PR(rkcg->rkcg_group_id),
-                           rd_kafka_err2str(err));
+                           rd_kafka_err2str(err),
+                           rd_kafka_cgrp_state_names[rkcg->rkcg_state],
+                           rd_kafka_cgrp_join_state_names[rkcg->rkcg_join_state],
+                           rkcg->rkcg_coord_id, rkcg->rkcg_flags,
+                           rd_atomic32_get(&rkcg->rkcg_subscription_version));
                 rd_kafka_broker_destroy(rkb);
                 return;
         }
@@ -6471,6 +6605,27 @@ void rd_kafka_cgrp_consumer_expedite_next_heartbeat(rd_kafka_cgrp_t *rkcg,
                                      rd_kafka_cgrp_serve_timer_cb, NULL);
 }
 
+static void rd_kafka_cgrp_intervaled_coord_query(rd_kafka_cgrp_t *rkcg,
+                                                 rd_ts_t now,
+                                                 rd_ts_t interval_us,
+                                                 int immediate,
+                                                 const char *state_reason) {
+        rd_ts_t overdue_us =
+            immediate
+                ? rd_interval_immediate(&rkcg->rkcg_coord_query_intvl,
+                                        interval_us, now)
+                : rd_interval(&rkcg->rkcg_coord_query_intvl, interval_us, now);
+        char reason[64];
+
+        if (overdue_us <= 0)
+                return;
+
+        rd_snprintf(reason, sizeof(reason), "intervaled in state %s",
+                    state_reason);
+
+        rd_kafka_cgrp_coord_query(rkcg, reason);
+}
+
 /**
  * Client group handling.
  * Called from main thread to serve the operational aspects of a cgrp.
@@ -6516,16 +6671,22 @@ retry:
                 break;
 
         case RD_KAFKA_CGRP_STATE_INIT:
+                rd_kafka_dbg(
+                    rkcg->rkcg_rk, CGRP, "CGRPSERVE",
+                    "state=init -> query-coord "
+                    "(join-state=%s coord_id=%" PRId32 " flags=0x%x "
+                    "subver=%d last_err=%s(%d))",
+                    rd_kafka_cgrp_join_state_names[rkcg->rkcg_join_state],
+                    rkcg->rkcg_coord_id, rkcg->rkcg_flags,
+                    rd_atomic32_get(&rkcg->rkcg_subscription_version),
+                    rd_kafka_err2name(rkcg->rkcg_last_err),
+                    rkcg->rkcg_last_err);
                 rd_kafka_cgrp_set_state(rkcg, RD_KAFKA_CGRP_STATE_QUERY_COORD);
                 /* FALLTHRU */
 
         case RD_KAFKA_CGRP_STATE_QUERY_COORD:
-                /* Query for coordinator. */
-                if (rd_interval_immediate(&rkcg->rkcg_coord_query_intvl,
-                                          500 * 1000, now) > 0)
-                        rd_kafka_cgrp_coord_query(rkcg,
-                                                  "intervaled in "
-                                                  "state query-coord");
+                rd_kafka_cgrp_intervaled_coord_query(
+                    rkcg, now, 500 * 1000, 1 /*immediate*/, "query-coord");
                 break;
 
         case RD_KAFKA_CGRP_STATE_WAIT_COORD:
@@ -6538,12 +6699,8 @@ retry:
                         goto retry; /* Coordinator changed, retry state-machine
                                      * to speed up next transition. */
 
-                /* Coordinator query */
-                if (rd_interval(&rkcg->rkcg_coord_query_intvl, 1000 * 1000,
-                                now) > 0)
-                        rd_kafka_cgrp_coord_query(rkcg,
-                                                  "intervaled in "
-                                                  "state wait-broker");
+                rd_kafka_cgrp_intervaled_coord_query(
+                    rkcg, now, 1000 * 1000, 0 /*immediate*/, "wait-broker");
                 break;
 
         case RD_KAFKA_CGRP_STATE_WAIT_BROKER_TRANSPORT:
@@ -6552,13 +6709,9 @@ retry:
                 if (rkb_state < RD_KAFKA_BROKER_STATE_UP || !rkb ||
                     !rd_kafka_broker_supports(
                         rkb, RD_KAFKA_FEATURE_BROKER_GROUP_COORD)) {
-                        /* Coordinator query */
-                        if (rd_interval(&rkcg->rkcg_coord_query_intvl,
-                                        1000 * 1000, now) > 0)
-                                rd_kafka_cgrp_coord_query(
-                                    rkcg,
-                                    "intervaled in state "
-                                    "wait-broker-transport");
+                        rd_kafka_cgrp_intervaled_coord_query(
+                            rkcg, now, 1000 * 1000, 0 /*immediate*/,
+                            "wait-broker-transport");
 
                 } else {
                         rd_kafka_cgrp_set_state(rkcg, RD_KAFKA_CGRP_STATE_UP);
@@ -6582,13 +6735,10 @@ retry:
                  * for reprocessing. */
                 rd_kafka_q_concat(rkcg->rkcg_ops, rkcg->rkcg_wait_coord_q);
 
-                /* Relaxed coordinator queries. */
-                if (rd_interval(&rkcg->rkcg_coord_query_intvl,
-                                rkcg->rkcg_rk->rk_conf.coord_query_intvl_ms *
-                                    1000,
-                                now) > 0)
-                        rd_kafka_cgrp_coord_query(rkcg,
-                                                  "intervaled in state up");
+                rd_kafka_cgrp_intervaled_coord_query(
+                    rkcg, now,
+                    rkcg->rkcg_rk->rk_conf.coord_query_intvl_ms * 1000,
+                    0 /*immediate*/, "up");
 
                 if (rkcg->rkcg_group_protocol ==
                     RD_KAFKA_GROUP_PROTOCOL_CONSUMER) {
@@ -6749,7 +6899,32 @@ static rd_kafka_op_res_t rd_kafka_cgrp_op_serve(rd_kafka_t *rk,
                     rko->rko_err ? rd_kafka_err2str(rko->rko_err) : "from op");
                 break;
 
-        case RD_KAFKA_OP_SUBSCRIBE:
+        case RD_KAFKA_OP_SUBSCRIBE: {
+                int in_topics_cnt =
+                    rko->rko_u.subscribe.topics
+                        ? rko->rko_u.subscribe.topics->cnt
+                        : -1;
+                int cur_topics_cnt =
+                    rkcg->rkcg_subscription ? rkcg->rkcg_subscription->cnt : -1;
+                int next_topics_cnt = rkcg->rkcg_next_subscription
+                                          ? rkcg->rkcg_next_subscription->cnt
+                                          : -1;
+                int64_t ts0         = rd_clock();
+
+                rd_kafka_dbg(
+                    rk, CGRP, "CGRP_SUBSCRIBE_OP",
+                    "pre group_protocol=%s state=%s join_state=%s flags=0x%x "
+                    "in_topics=%d cur_topics=%d next_topics=%d next_unsub=%d "
+                    "subver=%d",
+                    rkcg->rkcg_group_protocol == RD_KAFKA_GROUP_PROTOCOL_CONSUMER
+                        ? "consumer"
+                        : "classic",
+                    rd_kafka_cgrp_state_names[rkcg->rkcg_state],
+                    rd_kafka_cgrp_join_state_names[rkcg->rkcg_join_state],
+                    rkcg->rkcg_flags, in_topics_cnt, cur_topics_cnt,
+                    next_topics_cnt, rkcg->rkcg_next_unsubscribe,
+                    rd_atomic32_get(&rkcg->rkcg_subscription_version));
+
                 /* We just want to avoid reaching max poll interval,
                  * without anything else is done on poll. */
                 rd_atomic64_set(&rk->rk_ts_last_poll, rd_clock());
@@ -6764,12 +6939,30 @@ static rd_kafka_op_res_t rd_kafka_cgrp_op_serve(rd_kafka_t *rk,
                             rkcg, rko->rko_u.subscribe.topics);
                 }
 
+                rd_kafka_dbg(
+                    rk, CGRP, "CGRP_SUBSCRIBE_OP",
+                    "post err=%s(%d) state=%s join_state=%s flags=0x%x "
+                    "cur_topics=%d next_topics=%d next_unsub=%d "
+                    "subver=%d wait_us=%lld",
+                    rd_kafka_err2name(err), err,
+                    rd_kafka_cgrp_state_names[rkcg->rkcg_state],
+                    rd_kafka_cgrp_join_state_names[rkcg->rkcg_join_state],
+                    rkcg->rkcg_flags,
+                    rkcg->rkcg_subscription ? rkcg->rkcg_subscription->cnt : -1,
+                    rkcg->rkcg_next_subscription
+                        ? rkcg->rkcg_next_subscription->cnt
+                        : -1,
+                    rkcg->rkcg_next_unsubscribe,
+                    rd_atomic32_get(&rkcg->rkcg_subscription_version),
+                    (long long)(rd_clock() - ts0));
+
                 if (!err) /* now owned by rkcg */
                         rko->rko_u.subscribe.topics = NULL;
 
                 rd_kafka_op_reply(rko, err);
                 rko = NULL;
                 break;
+        }
 
         case RD_KAFKA_OP_ASSIGN:
                 rd_kafka_cgrp_handle_assign_op(rkcg, rko);
