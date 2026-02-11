@@ -2367,10 +2367,9 @@ rd_kafka_t *rd_kafka_new(rd_kafka_type_t type,
                 dd_identity_once = 1;
                 fprintf(stderr,
                         "[DDSUBPROBE_20260211A] identity "
-                        "librdkafka=%s rd_kafka_subscribe=%p rd_kafka_new=%p "
-                        "build=%s %s\n",
+                        "librdkafka=%s rd_kafka_subscribe=%p rd_kafka_new=%p\n",
                         rd_kafka_version_str(), (void *)&rd_kafka_subscribe,
-                        (void *)&rd_kafka_new, __DATE__, __TIME__);
+                        (void *)&rd_kafka_new);
                 fflush(stderr);
         }
 
