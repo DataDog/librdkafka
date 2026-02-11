@@ -2353,6 +2353,8 @@ rd_kafka_t *rd_kafka_new(rd_kafka_type_t type,
         rd_kafka_resp_err_t ret_err = RD_KAFKA_RESP_ERR_NO_ERROR;
         int ret_errno               = 0;
         const char *conf_err;
+        const char *app_conf_gid;
+        static int dd_identity_once = 0;
 #ifndef _WIN32
         sigset_t newset, oldset;
 #endif
@@ -2360,6 +2362,17 @@ rd_kafka_t *rd_kafka_new(rd_kafka_type_t type,
         size_t bflen;
 
         rd_kafka_global_init();
+
+        if (unlikely(!dd_identity_once)) {
+                dd_identity_once = 1;
+                fprintf(stderr,
+                        "[DDSUBPROBE_20260211A] identity "
+                        "librdkafka=%s rd_kafka_subscribe=%p rd_kafka_new=%p "
+                        "build=%s %s\n",
+                        rd_kafka_version_str(), (void *)&rd_kafka_subscribe,
+                        (void *)&rd_kafka_new, __DATE__, __TIME__);
+                fflush(stderr);
+        }
 
         /* rd_kafka_new() takes ownership of the provided \p app_conf
          * object if rd_kafka_new() succeeds.
@@ -2376,6 +2389,14 @@ rd_kafka_t *rd_kafka_new(rd_kafka_type_t type,
                 conf = rd_kafka_conf_new();
         else
                 conf = app_conf;
+
+        app_conf_gid = conf->group_id_str ? conf->group_id_str : "<null>";
+        fprintf(stderr,
+                "[DDSUBPROBE_20260211A] rd_kafka_new enter "
+                "type=%s app_conf=%p group.id=%s\n",
+                rd_kafka_type2str(type), (void *)app_conf, app_conf_gid);
+        fflush(stderr);
+
 
         /* Verify and finalize configuration */
         if ((conf_err = rd_kafka_conf_finalize(type, conf))) {

@@ -6910,6 +6910,7 @@ static rd_kafka_op_res_t rd_kafka_cgrp_op_serve(rd_kafka_t *rk,
                                           ? rkcg->rkcg_next_subscription->cnt
                                           : -1;
                 int64_t ts0         = rd_clock();
+                const char *probe   = "DDSUBPROBE_20260211A";
 
                 rd_kafka_dbg(
                     rk, CGRP, "CGRP_SUBSCRIBE_OP",
@@ -6924,6 +6925,19 @@ static rd_kafka_op_res_t rd_kafka_cgrp_op_serve(rd_kafka_t *rk,
                     rkcg->rkcg_flags, in_topics_cnt, cur_topics_cnt,
                     next_topics_cnt, rkcg->rkcg_next_unsubscribe,
                     rd_atomic32_get(&rkcg->rkcg_subscription_version));
+                fprintf(stderr,
+                        "[%s] cgrp_subscribe_op pre rk=%p rkcg=%p rko=%p "
+                        "group=%.*s state=%s join_state=%s flags=0x%x "
+                        "in_topics=%d cur_topics=%d next_topics=%d "
+                        "next_unsub=%d subver=%d\n",
+                        probe, (void *)rk, (void *)rkcg, (void *)rko,
+                        RD_KAFKAP_STR_PR(rkcg->rkcg_group_id),
+                        rd_kafka_cgrp_state_names[rkcg->rkcg_state],
+                        rd_kafka_cgrp_join_state_names[rkcg->rkcg_join_state],
+                        rkcg->rkcg_flags, in_topics_cnt, cur_topics_cnt,
+                        next_topics_cnt, rkcg->rkcg_next_unsubscribe,
+                        rd_atomic32_get(&rkcg->rkcg_subscription_version));
+                fflush(stderr);
 
                 /* We just want to avoid reaching max poll interval,
                  * without anything else is done on poll. */
@@ -6955,6 +6969,15 @@ static rd_kafka_op_res_t rd_kafka_cgrp_op_serve(rd_kafka_t *rk,
                     rkcg->rkcg_next_unsubscribe,
                     rd_atomic32_get(&rkcg->rkcg_subscription_version),
                     (long long)(rd_clock() - ts0));
+                fprintf(stderr,
+                        "[%s] cgrp_subscribe_op post rk=%p rkcg=%p rko=%p "
+                        "err=%s(%d) state=%s join_state=%s wait_us=%lld\n",
+                        probe, (void *)rk, (void *)rkcg, (void *)rko,
+                        rd_kafka_err2name(err), err,
+                        rd_kafka_cgrp_state_names[rkcg->rkcg_state],
+                        rd_kafka_cgrp_join_state_names[rkcg->rkcg_join_state],
+                        (long long)(rd_clock() - ts0));
+                fflush(stderr);
 
                 if (!err) /* now owned by rkcg */
                         rko->rko_u.subscribe.topics = NULL;

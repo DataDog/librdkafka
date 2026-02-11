@@ -695,16 +695,49 @@ rd_kafka_op_t *rd_kafka_op_req0(rd_kafka_q_t *destq,
                                 rd_kafka_op_t *rko,
                                 int timeout_ms) {
         rd_kafka_op_t *reply;
+        int is_subscribe = rko && rko->rko_type == RD_KAFKA_OP_SUBSCRIBE;
 
         /* Indicate to destination where to send reply. */
         rd_kafka_op_set_replyq(rko, recvq, NULL);
 
+        if (is_subscribe) {
+                fprintf(stderr,
+                        "[DDSUBPROBE_20260211A] rd_kafka_op_req0 enqueue "
+                        "rko=%p type=%s destq=%p recvq=%p timeout_ms=%d "
+                        "destqlen=%d recvqlen=%d\n",
+                        (void *)rko, rd_kafka_op2str(rko->rko_type),
+                        (void *)destq, (void *)recvq, timeout_ms,
+                        rd_kafka_q_len(destq), rd_kafka_q_len(recvq));
+                fflush(stderr);
+        }
+
         /* Enqueue op */
-        if (!rd_kafka_q_enq(destq, rko))
+        if (!rd_kafka_q_enq(destq, rko)) {
+                if (is_subscribe) {
+                        fprintf(stderr,
+                                "[DDSUBPROBE_20260211A] rd_kafka_op_req0 "
+                                "enqueue_failed rko=%p destq=%p recvq=%p\n",
+                                (void *)rko, (void *)destq, (void *)recvq);
+                        fflush(stderr);
+                }
                 return NULL;
+        }
 
         /* Wait for reply */
         reply = rd_kafka_q_pop(recvq, rd_timeout_us(timeout_ms), 0);
+
+        if (is_subscribe) {
+                fprintf(stderr,
+                        "[DDSUBPROBE_20260211A] rd_kafka_op_req0 reply "
+                        "rko=%p destq=%p recvq=%p reply=%p reply_type=%s "
+                        "reply_err=%s(%d) recvqlen=%d\n",
+                        (void *)rko, (void *)destq, (void *)recvq,
+                        (void *)reply,
+                        reply ? rd_kafka_op2str(reply->rko_type) : "<null>",
+                        reply ? rd_kafka_err2name(reply->rko_err) : "<none>",
+                        reply ? reply->rko_err : 0, rd_kafka_q_len(recvq));
+                fflush(stderr);
+        }
 
         /* May be NULL for timeout */
         return reply;
