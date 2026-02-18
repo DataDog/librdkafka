@@ -9,6 +9,23 @@ and rtt has returned to nromal, we try to speed up. We also fix a bug where para
 got modified during a disconnect for a broker, because we thought there was 0 contention.
 This had the possibility of causing retry storms.
 
+# librdkafka v2.10.3
+
+librdkafka v2.10.3 is a DataDog fork release with semantically significant producer-path changes.
+
+## Highlights
+
+* Introduce multibatch produce request construction to improve throughput and queue-drain behavior under hot-partition workloads.
+* Improve adaptive produce-path behavior after transient RTT spikes, reducing sustained queue depth growth and retry storm risk.
+* Tighten producer error and retry handling to avoid false-fatal outcomes in retryable produce scenarios.
+* Keep wire compatibility with Kafka brokers, no broker-side protocol or deployment changes are required.
+
+## Versioning notes
+
+* This release lane is intentionally fork-specific and distinct from upstream tags.
+* `RD_KAFKA_VERSION` is `0x020a03ff` and `rd_kafka_version_str()` reports `2.10.3`.
+* Runtime logs can unambiguously identify this forked runtime as `2.10.3`.
+
 # librdkafka v2.10.1
 
 librdkafka v2.10.1 is a maintenance release:
