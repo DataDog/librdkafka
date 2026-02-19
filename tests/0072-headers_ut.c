@@ -338,7 +338,7 @@ static rd_kafka_resp_err_t on_new(rd_kafka_t *rk,
 }
 
 
-int main_0072_headers_ut(int argc, char **argv) {
+static void do_test_headers_ut(const char *engine_name) {
         const char *topic = test_mk_topic_name(__FUNCTION__ + 5, 0);
         rd_kafka_t *rk;
         rd_kafka_conf_t *conf;
@@ -347,7 +347,12 @@ int main_0072_headers_ut(int argc, char **argv) {
         const int msgcnt = 10;
         rd_kafka_resp_err_t err;
 
+        SUB_TEST("%s", engine_name);
+
+        exp_msgid = 0;
+
         conf = rd_kafka_conf_new();
+        test_conf_set(conf, "produce.engine", engine_name);
         test_conf_set(conf, "message.timeout.ms", "1");
         rd_kafka_conf_set_dr_msg_cb(conf, dr_msg_cb);
 
@@ -443,6 +448,15 @@ int main_0072_headers_ut(int argc, char **argv) {
         rd_kafka_flush(rk, 5000);
 
         rd_kafka_destroy(rk);
+
+        SUB_TEST_PASS();
+
+        return;
+}
+
+int main_0072_headers_ut(int argc, char **argv) {
+        do_test_headers_ut("v1");
+        do_test_headers_ut("v2");
 
         return 0;
 }

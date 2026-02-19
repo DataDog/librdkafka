@@ -87,7 +87,7 @@ struct rd_kafka_stats_counts {
         int topic_cnt;
         int total_partitions;
         int total_broker_toppars;
-        int total_broker_reqs; /**< Total non-zero req counts across all brokers */
+        int total_broker_reqs; /**< Total req slots across all brokers */
 };
 
 static void rd_kafka_stats_count(rd_kafka_t *rk,
@@ -100,18 +100,13 @@ static void rd_kafka_stats_count(rd_kafka_t *rk,
         /* Count brokers and their toppars and non-zero req counts */
         TAILQ_FOREACH(rkb, &rk->rk_brokers, rkb_link) {
                 rd_kafka_toppar_t *rktp;
-                int i;
                 counts->broker_cnt++;
 
                 rd_kafka_broker_lock(rkb);
                 TAILQ_FOREACH(rktp, &rkb->rkb_toppars, rktp_rkblink) {
                         counts->total_broker_toppars++;
                 }
-                /* Count non-zero request type counts */
-                for (i = 0; i < RD_KAFKAP__NUM; i++) {
-                        if (rd_atomic64_get(&rkb->rkb_c.reqtype[i]) > 0)
-                                counts->total_broker_reqs++;
-                }
+                counts->total_broker_reqs += RD_KAFKAP__NUM;
                 rd_kafka_broker_unlock(rkb);
         }
 
@@ -164,8 +159,15 @@ static void rd_kafka_stats_partition_populate(rd_kafka_partition_stats_t *dst,
         /* Producer queue stats */
         dst->msgq_cnt        = rd_kafka_msgq_len(&rktp->rktp_msgq);
         dst->msgq_bytes      = rd_kafka_msgq_size(&rktp->rktp_msgq);
-        dst->xmit_msgq_cnt   = rd_atomic32_get(&rktp->rktp_xmit_msgq_cnt);
-        dst->xmit_msgq_bytes = rd_atomic64_get(&rktp->rktp_xmit_msgq_bytes);
+        if (rktp->rktp_producer_mbv2) {
+                dst->xmit_msgq_cnt =
+                    rd_atomic32_get(&rktp->rktp_producer_mbv2->rktp_xmit_msgq_cnt);
+                dst->xmit_msgq_bytes =
+                    rd_atomic64_get(&rktp->rktp_producer_mbv2->rktp_xmit_msgq_bytes);
+        } else {
+                dst->xmit_msgq_cnt   = 0;
+                dst->xmit_msgq_bytes = 0;
+        }
 
         /* Consumer stats */
         dst->fetchq_cnt  = rd_kafka_q_len(rktp->rktp_fetchq);
@@ -313,7 +315,9 @@ static int rd_kafka_stats_topic_populate(rd_kafka_topic_stats_t *dst,
 static void rd_kafka_stats_broker_populate(rd_kafka_broker_stats_t *dst,
                                             rd_kafka_broker_t *rkb,
                                             rd_kafka_broker_toppar_ref_t **toppar_ptr,
+                                            rd_kafka_broker_toppar_ref_t *toppar_end,
                                             rd_kafka_req_count_t **req_ptr,
+                                            rd_kafka_req_count_t *req_end,
                                             rd_ts_t now,
                                             int64_t *tx_total,
                                             int64_t *tx_bytes_total,
@@ -324,6 +328,10 @@ static void rd_kafka_stats_broker_populate(rd_kafka_broker_stats_t *dst,
         int req_idx    = 0;
         rd_ts_t txidle = -1, rxidle = -1;
         int i;
+        size_t req_cap =
+            req_end > *req_ptr ? (size_t)(req_end - *req_ptr) : 0;
+        size_t toppar_cap =
+            toppar_end > *toppar_ptr ? (size_t)(toppar_end - *toppar_ptr) : 0;
 
         rd_kafka_broker_lock(rkb);
 
@@ -394,30 +402,46 @@ static void rd_kafka_stats_broker_populate(rd_kafka_broker_stats_t *dst,
         rd_kafka_stats_avg_populate(&dst->throttle, &rkb->rkb_avg_throttle);
 
         /* Producer request stats */
-        rd_kafka_stats_avg_populate(&dst->produce_partitions, &rkb->rkb_avg_produce_partitions);
-        rd_kafka_stats_avg_populate(&dst->produce_messages, &rkb->rkb_avg_produce_messages);
-        rd_kafka_stats_avg_populate(&dst->produce_reqsize, &rkb->rkb_avg_produce_reqsize);
-        rd_kafka_stats_avg_populate(&dst->produce_fill, &rkb->rkb_avg_produce_fill);
-        rd_kafka_stats_avg_populate(&dst->batch_wait, &rkb->rkb_avg_batch_wait);
+        if (rkb->rkb_producer_mbv2) {
+                rd_kafka_stats_avg_populate(
+                    &dst->produce_partitions,
+                    &rkb->rkb_producer_mbv2->rkbp_avg_produce_partitions);
+                rd_kafka_stats_avg_populate(
+                    &dst->produce_messages,
+                    &rkb->rkb_producer_mbv2->rkbp_avg_produce_messages);
+                rd_kafka_stats_avg_populate(
+                    &dst->produce_reqsize,
+                    &rkb->rkb_producer_mbv2->rkbp_avg_produce_reqsize);
+                rd_kafka_stats_avg_populate(
+                    &dst->produce_fill,
+                    &rkb->rkb_producer_mbv2->rkbp_avg_produce_fill);
+                rd_kafka_stats_avg_populate(
+                    &dst->batch_wait,
+                    &rkb->rkb_producer_mbv2->rkbp_avg_batch_wait);
+        }
 
         /* Adaptive batching stats */
         dst->adaptive_enabled = rkb->rkb_rk->rk_conf.adaptive_batching_enabled;
         if (dst->adaptive_enabled) {
-                rd_kafka_adaptive_state_t *state = &rkb->rkb_adaptive_state;
-                rd_kafka_adaptive_params_t *params = &rkb->rkb_adaptive_params;
+                if (rkb->rkb_producer_mbv2) {
+                        rd_kafka_adaptive_state_t *state =
+                            &rkb->rkb_producer_mbv2->rkbp_adaptive_state;
+                        rd_kafka_adaptive_params_t *params =
+                            &rkb->rkb_producer_mbv2->rkbp_adaptive_params;
 
-                dst->adaptive_linger_us = params->linger_us;
-                dst->adaptive_batch_max_bytes = params->batch_max_bytes;
-                dst->adaptive_congestion = state->congestion_score;
-                dst->adaptive_rtt_congestion = state->rtt_congestion;
-                dst->adaptive_int_lat_congestion = state->int_lat_congestion;
-                dst->adaptive_rtt_base_us = state->rtt_stats.rtt_base;
-                dst->adaptive_rtt_current_us = state->rtt_stats.rtt_current;
-                dst->adaptive_int_lat_base_us = state->int_lat_stats.int_lat_base;
-                dst->adaptive_int_lat_current_us = state->int_lat_stats.int_lat_current;
-                dst->adaptive_adjustments_up = state->adjustments_up;
-                dst->adaptive_adjustments_down = state->adjustments_down;
-                dst->adaptive_backlog_drain_events = state->backlog_drain_events;
+                        dst->adaptive_linger_us = params->linger_us;
+                        dst->adaptive_batch_max_bytes = params->batch_max_bytes;
+                        dst->adaptive_congestion = state->congestion_score;
+                        dst->adaptive_rtt_congestion = state->rtt_congestion;
+                        dst->adaptive_int_lat_congestion = state->int_lat_congestion;
+                        dst->adaptive_rtt_base_us = state->rtt_stats.rtt_base;
+                        dst->adaptive_rtt_current_us = state->rtt_stats.rtt_current;
+                        dst->adaptive_int_lat_base_us = state->int_lat_stats.int_lat_base;
+                        dst->adaptive_int_lat_current_us = state->int_lat_stats.int_lat_current;
+                        dst->adaptive_adjustments_up = state->adjustments_up;
+                        dst->adaptive_adjustments_down = state->adjustments_down;
+                        dst->adaptive_backlog_drain_events = state->backlog_drain_events;
+                }
         }
 
         /* Request type counts (only non-zero entries with names) */
@@ -425,6 +449,8 @@ static void rd_kafka_stats_broker_populate(rd_kafka_broker_stats_t *dst,
         for (i = 0; i < RD_KAFKAP__NUM; i++) {
                 int64_t cnt = rd_atomic64_get(&rkb->rkb_c.reqtype[i]);
                 if (cnt > 0) {
+                        if (unlikely((size_t)req_idx >= req_cap))
+                                break;
                         rd_kafka_req_count_t *req = &dst->reqs[req_idx++];
                         rd_kafka_stats_strcpy(req->name, sizeof(req->name),
                                                rd_kafka_ApiKey2str((int16_t)i));
@@ -433,19 +459,16 @@ static void rd_kafka_stats_broker_populate(rd_kafka_broker_stats_t *dst,
         }
         dst->req_cnt = req_idx;
 
-        /* Count and populate toppars */
-        dst->toppar_cnt = 0;
-        TAILQ_FOREACH(rktp, &rkb->rkb_toppars, rktp_rkblink) {
-                dst->toppar_cnt++;
-        }
-
         dst->toppars = *toppar_ptr;
         TAILQ_FOREACH(rktp, &rkb->rkb_toppars, rktp_rkblink) {
+                if (unlikely((size_t)toppar_idx >= toppar_cap))
+                        break;
                 rd_kafka_broker_toppar_ref_t *ref = &dst->toppars[toppar_idx++];
                 rd_kafka_stats_strcpy(ref->topic, sizeof(ref->topic),
                                        rktp->rktp_rkt->rkt_topic->str);
                 ref->partition = rktp->rktp_partition;
         }
+        dst->toppar_cnt = toppar_idx;
 
         rd_kafka_broker_unlock(rkb);
 
@@ -472,7 +495,9 @@ rd_kafka_stats_t *rd_kafka_stats_new(rd_kafka_t *rk) {
         int topic_idx    = 0;
         rd_kafka_partition_stats_t *part_ptr;
         rd_kafka_broker_toppar_ref_t *toppar_ptr;
+        rd_kafka_broker_toppar_ref_t *toppar_end;
         rd_kafka_req_count_t *req_ptr;
+        rd_kafka_req_count_t *req_end;
 
         rd_kafka_rdlock(rk);
 
@@ -512,8 +537,10 @@ rd_kafka_stats_t *rd_kafka_stats_new(rd_kafka_t *rk) {
 
         toppar_ptr = (rd_kafka_broker_toppar_ref_t *)ptr;
         ptr += counts.total_broker_toppars * sizeof(rd_kafka_broker_toppar_ref_t);
+        toppar_end = toppar_ptr + counts.total_broker_toppars;
 
         req_ptr = (rd_kafka_req_count_t *)ptr;
+        req_end = req_ptr + counts.total_broker_reqs;
 
         /* Get current time */
         now = rd_clock();
@@ -549,8 +576,8 @@ rd_kafka_stats_t *rd_kafka_stats_new(rd_kafka_t *rk) {
         /* Populate brokers */
         TAILQ_FOREACH(rkb, &rk->rk_brokers, rkb_link) {
                 rd_kafka_stats_broker_populate(
-                    &stats->brokers[broker_idx++], rkb, &toppar_ptr, &req_ptr,
-                    now, &stats->tx, &stats->tx_bytes, &stats->rx,
+                    &stats->brokers[broker_idx++], rkb, &toppar_ptr, toppar_end,
+                    &req_ptr, req_end, now, &stats->tx, &stats->tx_bytes, &stats->rx,
                     &stats->rx_bytes);
         }
 

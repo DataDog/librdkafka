@@ -30,6 +30,7 @@ static int64_t produce_and_count(const char *topic,
         test_conf_set(conf, "compression.type", "none");
         test_conf_set(conf, "batch.num.messages", batch_num);
         test_conf_set(conf, "batch.size", batch_size);
+        test_conf_set(conf, "produce.engine", "v2");
         test_conf_set(conf, "produce.request.max.partitions", "10");
         test_conf_set(conf, "message.max.bytes", "1000000");
 
@@ -113,6 +114,7 @@ static void test_envelope_max_bytes(void) {
         test_conf_set(conf, "test.mock.num.brokers", "1");
         test_conf_set(conf, "linger.ms", "0");
         test_conf_set(conf, "compression.type", "none");
+        test_conf_set(conf, "produce.engine", "v2");
         test_conf_set(conf, "produce.request.max.partitions", "10");
         /* Kafka enforces a floor of 1000 bytes; use a small but valid value. */
         test_conf_set(conf, "message.max.bytes", "1200"); /* small envelope */
@@ -172,6 +174,7 @@ static void test_envelope_max_partitions(void) {
         test_conf_set(conf, "test.mock.num.brokers", "1");
         test_conf_set(conf, "linger.ms", "0");
         test_conf_set(conf, "compression.type", "none");
+        test_conf_set(conf, "produce.engine", "v2");
         test_conf_set(conf, "produce.request.max.partitions", "2");
         test_conf_set(conf, "message.max.bytes", "1000000");
         rd_kafka_conf_set_dr_msg_cb(conf, test_dr_msg_cb);
@@ -235,6 +238,7 @@ static void test_per_partition_limits_with_multibatch(void) {
         test_conf_set(conf, "compression.type", "none");
         test_conf_set(conf, "batch.num.messages", "2");
         test_conf_set(conf, "batch.size", "100000");
+        test_conf_set(conf, "produce.engine", "v2");
         /* Force one partition per Produce so we can count per-partition batches
          * cleanly. */
         test_conf_set(conf, "produce.request.max.partitions", "1");

@@ -34,13 +34,18 @@
  *        manually.
  */
 static void
-do_test_rebootstrap_local_no_bootstrap_servers(rd_kafka_type_t rk_type) {
+do_test_rebootstrap_local_no_bootstrap_servers(rd_kafka_type_t rk_type,
+                                               const char *engine_name) {
         rd_kafka_conf_t *conf;
         rd_kafka_t *rk;
 
-        SUB_TEST_QUICK("%s",
-                       rk_type == RD_KAFKA_PRODUCER ? "producer" : "consumer");
+        if (rk_type == RD_KAFKA_PRODUCER)
+                SUB_TEST_QUICK("producer produce.engine=%s", engine_name);
+        else
+                SUB_TEST_QUICK("consumer");
         test_conf_init(&conf, NULL, 30);
+        if (rk_type == RD_KAFKA_PRODUCER)
+                test_conf_set(conf, "produce.engine", engine_name);
         rk = test_create_handle(rk_type, conf);
         rd_kafka_brokers_add(rk, "localhost:9999");
 
@@ -51,9 +56,13 @@ do_test_rebootstrap_local_no_bootstrap_servers(rd_kafka_type_t rk_type) {
 }
 
 int main_0152_rebootstrap_local(int argc, char **argv) {
+        const char *engine_names[] = {"v1", "v2"};
+        size_t i;
 
-        do_test_rebootstrap_local_no_bootstrap_servers(RD_KAFKA_PRODUCER);
-        do_test_rebootstrap_local_no_bootstrap_servers(RD_KAFKA_CONSUMER);
+        for (i = 0; i < RD_ARRAYSIZE(engine_names); i++)
+                do_test_rebootstrap_local_no_bootstrap_servers(
+                    RD_KAFKA_PRODUCER, engine_names[i]);
+        do_test_rebootstrap_local_no_bootstrap_servers(RD_KAFKA_CONSUMER, NULL);
 
         return 0;
 }

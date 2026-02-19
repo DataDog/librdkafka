@@ -61,6 +61,7 @@ static void prepare_timestamps(void) {
  * @brief Produce messages according to compress \p codec
  */
 static void produce_msgs(const char *topic,
+                         const char *engine_name,
                          int partition,
                          uint64_t testid,
                          int msgcnt,
@@ -74,6 +75,7 @@ static void produce_msgs(const char *topic,
 
         test_conf_init(&conf, NULL, 0);
         rd_kafka_conf_set_dr_msg_cb(conf, test_dr_msg_cb);
+        test_conf_set(conf, "produce.engine", engine_name);
         test_conf_set(conf, "compression.codec", codec);
         test_conf_set(conf, "broker.version.fallback", broker_version);
         if (!strncmp(broker_version, "0.8", 3) ||
@@ -137,6 +139,7 @@ consume_msgs_verify_timestamps(const char *topic,
 
 
 static void test_timestamps(const char *broker_tstype,
+                            const char *engine_name,
                             const char *broker_version,
                             const char *codec,
                             const struct timestamp_range *exp_timestamps) {
@@ -174,7 +177,8 @@ static void test_timestamps(const char *broker_tstype,
         test_wait_topic_exists(NULL, topic, 5000);
 
         TEST_SAY(_C_MAG "Producing %d messages to %s\n", msgcnt, topic);
-        produce_msgs(topic, 0, testid, msgcnt, broker_version, codec);
+        produce_msgs(topic, engine_name, 0, testid, msgcnt, broker_version,
+                     codec);
 
         TEST_SAY(_C_MAG
                  "Consuming and verifying %d messages from %s "
@@ -183,6 +187,36 @@ static void test_timestamps(const char *broker_tstype,
 
         consume_msgs_verify_timestamps(topic, 0, testid, msgcnt,
                                        exp_timestamps);
+}
+
+static void run_timestamp_suite(const char *engine_name,
+                                rd_bool_t test_with_apache_kafka_since_4_0) {
+        SUB_TEST("%s", engine_name);
+
+        test_timestamps("CreateTime", engine_name, "0.10.1.0", "none",
+                        &my_timestamp);
+        test_timestamps("LogAppendTime", engine_name, "0.10.1.0", "none",
+                        &broker_timestamp);
+        if (!test_with_apache_kafka_since_4_0) {
+                test_timestamps("CreateTime", engine_name, "0.9.0.0", "none",
+                                &invalid_timestamp);
+                test_timestamps("LogAppendTime", engine_name, "0.9.0.0", "none",
+                                &broker_timestamp);
+        }
+#if WITH_ZLIB
+        test_timestamps("CreateTime", engine_name, "0.10.1.0", "gzip",
+                        &my_timestamp);
+        test_timestamps("LogAppendTime", engine_name, "0.10.1.0", "gzip",
+                        &broker_timestamp);
+        if (!test_with_apache_kafka_since_4_0) {
+                test_timestamps("CreateTime", engine_name, "0.9.0.0", "gzip",
+                                &invalid_timestamp);
+                test_timestamps("LogAppendTime", engine_name, "0.9.0.0", "gzip",
+                                &broker_timestamp);
+        }
+#endif
+
+        SUB_TEST_PASS();
 }
 
 
@@ -220,24 +254,8 @@ int main_0052_msg_timestamps(int argc, char **argv) {
          */
         prepare_timestamps();
 
-        test_timestamps("CreateTime", "0.10.1.0", "none", &my_timestamp);
-        test_timestamps("LogAppendTime", "0.10.1.0", "none", &broker_timestamp);
-        if (!test_with_apache_kafka_since_4_0) {
-                test_timestamps("CreateTime", "0.9.0.0", "none",
-                                &invalid_timestamp);
-                test_timestamps("LogAppendTime", "0.9.0.0", "none",
-                                &broker_timestamp);
-        }
-#if WITH_ZLIB
-        test_timestamps("CreateTime", "0.10.1.0", "gzip", &my_timestamp);
-        test_timestamps("LogAppendTime", "0.10.1.0", "gzip", &broker_timestamp);
-        if (!test_with_apache_kafka_since_4_0) {
-                test_timestamps("CreateTime", "0.9.0.0", "gzip",
-                                &invalid_timestamp);
-                test_timestamps("LogAppendTime", "0.9.0.0", "gzip",
-                                &broker_timestamp);
-        }
-#endif
+        run_timestamp_suite("v1", test_with_apache_kafka_since_4_0);
+        run_timestamp_suite("v2", test_with_apache_kafka_since_4_0);
 
         return 0;
 }

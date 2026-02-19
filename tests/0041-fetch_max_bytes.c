@@ -46,20 +46,30 @@
  */
 
 
-int main_0041_fetch_max_bytes(int argc, char **argv) {
+static void do_test_fetch_max_bytes(const char *engine_name,
+                                    int argc,
+                                    char **argv) {
         const char *topic   = test_mk_topic_name(__FUNCTION__, 1);
         const int partition = 0;
         const int msgcnt    = 2 * 1000;
         const int MAX_BYTES = 100000;
         uint64_t testid;
+        rd_kafka_conf_t *pconf;
         rd_kafka_conf_t *conf;
         rd_kafka_t *rk;
         rd_kafka_topic_t *rkt;
+        (void)argc;
+        (void)argv;
+
+        SUB_TEST("fetch max bytes (%s)", engine_name);
 
         test_conf_init(NULL, NULL, 60);
 
         testid = test_id_generate();
-        rk     = test_create_producer();
+        test_conf_init(&pconf, NULL, 0);
+        test_conf_set(pconf, "produce.engine", engine_name);
+        rd_kafka_conf_set_dr_msg_cb(pconf, test_dr_msg_cb);
+        rk  = test_create_handle(RD_KAFKA_PRODUCER, pconf);
         rkt    = test_create_producer_topic(rk, topic, NULL);
         test_wait_topic_exists(rk, topic, 5000);
 
@@ -93,5 +103,13 @@ int main_0041_fetch_max_bytes(int argc, char **argv) {
         rd_kafka_topic_destroy(rkt);
         rd_kafka_destroy(rk);
 
+        SUB_TEST_PASS();
+
+        return;
+}
+
+int main_0041_fetch_max_bytes(int argc, char **argv) {
+        do_test_fetch_max_bytes("v1", argc, argv);
+        do_test_fetch_max_bytes("v2", argc, argv);
         return 0;
 }

@@ -155,15 +155,17 @@ static int connect_cb(int s,
         return -1;
 }
 
-int main_0136_resolve_cb(int argc, char **argv) {
+static void do_test_resolve_cb(const char *engine_name) {
         rd_kafka_conf_t *conf;
         rd_kafka_t *rk;
 
         this_test = test_curr;
 
+        TEST_SAY("Running resolve_cb with produce.engine=%s\n", engine_name);
         rd_atomic32_init(&stage, 0);
 
         test_conf_init(&conf, NULL, 0);
+        test_conf_set(conf, "produce.engine", engine_name);
         rd_kafka_conf_set_resolve_cb(conf, resolve_cb);
         rd_kafka_conf_set_connect_cb(conf, connect_cb);
 
@@ -176,6 +178,14 @@ int main_0136_resolve_cb(int argc, char **argv) {
                 rd_sleep(1);
 
         rd_kafka_destroy(rk);
+}
+
+int main_0136_resolve_cb(int argc, char **argv) {
+        const char *engine_names[] = {"v1", "v2"};
+        size_t i;
+
+        for (i = 0; i < RD_ARRAYSIZE(engine_names); i++)
+                do_test_resolve_cb(engine_names[i]);
 
         return 0;
 }

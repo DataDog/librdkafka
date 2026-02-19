@@ -69,7 +69,7 @@ static void dr_cb(rd_kafka_t *rk,
 }
 
 
-int main_0005_order(int argc, char **argv) {
+static void do_test_order(const char *engine_name, const char *prog_name) {
         int partition = 0;
         int r;
         rd_kafka_t *rk;
@@ -81,7 +81,10 @@ int main_0005_order(int argc, char **argv) {
         int i;
         test_timing_t t_produce, t_delivery;
 
+        msgid_next = 0;
+        fails      = 0;
         test_conf_init(&conf, &topic_conf, 10);
+        test_conf_set(conf, "produce.engine", engine_name);
 
         /* Set delivery report callback */
         rd_kafka_conf_set_dr_cb(conf, dr_cb);
@@ -98,7 +101,7 @@ int main_0005_order(int argc, char **argv) {
         for (i = 0; i < msgcnt; i++) {
                 int *msgidp = malloc(sizeof(*msgidp));
                 *msgidp     = i;
-                rd_snprintf(msg, sizeof(msg), "%s test message #%i", argv[0],
+                rd_snprintf(msg, sizeof(msg), "%s test message #%i", prog_name,
                             i);
                 r = rd_kafka_produce(rkt, partition, RD_KAFKA_MSG_F_COPY, msg,
                                      strlen(msg), NULL, 0, msgidp);
@@ -128,6 +131,17 @@ int main_0005_order(int argc, char **argv) {
         /* Destroy rdkafka instance */
         TEST_SAY("Destroying kafka instance %s\n", rd_kafka_name(rk));
         rd_kafka_destroy(rk);
+}
+
+int main_0005_order(int argc, char **argv) {
+        const char *engine_names[] = {"v1", "v2"};
+        size_t i;
+
+        for (i = 0; i < RD_ARRAYSIZE(engine_names); i++) {
+                TEST_SAY("Running order test with produce.engine=%s\n",
+                         engine_names[i]);
+                do_test_order(engine_names[i], argv[0]);
+        }
 
         return 0;
 }

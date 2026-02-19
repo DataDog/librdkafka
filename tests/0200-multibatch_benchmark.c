@@ -52,6 +52,7 @@
  *   BENCH_OUTPUT_DIR              Output directory (default: ./benchmark_output)
  *   BENCH_SKIP_MAX_THROUGHPUT     Set to "1" to skip max throughput phase
  *   BENCH_SKIP_CONTROLLED         Set to "1" to skip controlled rate phases
+ *   BENCH_V1_LINGER_MS            v1 linger.ms for v0/v0+multibatch profiles (default: 500)
  *
  * Broker-level batching configuration:
  *   BROKER_LINGER_MS              Broker-level linger in ms (default: 5)
@@ -80,6 +81,13 @@ typedef enum {
         BENCH_MODE_MAX_THROUGHPUT,
         BENCH_MODE_CONTROLLED_RATE
 } bench_mode_t;
+
+/* Producer implementation profile */
+typedef enum {
+        BENCH_PRODUCER_PROFILE_V0,
+        BENCH_PRODUCER_PROFILE_V0_MULTIBATCH,
+        BENCH_PRODUCER_PROFILE_V2
+} bench_producer_profile_t;
 
 /* Benchmark configuration */
 typedef struct {
@@ -110,6 +118,7 @@ typedef struct {
 /* Per-phase statistics */
 typedef struct {
         bench_mode_t mode;
+        bench_producer_profile_t producer_profile;
         int rate_msgs_sec;              /* For controlled rate mode, 0 for max throughput */
         double duration_sec;
         int messages_sent;
@@ -181,6 +190,20 @@ typedef struct {
 } bench_ctx_t;
 
 static bench_ctx_t *bench_ctx = NULL;
+
+static const char *
+bench_producer_profile_name(bench_producer_profile_t producer_profile) {
+        switch (producer_profile) {
+        case BENCH_PRODUCER_PROFILE_V0:
+                return "v0";
+        case BENCH_PRODUCER_PROFILE_V0_MULTIBATCH:
+                return "v0+multibatch";
+        case BENCH_PRODUCER_PROFILE_V2:
+                return "v2";
+        default:
+                return "unknown";
+        }
+}
 
 /**
  * Typed stats callback - extract statistics directly from struct
@@ -347,10 +370,15 @@ static void ensure_output_dir(const char *dir) {
 /**
  * Create producer with standard configuration
  */
-static rd_kafka_t *create_producer(bench_config_t *config, const char *topic) {
+static rd_kafka_t *create_producer(bench_config_t *config,
+                                   const char *topic,
+                                   bench_producer_profile_t producer_profile) {
         rd_kafka_conf_t *conf;
         rd_kafka_t *rk;
         const char *val;
+        const char *v1_linger_ms;
+
+        (void)topic;
 
         test_conf_init(&conf, NULL, 120);
         rd_kafka_conf_set_dr_msg_cb(conf, dr_cb);
@@ -366,7 +394,22 @@ static rd_kafka_t *create_producer(bench_config_t *config, const char *topic) {
         test_conf_set(conf, "compression.type", "lz4");
         test_conf_set(conf, "message.max.bytes", "100000000"); /* 100MB */
         test_conf_set(conf, "batch.num.messages", "100000");
-        test_conf_set(conf, "produce.request.max.partitions", "10000");
+        if (producer_profile == BENCH_PRODUCER_PROFILE_V2) {
+                test_conf_set(conf, "produce.engine", "v2");
+                /* test_conf_set(conf, "produce.request.max.partitions", "10000"); */
+        } else {
+                test_conf_set(conf, "produce.engine", "v1");
+                test_conf_set(conf, "multibatch",
+                              producer_profile == BENCH_PRODUCER_PROFILE_V0_MULTIBATCH
+                                  ? "true"
+                                  : "false");
+
+                /* v1 path uses queue.buffering.max.ms for linger behavior. */
+                v1_linger_ms =
+                    test_getenv("BENCH_V1_LINGER_MS",
+                                test_getenv("BROKER_LINGER_MS", "500"));
+                test_conf_set(conf, "queue.buffering.max.ms", v1_linger_ms);
+        }
 
         /* Broker-level batching configuration (new) */
         test_conf_set(conf, "broker.linger.ms", "500");  /* Default: 5ms */
@@ -381,8 +424,9 @@ static rd_kafka_t *create_producer(bench_config_t *config, const char *topic) {
         if ((val = test_getenv("BROKER_BATCH_MAX_BYTES", NULL)))
                 test_conf_set(conf, "broker.batch.max.bytes", val);
 
-        /* Allow produce.request.max.partitions override via environment */
-        if ((val = test_getenv("MAX_PARTITIONS", NULL)))
+        /* Allow produce.request.max.partitions override via environment (v2 only) */
+        if (producer_profile == BENCH_PRODUCER_PROFILE_V2 &&
+            (val = test_getenv("MAX_PARTITIONS", NULL)))
                 test_conf_set(conf, "produce.request.max.partitions", val);
 
         rk = test_create_handle(RD_KAFKA_PRODUCER, conf);
@@ -409,8 +453,8 @@ static void run_max_throughput_phase(bench_config_t *config, const char *topic) 
         TEST_SAY("========================================\n\n");
 
         /* Create producer */
-        rk = create_producer(config, topic);
-        rkt = test_create_producer_topic(rk, topic, "acks", "1", NULL);
+        rk = create_producer(config, topic, BENCH_PRODUCER_PROFILE_V2);
+        rkt = test_create_producer_topic(rk, topic, "acks", "-1", NULL);
 
         /* Reset latency tracking */
         mtx_lock(&bench_ctx->lock);
@@ -494,6 +538,7 @@ static void run_max_throughput_phase(bench_config_t *config, const char *topic) 
 
         phase_stats_t *phase = &bench_ctx->phases[bench_ctx->phase_cnt++];
         phase->mode = BENCH_MODE_MAX_THROUGHPUT;
+        phase->producer_profile = BENCH_PRODUCER_PROFILE_V2;
         phase->rate_msgs_sec = 0;
         phase->duration_sec = (double)(end_ts - start_ts) / 1000000.0;
         phase->messages_sent = messages_sent;
@@ -521,7 +566,8 @@ static void run_max_throughput_phase(bench_config_t *config, const char *topic) 
         mtx_unlock(&bench_ctx->lock);
 
         /* Print results */
-        TEST_SAY("\nResults:\n");
+        TEST_SAY("\nResults (%s):\n",
+                 bench_producer_profile_name(BENCH_PRODUCER_PROFILE_V2));
         TEST_SAY("  Duration: %.2f sec\n", phase->duration_sec);
         TEST_SAY("  Messages sent: %d (failed: %d)\n", messages_sent, messages_failed);
         TEST_SAY("  Throughput: %.1f msgs/sec (%.2f MB/sec)\n",
@@ -547,7 +593,10 @@ static void run_max_throughput_phase(bench_config_t *config, const char *topic) 
 /**
  * Run controlled rate benchmark
  */
-static void run_controlled_rate_phase(bench_config_t *config, const char *topic, int rate_msgs_sec) {
+static void run_controlled_rate_phase(bench_config_t *config,
+                                      const char *topic,
+                                      int rate_msgs_sec,
+                                      bench_producer_profile_t producer_profile) {
         rd_kafka_t *rk;
         rd_kafka_topic_t *rkt;
         int64_t start_ts, end_ts;
@@ -560,6 +609,8 @@ static void run_controlled_rate_phase(bench_config_t *config, const char *topic,
         TEST_SAY("CONTROLLED RATE MODE\n");
         TEST_SAY("========================================\n");
         TEST_SAY("Target rate: %d msgs/sec\n", rate_msgs_sec);
+        TEST_SAY("Producer profile: %s\n",
+                 bench_producer_profile_name(producer_profile));
         TEST_SAY("Duration: %d seconds\n", config->controlled_duration_sec);
         TEST_SAY("Target messages: %d\n", target_messages);
         TEST_SAY("Partitions: %d\n", config->partition_cnt);
@@ -567,8 +618,8 @@ static void run_controlled_rate_phase(bench_config_t *config, const char *topic,
         TEST_SAY("========================================\n\n");
 
         /* Create producer */
-        rk = create_producer(config, topic);
-        rkt = test_create_producer_topic(rk, topic, "acks", "1", NULL);
+        rk = create_producer(config, topic, producer_profile);
+        rkt = test_create_producer_topic(rk, topic, "acks", "-1", NULL);
 
         /* Reset latency tracking */
         mtx_lock(&bench_ctx->lock);
@@ -624,7 +675,7 @@ static void run_controlled_rate_phase(bench_config_t *config, const char *topic,
                 next_send_ts += interval_us;
 
                 /* Poll occasionally */
-                if (i % 1000 == 0)
+                if (i % 100 == 0)
                         rd_kafka_poll(rk, 0);
         }
 
@@ -665,6 +716,7 @@ static void run_controlled_rate_phase(bench_config_t *config, const char *topic,
 
         phase_stats_t *phase = &bench_ctx->phases[bench_ctx->phase_cnt++];
         phase->mode = BENCH_MODE_CONTROLLED_RATE;
+        phase->producer_profile = producer_profile;
         phase->rate_msgs_sec = rate_msgs_sec;
         phase->duration_sec = (double)(end_ts - start_ts) / 1000000.0;
         phase->messages_sent = messages_sent;
@@ -692,7 +744,8 @@ static void run_controlled_rate_phase(bench_config_t *config, const char *topic,
         mtx_unlock(&bench_ctx->lock);
 
         /* Print results */
-        TEST_SAY("\nResults:\n");
+        TEST_SAY("\nResults (%s):\n",
+                 bench_producer_profile_name(producer_profile));
         TEST_SAY("  Duration: %.2f sec\n", phase->duration_sec);
         TEST_SAY("  Messages sent: %d (failed: %d)\n", messages_sent, messages_failed);
         TEST_SAY("  Actual rate: %.1f msgs/sec (target: %d)\n",
@@ -716,6 +769,26 @@ static void run_controlled_rate_phase(bench_config_t *config, const char *topic,
         rd_kafka_destroy(rk);
 }
 
+static const phase_stats_t *
+find_controlled_phase(int rate_msgs_sec, bench_producer_profile_t producer_profile) {
+        int i;
+        for (i = 0; i < bench_ctx->phase_cnt; i++) {
+                const phase_stats_t *phase = &bench_ctx->phases[i];
+                if (phase->mode == BENCH_MODE_CONTROLLED_RATE &&
+                    phase->rate_msgs_sec == rate_msgs_sec &&
+                    phase->producer_profile == producer_profile)
+                        return phase;
+        }
+
+        return NULL;
+}
+
+static double pct_delta(double value, double baseline) {
+        if (fabs(baseline) < 0.0000001)
+                return 0.0;
+        return ((value - baseline) / baseline) * 100.0;
+}
+
 /**
  * Output results to CSV and summary
  */
@@ -731,7 +804,7 @@ static void output_results(bench_config_t *config) {
                 return;
         }
 
-        fprintf(summary_fp, "mode,rate_msgs_sec,duration_sec,messages_sent,messages_failed,"
+        fprintf(summary_fp, "mode,producer_profile,rate_msgs_sec,duration_sec,messages_sent,messages_failed,"
                            "requests_sent,msgs_per_req,throughput_msgs_sec,throughput_mb_sec,"
                            "latency_p50_ms,latency_p95_ms,latency_p99_ms,"
                            "produce_partitions_p50,produce_partitions_avg,"
@@ -740,9 +813,10 @@ static void output_results(bench_config_t *config) {
 
         for (int i = 0; i < bench_ctx->phase_cnt; i++) {
                 phase_stats_t *p = &bench_ctx->phases[i];
-                fprintf(summary_fp, "%s,%d,%.2f,%d,%d,%lld,%.1f,%.1f,%.2f,%.2f,%.2f,%.2f,"
+                fprintf(summary_fp, "%s,%s,%d,%.2f,%d,%d,%lld,%.1f,%.1f,%.2f,%.2f,%.2f,%.2f,"
                                      "%.2f,%.2f,%.0f,%.2f,%.2f\n",
                        p->mode == BENCH_MODE_MAX_THROUGHPUT ? "max_throughput" : "controlled",
+                       bench_producer_profile_name(p->producer_profile),
                        p->rate_msgs_sec,
                        p->duration_sec,
                        p->messages_sent,
@@ -825,27 +899,103 @@ static void output_results(bench_config_t *config) {
 
         if (!config->skip_controlled) {
                 TEST_SAY("CONTROLLED RATE MODE RESULTS:\n");
-                TEST_SAY("%-10s %-10s %-12s %-12s %-10s %-10s %-10s %-14s %-14s\n",
-                        "Rate", "Duration", "Messages", "Requests", "msgs/req",
+                TEST_SAY("%-10s %-16s %-10s %-12s %-12s %-10s %-10s %-10s %-14s %-14s\n",
+                        "Rate", "Profile", "Duration", "Messages", "Requests", "msgs/req",
                         "p50 lat", "p99 lat", "part/req p50", "batchwait p50");
-                TEST_SAY("%-10s %-10s %-12s %-12s %-10s %-10s %-10s %-14s %-14s\n",
-                        "(msg/s)", "(s)", "sent", "sent", "", "(ms)", "(ms)",
+                TEST_SAY("%-10s %-16s %-10s %-12s %-12s %-10s %-10s %-10s %-14s %-14s\n",
+                        "(msg/s)", "", "(s)", "sent", "sent", "", "(ms)", "(ms)",
                         "", "(ms)");
-                TEST_SAY("---------- ---------- ------------ ------------ ---------- ---------- ---------- -------------- --------------\n");
+                TEST_SAY("---------- ---------------- ---------- ------------ ------------ ---------- ---------- ---------- -------------- --------------\n");
 
-                int start_idx = config->skip_max_throughput ? 0 : 1;
-                for (int i = start_idx; i < bench_ctx->phase_cnt; i++) {
+                for (int i = 0; i < bench_ctx->phase_cnt; i++) {
                         phase_stats_t *p = &bench_ctx->phases[i];
-                        TEST_SAY("%-10d %-10.1f %-12d %-12lld %-10.1f %-10.2f %-10.2f %-14.2f %-14.2f\n",
+                        double msgs_per_req = p->request_count > 0
+                                                  ? (double)p->messages_sent /
+                                                        p->request_count
+                                                  : 0.0;
+
+                        if (p->mode != BENCH_MODE_CONTROLLED_RATE)
+                                continue;
+
+                        TEST_SAY("%-10d %-16s %-10.1f %-12d %-12lld %-10.1f %-10.2f %-10.2f %-14.2f %-14.2f\n",
                                 p->rate_msgs_sec,
+                                bench_producer_profile_name(p->producer_profile),
                                 p->duration_sec,
                                 p->messages_sent,
                                 (long long)p->request_count,
-                                (double)p->messages_sent / p->request_count,
+                                msgs_per_req,
                                 p->latency_p50_ms,
                                 p->latency_p99_ms,
                                 p->produce_partitions_p50,
                                 p->batch_wait_p50_us / 1000.0);
+                }
+                TEST_SAY("\n");
+
+                TEST_SAY("CONTROLLED RATE COMPARISON (baseline: v0)\n");
+                TEST_SAY("%-10s %-16s %-18s %-18s %-18s\n", "Rate", "Variant",
+                         "Throughput delta", "p99 latency delta",
+                         "msgs/req delta");
+                TEST_SAY("%-10s %-16s %-18s %-18s %-18s\n", "(msg/s)", "",
+                         "(%)", "(%)", "(%)");
+                TEST_SAY("---------- ---------------- ------------------ ------------------ ------------------\n");
+
+                for (int i = 0; i < config->controlled_rate_cnt; i++) {
+                        int rate = config->controlled_rates[i];
+                        const phase_stats_t *v0 =
+                            find_controlled_phase(rate,
+                                                  BENCH_PRODUCER_PROFILE_V0);
+                        const phase_stats_t *v0_multibatch = find_controlled_phase(
+                            rate, BENCH_PRODUCER_PROFILE_V0_MULTIBATCH);
+                        const phase_stats_t *v2 =
+                            find_controlled_phase(rate,
+                                                  BENCH_PRODUCER_PROFILE_V2);
+
+                        if (!v0)
+                                continue;
+
+                        if (v0_multibatch) {
+                                double v0_msgs_per_req =
+                                    v0->request_count > 0
+                                        ? (double)v0->messages_sent /
+                                              v0->request_count
+                                        : 0.0;
+                                double v0_mb_msgs_per_req =
+                                    v0_multibatch->request_count > 0
+                                        ? (double)v0_multibatch->messages_sent /
+                                              v0_multibatch->request_count
+                                        : 0.0;
+                                TEST_SAY(
+                                    "%-10d %-16s %+17.2f%% %+17.2f%% %+17.2f%%\n",
+                                    rate, "v0+multibatch",
+                                    pct_delta(v0_multibatch->throughput_msgs_sec,
+                                              v0->throughput_msgs_sec),
+                                    pct_delta(v0_multibatch->latency_p99_ms,
+                                              v0->latency_p99_ms),
+                                    pct_delta(v0_mb_msgs_per_req,
+                                              v0_msgs_per_req));
+                        }
+
+                        if (v2) {
+                                double v0_msgs_per_req =
+                                    v0->request_count > 0
+                                        ? (double)v0->messages_sent /
+                                              v0->request_count
+                                        : 0.0;
+                                double v2_msgs_per_req =
+                                    v2->request_count > 0
+                                        ? (double)v2->messages_sent /
+                                              v2->request_count
+                                        : 0.0;
+                                TEST_SAY(
+                                    "%-10d %-16s %+17.2f%% %+17.2f%% %+17.2f%%\n",
+                                    rate, "v2",
+                                    pct_delta(v2->throughput_msgs_sec,
+                                              v0->throughput_msgs_sec),
+                                    pct_delta(v2->latency_p99_ms,
+                                              v0->latency_p99_ms),
+                                    pct_delta(v2_msgs_per_req,
+                                              v0_msgs_per_req));
+                        }
                 }
                 TEST_SAY("\n");
         }
@@ -867,6 +1017,7 @@ static void output_results(bench_config_t *config) {
  *   BENCH_OUTPUT_DIR              Output directory (default: ./benchmark_output)
  *   BENCH_SKIP_MAX_THROUGHPUT     Set to "1" to skip max throughput phase
  *   BENCH_SKIP_CONTROLLED         Set to "1" to skip controlled rate phases
+ *   BENCH_V1_LINGER_MS            v1 linger.ms for v0/v0+multibatch profiles (default: 500)
  */
 static void parse_config(bench_config_t *config) {
         const char *val;
@@ -948,7 +1099,8 @@ int main_0200_multibatch_benchmark(int argc, char **argv) {
         topic = test_mk_topic_name(__FUNCTION__, 1);
 
         /* Create a temporary producer just for topic creation */
-        rd_kafka_t *rk_temp = create_producer(&config, topic);
+        rd_kafka_t *rk_temp =
+            create_producer(&config, topic, BENCH_PRODUCER_PROFILE_V2);
         test_create_topic_wait_exists(rk_temp, topic, config.partition_cnt, 1, 30000);
         rd_kafka_destroy(rk_temp);
 
@@ -970,7 +1122,14 @@ int main_0200_multibatch_benchmark(int argc, char **argv) {
         /* Run controlled rate phases */
         if (!config.skip_controlled) {
                 for (int i = 0; i < config.controlled_rate_cnt; i++) {
-                        run_controlled_rate_phase(&config, topic, config.controlled_rates[i]);
+                        int rate = config.controlled_rates[i];
+                        run_controlled_rate_phase(
+                            &config, topic, rate, BENCH_PRODUCER_PROFILE_V0);
+                        run_controlled_rate_phase(
+                            &config, topic, rate,
+                            BENCH_PRODUCER_PROFILE_V0_MULTIBATCH);
+                        run_controlled_rate_phase(
+                            &config, topic, rate, BENCH_PRODUCER_PROFILE_V2);
                 }
         }
 

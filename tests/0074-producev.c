@@ -37,7 +37,7 @@
  * @brief Verify #1478: The internal shared rkt reference was not destroyed
  *        when producev() failed.
  */
-static void do_test_srkt_leak(void) {
+static void do_test_srkt_leak(const char *engine_name) {
         rd_kafka_conf_t *conf;
         char buf[2000];
         rd_kafka_t *rk;
@@ -46,6 +46,7 @@ static void do_test_srkt_leak(void) {
         rd_kafka_vu_t vus[3];
 
         conf = rd_kafka_conf_new();
+        test_conf_set(conf, "produce.engine", engine_name);
         test_conf_set(conf, "message.max.bytes", "1000");
 
         rk = test_create_handle(RD_KAFKA_PRODUCER, conf);
@@ -82,6 +83,7 @@ static void do_test_srkt_leak(void) {
 
 
 int main_0074_producev(int argc, char **argv) {
-        do_test_srkt_leak();
+        do_test_srkt_leak("v1");
+        do_test_srkt_leak("v2");
         return 0;
 }

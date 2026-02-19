@@ -220,10 +220,12 @@ static void test_offset_commit(rd_kafka_mock_cluster_t *mcluster,
  */
 static void test_produce(rd_kafka_mock_cluster_t *mcluster,
                          const char *topic,
-                         rd_kafka_conf_t *conf) {
+                         rd_kafka_conf_t *conf,
+                         const char *engine_name) {
         rd_kafka_t *producer;
         rd_kafka_topic_t *rkt;
-        SUB_TEST();
+        SUB_TEST("produce.engine=%s", engine_name);
+        test_conf_set(conf, "produce.engine", engine_name);
         rd_kafka_conf_set_dr_msg_cb(conf, test_dr_msg_cb);
 
         producer = test_create_handle(RD_KAFKA_PRODUCER, conf);
@@ -383,7 +385,8 @@ static void test_joingroup_find_coordinator(rd_kafka_mock_cluster_t *mcluster,
  */
 static void test_produce_fast_leader_query(rd_kafka_mock_cluster_t *mcluster,
                                            const char *topic,
-                                           rd_kafka_conf_t *conf) {
+                                           rd_kafka_conf_t *conf,
+                                           const char *engine_name) {
         rd_kafka_mock_request_t **requests = NULL;
         size_t request_cnt                 = 0;
         int64_t previous_request_ts        = -1;
@@ -392,7 +395,8 @@ static void test_produce_fast_leader_query(rd_kafka_mock_cluster_t *mcluster,
         rd_kafka_t *producer;
         rd_kafka_topic_t *rkt;
         size_t i;
-        SUB_TEST();
+        SUB_TEST("produce.engine=%s", engine_name);
+        test_conf_set(conf, "produce.engine", engine_name);
         rd_kafka_conf_set_dr_msg_cb(conf, test_dr_msg_cb);
 
         producer = test_create_handle(RD_KAFKA_PRODUCER, conf);
@@ -514,9 +518,11 @@ static void test_fetch_fast_leader_query(rd_kafka_mock_cluster_t *mcluster,
  */
 int main_0143_exponential_backoff_mock(int argc, char **argv) {
         const char *topic = test_mk_topic_name("topic", 1);
+        const char *engine_names[] = {"v1", "v2"};
         rd_kafka_mock_cluster_t *mcluster;
         rd_kafka_conf_t *conf;
         const char *bootstraps;
+        size_t i;
 
         TEST_SKIP_MOCK_CLUSTER(0);
 
@@ -531,14 +537,18 @@ int main_0143_exponential_backoff_mock(int argc, char **argv) {
         test_conf_set(conf, "bootstrap.servers", bootstraps);
         test_conf_set(conf, "topic.metadata.refresh.interval.ms", "-1");
 
-        test_produce(mcluster, topic, rd_kafka_conf_dup(conf));
+        for (i = 0; i < RD_ARRAYSIZE(engine_names); i++)
+                test_produce(mcluster, topic, rd_kafka_conf_dup(conf),
+                             engine_names[i]);
         test_find_coordinator(mcluster, topic, rd_kafka_conf_dup(conf));
         test_offset_commit(mcluster, topic, rd_kafka_conf_dup(conf));
         test_heartbeat_find_coordinator(mcluster, topic,
                                         rd_kafka_conf_dup(conf));
         test_fetch_fast_leader_query(mcluster, topic, rd_kafka_conf_dup(conf));
-        test_produce_fast_leader_query(mcluster, topic,
-                                       rd_kafka_conf_dup(conf));
+        for (i = 0; i < RD_ARRAYSIZE(engine_names); i++)
+                test_produce_fast_leader_query(mcluster, topic,
+                                               rd_kafka_conf_dup(conf),
+                                               engine_names[i]);
 
         /* No JoinGroup RPC in KIP 848 protocol. */
         if (test_consumer_group_protocol_classic()) {

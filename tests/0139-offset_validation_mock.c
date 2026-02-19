@@ -36,6 +36,7 @@ struct _produce_args {
         int sleep;
         rd_kafka_conf_t *conf;
 };
+static const char *produce_engine_name = "v1";
 
 static int produce_concurrent_thread(void *args) {
         rd_kafka_t *p1;
@@ -67,6 +68,9 @@ static void do_test_no_duplicates_during_offset_validation(void) {
         const char *bootstraps;
         rd_kafka_mock_cluster_t *mcluster;
         int initial_msg_count = 5;
+        int post_msg_count    = 0;
+        rd_bool_t saw_eof     = rd_false;
+        int64_t abs_timeout;
         thrd_t thrd;
         struct _produce_args args = RD_ZERO_INIT;
         uint64_t testid           = test_id_generate();
@@ -84,12 +88,14 @@ static void do_test_no_duplicates_during_offset_validation(void) {
 
         test_conf_init(&conf_producer, NULL, 60);
         test_conf_set(conf_producer, "bootstrap.servers", bootstraps);
+        test_conf_set(conf_producer, "produce.engine", produce_engine_name);
 
 
         /* Seed the topic with messages */
         test_produce_msgs_easy_v(topic, testid, 0, 0, initial_msg_count, 10,
                                  "bootstrap.servers", bootstraps,
-                                 "batch.num.messages", "1", NULL);
+                                 "batch.num.messages", "1", "produce.engine",
+                                 produce_engine_name, NULL);
 
         args.topic = topic;
         /* Makes that the message is produced while an offset validation
@@ -118,12 +124,35 @@ static void do_test_no_duplicates_during_offset_validation(void) {
         /* Consume initial messages */
         test_consumer_poll("MSG_INIT", c1, testid, 0, 0, initial_msg_count,
                            NULL);
-        /* EOF after initial messages */
-        test_consumer_poll("MSG_EOF", c1, testid, 1, initial_msg_count, 0,
-                           NULL);
-        /* Concurrent producer message and EOF */
-        test_consumer_poll("MSG_AND_EOF", c1, testid, 1, initial_msg_count, 1,
-                           NULL);
+        /* The concurrent producer message and EOF can arrive in either order
+         * depending on scheduling. Collect until we've seen at least one EOF
+         * and exactly one post-initial message. */
+        abs_timeout = test_clock() + (30 * 1000 * 1000);
+        while ((!saw_eof || post_msg_count < 1) && test_clock() < abs_timeout) {
+                rd_kafka_message_t *rkmessage = rd_kafka_consumer_poll(c1, 1000);
+                if (!rkmessage)
+                        continue;
+
+                if (rkmessage->err == RD_KAFKA_RESP_ERR__PARTITION_EOF) {
+                        saw_eof = rd_true;
+                } else if (rkmessage->err) {
+                        TEST_FAIL("Unexpected consume error: %s",
+                                  rd_kafka_message_errstr(rkmessage));
+                } else {
+                        post_msg_count++;
+                        TEST_ASSERT(post_msg_count <= 1,
+                                    "Expected exactly one concurrent "
+                                    "message, got %d",
+                                    post_msg_count);
+                }
+
+                rd_kafka_message_destroy(rkmessage);
+        }
+        TEST_ASSERT(saw_eof, "Expected EOF after initial messages");
+        TEST_ASSERT(post_msg_count == 1,
+                    "Expected one concurrent message after initial batch, got %d",
+                    post_msg_count);
+
         /* Only an EOF, not a duplicate message */
         test_consumer_poll("MSG_EOF2", c1, testid, 1, initial_msg_count, 0,
                            NULL);
@@ -164,7 +193,8 @@ static void do_test_permanent_error_retried(rd_kafka_resp_err_t err) {
         /* Seed the topic with messages */
         test_produce_msgs_easy_v(topic, testid, 0, 0, msg_count, 10,
                                  "bootstrap.servers", bootstraps,
-                                 "batch.num.messages", "1", NULL);
+                                 "batch.num.messages", "1", "produce.engine",
+                                 produce_engine_name, NULL);
 
         /* Make OffsetForLeaderEpoch fail with the corresponding error code */
         rd_kafka_mock_push_request_errors(
@@ -245,7 +275,8 @@ static void do_test_two_leader_changes(void) {
         /* Seed the topic with messages */
         test_produce_msgs_easy_v(topic, testid, 0, 0, msg_cnt, 10,
                                  "bootstrap.servers", bootstraps,
-                                 "batch.num.messages", "1", NULL);
+                                 "batch.num.messages", "1", "produce.engine",
+                                 produce_engine_name, NULL);
 
         test_conf_init(&conf, NULL, 60);
         test_conf_set(conf, "bootstrap.servers", bootstraps);
@@ -282,7 +313,8 @@ static void do_test_two_leader_changes(void) {
          * of success. */
         test_produce_msgs_easy_v(topic, testid, 0, 0, msg_cnt, 10,
                                  "bootstrap.servers", bootstraps,
-                                 "batch.num.messages", "1", NULL);
+                                 "batch.num.messages", "1", "produce.engine",
+                                 produce_engine_name, NULL);
 
         test_consumer_poll("MSG_INIT", c1, testid, 0, 0, msg_cnt, NULL);
 
@@ -484,7 +516,8 @@ static void do_test_leader_change_no_validation(int variation) {
         /* Seed the topic with messages */
         test_produce_msgs_easy_v(topic, testid, 0, 0, msg_cnt, 10,
                                  "bootstrap.servers", bootstraps,
-                                 "batch.num.messages", "1", NULL);
+                                 "batch.num.messages", "1", "produce.engine",
+                                 produce_engine_name, NULL);
 
         test_conf_init(&conf, NULL, 60);
         test_conf_set(conf, "bootstrap.servers", bootstraps);
@@ -627,7 +660,8 @@ static void do_test_leader_change_from_internal_broker(int variation) {
         /* Seed the topic with messages */
         test_produce_msgs_easy_v(topic, testid, 0, 0, msg_cnt, 10,
                                  "bootstrap.servers", bootstraps,
-                                 "batch.num.messages", "1", NULL);
+                                 "batch.num.messages", "1", "produce.engine",
+                                 produce_engine_name, NULL);
 
         test_conf_init(&conf, NULL, 60);
         test_conf_set(conf, "bootstrap.servers", bootstraps);
@@ -895,7 +929,8 @@ static void do_test_list_offsets_leader_change(int variation) {
 
         /* Seed the topic with messages */
         test_produce_msgs_easy_v(topic, testid, 0, 0, msg_cnt, 10,
-                                 "bootstrap.servers", bootstraps, NULL);
+                                 "bootstrap.servers", bootstraps,
+                                 "produce.engine", produce_engine_name, NULL);
 
         test_conf_init(&conf, NULL, 60);
         test_conf_set(conf, "bootstrap.servers", bootstraps);
@@ -925,26 +960,34 @@ static void do_test_list_offsets_leader_change(int variation) {
 }
 
 int main_0139_offset_validation_mock(int argc, char **argv) {
+        const char *engine_names[] = {"v1", "v2"};
+        size_t i;
 
         TEST_SKIP_MOCK_CLUSTER(0);
 
-        do_test_no_duplicates_during_offset_validation();
+        for (i = 0; i < RD_ARRAYSIZE(engine_names); i++) {
+                TEST_SAY("Running offset_validation_mock with produce.engine=%s\n",
+                         engine_names[i]);
+                produce_engine_name = engine_names[i];
 
-        do_test_permanent_error_retried(RD_KAFKA_RESP_ERR__SSL);
-        do_test_permanent_error_retried(RD_KAFKA_RESP_ERR__RESOLVE);
+                do_test_no_duplicates_during_offset_validation();
 
-        do_test_two_leader_changes();
+                do_test_permanent_error_retried(RD_KAFKA_RESP_ERR__SSL);
+                do_test_permanent_error_retried(RD_KAFKA_RESP_ERR__RESOLVE);
 
-        do_test_store_offset_without_leader_epoch();
+                do_test_two_leader_changes();
 
-        do_test_leader_change_no_validation(0);
-        do_test_leader_change_no_validation(1);
+                do_test_store_offset_without_leader_epoch();
 
-        do_test_leader_change_from_internal_broker(0);
-        do_test_leader_change_from_internal_broker(1);
+                do_test_leader_change_no_validation(0);
+                do_test_leader_change_no_validation(1);
 
-        do_test_list_offsets_leader_change(0);
-        do_test_list_offsets_leader_change(1);
+                do_test_leader_change_from_internal_broker(0);
+                do_test_leader_change_from_internal_broker(1);
+
+                do_test_list_offsets_leader_change(0);
+                do_test_list_offsets_leader_change(1);
+        }
 
         return 0;
 }

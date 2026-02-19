@@ -47,10 +47,12 @@
  *  @param partition_assignment_strategy Assignment strategy to test.
  */
 static void
-test_no_duplicate_messages(const char *partition_assignment_strategy) {
+test_no_duplicate_messages(const char *engine_name,
+                           const char *partition_assignment_strategy) {
 
-        SUB_TEST("%s", partition_assignment_strategy);
+        SUB_TEST("%s (%s)", partition_assignment_strategy, engine_name);
         rd_kafka_t *rk;
+        rd_kafka_conf_t *pconf;
 #define TOPIC_CNT 3
         char *topic[TOPIC_CNT] = {
             rd_strdup(test_mk_topic_name("0050_subscribe_adds_1", 1)),
@@ -69,7 +71,10 @@ test_no_duplicate_messages(const char *partition_assignment_strategy) {
         msgcnt = (msgcnt / TOPIC_CNT) * TOPIC_CNT;
         testid = test_id_generate();
 
-        rk = test_create_producer();
+        test_conf_init(&pconf, NULL, 0);
+        test_conf_set(pconf, "produce.engine", engine_name);
+        rd_kafka_conf_set_dr_msg_cb(pconf, test_dr_msg_cb);
+        rk = test_create_handle(RD_KAFKA_PRODUCER, pconf);
         for (i = 0; i < TOPIC_CNT; i++) {
                 rd_kafka_topic_t *rkt;
 
@@ -133,13 +138,15 @@ test_no_duplicate_messages(const char *partition_assignment_strategy) {
 #undef TOPIC_CNT
 }
 
+static void run_subscribe_adds_engine(const char *engine_name) {
+        test_no_duplicate_messages(engine_name, "range");
+        test_no_duplicate_messages(engine_name, "roundrobin");
+        test_no_duplicate_messages(engine_name, "cooperative-sticky");
+}
+
 int main_0050_subscribe_adds(int argc, char **argv) {
-
-        test_no_duplicate_messages("range");
-
-        test_no_duplicate_messages("roundrobin");
-
-        test_no_duplicate_messages("cooperative-sticky");
+        run_subscribe_adds_engine("v1");
+        run_subscribe_adds_engine("v2");
 
         return 0;
 }

@@ -37,6 +37,7 @@ typedef struct {
                                    expected diff*/
         int broker_id;          /* Broker id of request. */
 } rd_kafka_telemetry_expected_request_t;
+static const char *produce_engine_name = "v1";
 
 static void test_telemetry_check_protocol_request_times(
     rd_kafka_mock_cluster_t *mcluster,
@@ -179,7 +180,8 @@ static rd_kafka_mock_cluster_t *create_mcluster(const char **bootstraps,
 
         /* Seed the topic so the consumer has always messages to read */
         test_produce_msgs_easy_v(topic, 0, 0, 0, 100, 0, "bootstrap.servers",
-                                 *bootstraps, "batch.num.messages", "10", NULL);
+                                 *bootstraps, "batch.num.messages", "10",
+                                 "produce.engine", produce_engine_name, NULL);
 
         rd_kafka_mock_start_request_tracking(mcluster);
         return mcluster;
@@ -198,6 +200,7 @@ create_handle(const char *bootstraps, rd_kafka_type_t type, const char *topic) {
                 rk = test_create_handle(RD_KAFKA_CONSUMER, conf);
                 test_consumer_subscribe(rk, topic);
         } else {
+                test_conf_set(conf, "produce.engine", produce_engine_name);
                 rd_kafka_conf_set_dr_msg_cb(conf, test_dr_msg_cb);
                 rk = test_create_handle(RD_KAFKA_PRODUCER, conf);
         }
@@ -248,7 +251,7 @@ do_test_telemetry_get_subscription_push_telemetry(rd_kafka_type_t type) {
 
         /* Poll for enough time for two pushes to be triggered, and a little
          * extra, so 2.5 x push interval. */
-        test_poll_timeout(rk, push_interval * 2.5, topic);
+        test_poll_timeout(rk, push_interval * 4, topic);
 
         test_telemetry_check_protocol_request_times(
             mcluster, requests_expected, RD_ARRAY_SIZE(requests_expected));
@@ -627,25 +630,42 @@ void do_test_invalid_record(rd_kafka_type_t type) {
 
 
 int main_0150_telemetry_mock(int argc, char **argv) {
-        int type;
+        const char *engine_names[] = {"v1", "v2"};
+        size_t i;
 
         if (test_needs_auth()) {
                 TEST_SKIP("Mock cluster does not support SSL/SASL\n");
                 return 0;
         }
 
-        for (type = RD_KAFKA_PRODUCER; type <= RD_KAFKA_CONSUMER; type++) {
-                do_test_telemetry_get_subscription_push_telemetry(type);
-                // All metrics are subscribed
-                do_test_telemetry_empty_subscriptions_list(type, "*");
-                // No metrics are subscribed
+        for (i = 0; i < RD_ARRAYSIZE(engine_names); i++) {
+                produce_engine_name = engine_names[i];
+                TEST_SAY("Running telemetry_mock with produce.engine=%s\n",
+                         produce_engine_name);
+                do_test_telemetry_get_subscription_push_telemetry(
+                    RD_KAFKA_PRODUCER);
+                /* All metrics are subscribed */
+                do_test_telemetry_empty_subscriptions_list(RD_KAFKA_PRODUCER,
+                                                           "*");
+                /* No metrics are subscribed */
                 do_test_telemetry_empty_subscriptions_list(
-                    type, "non-existent-metric");
-                do_test_telemetry_terminating_push(type);
-                do_test_telemetry_preferred_broker_change(type);
-                do_test_subscription_id_change(type);
-                do_test_invalid_record(type);
-        };
+                    RD_KAFKA_PRODUCER, "non-existent-metric");
+                do_test_telemetry_terminating_push(RD_KAFKA_PRODUCER);
+                do_test_telemetry_preferred_broker_change(RD_KAFKA_PRODUCER);
+                do_test_subscription_id_change(RD_KAFKA_PRODUCER);
+                do_test_invalid_record(RD_KAFKA_PRODUCER);
+        }
+
+        do_test_telemetry_get_subscription_push_telemetry(RD_KAFKA_CONSUMER);
+        /* All metrics are subscribed */
+        do_test_telemetry_empty_subscriptions_list(RD_KAFKA_CONSUMER, "*");
+        /* No metrics are subscribed */
+        do_test_telemetry_empty_subscriptions_list(RD_KAFKA_CONSUMER,
+                                                   "non-existent-metric");
+        do_test_telemetry_terminating_push(RD_KAFKA_CONSUMER);
+        do_test_telemetry_preferred_broker_change(RD_KAFKA_CONSUMER);
+        do_test_subscription_id_change(RD_KAFKA_CONSUMER);
+        do_test_invalid_record(RD_KAFKA_CONSUMER);
 
         return 0;
 }

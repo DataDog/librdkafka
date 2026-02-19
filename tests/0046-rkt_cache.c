@@ -39,13 +39,19 @@
  */
 
 
-int main_0046_rkt_cache(int argc, char **argv) {
+static void do_test_rkt_cache(const char *engine_name) {
         rd_kafka_t *rk;
+        rd_kafka_conf_t *conf;
         rd_kafka_topic_t *rkt;
         const char *topic = test_mk_topic_name(__FUNCTION__, 0);
         int i;
 
-        rk = test_create_producer();
+        SUB_TEST("%s", engine_name);
+
+        test_conf_init(&conf, NULL, 0);
+        test_conf_set(conf, "produce.engine", engine_name);
+        rd_kafka_conf_set_dr_msg_cb(conf, test_dr_msg_cb);
+        rk = test_create_handle(RD_KAFKA_PRODUCER, conf);
 
         rkt = test_create_producer_topic(rk, topic, NULL);
 
@@ -60,6 +66,13 @@ int main_0046_rkt_cache(int argc, char **argv) {
 
         rd_kafka_topic_destroy(rkt);
         rd_kafka_destroy(rk);
+
+        SUB_TEST_PASS();
+}
+
+int main_0046_rkt_cache(int argc, char **argv) {
+        do_test_rkt_cache("v1");
+        do_test_rkt_cache("v2");
 
         return 0;
 }

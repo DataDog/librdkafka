@@ -285,7 +285,7 @@ static int test_subscribe(rd_kafka_t *rk, struct expect *exp) {
 }
 
 
-static int do_test(const char *assignor) {
+static int do_test(const char *engine_name, const char *assignor) {
         static char topics[3][128];
         static char nonexist_topic[128];
         const int topic_cnt = 3;
@@ -321,10 +321,14 @@ static int do_test(const char *assignor) {
             test_mk_topic_name("regex_subscribe_NONEXISTENT_0004_IV#!", 0),
             groupid);
 
+        TEST_SAY("Regex subscribe test: engine=%s assignor=%s\n", engine_name,
+                 assignor);
+
         /* Produce messages to topics to ensure creation. */
         for (i = 0; i < topic_cnt; i++)
-                test_produce_msgs_easy(topics[i], testid, RD_KAFKA_PARTITION_UA,
-                                       msgcnt);
+                test_produce_msgs_easy_v(
+                    topics[i], testid, RD_KAFKA_PARTITION_UA, 0, msgcnt, 0,
+                    "produce.engine", engine_name, NULL);
 
         test_conf_init(&conf, NULL, 20);
         test_conf_set(conf, "partition.assignment.strategy", assignor);
@@ -452,8 +456,10 @@ static int do_test(const char *assignor) {
 
 int main_0033_regex_subscribe(int argc, char **argv) {
 
-        do_test("range");
-        do_test("roundrobin");
+        do_test("v1", "range");
+        do_test("v1", "roundrobin");
+        do_test("v2", "range");
+        do_test("v2", "roundrobin");
 
         return 0;
 }

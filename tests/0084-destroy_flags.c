@@ -53,6 +53,7 @@ struct df_args {
 };
 
 static void do_test_destroy_flags(const char *topic,
+                                  const char *engine_name,
                                   int destroy_flags,
                                   int local_mode,
                                   const struct df_args *args) {
@@ -63,10 +64,10 @@ static void do_test_destroy_flags(const char *topic,
         TEST_SAY(_C_MAG
                  "[ test destroy_flags 0x%x for client_type %d, "
                  "produce_cnt %d, subscribe %d, unsubscribe %d, "
-                 "%s mode ]\n" _C_CLR,
+                 "%s mode, produce.engine=%s ]\n" _C_CLR,
                  destroy_flags, args->client_type, args->produce_cnt,
                  args->consumer_subscribe, args->consumer_unsubscribe,
-                 local_mode ? "local" : "broker");
+                 local_mode ? "local" : "broker", engine_name);
 
         test_conf_init(&conf, NULL, 20);
 
@@ -74,6 +75,7 @@ static void do_test_destroy_flags(const char *topic,
                 test_conf_set(conf, "bootstrap.servers", "");
 
         if (args->client_type == RD_KAFKA_PRODUCER) {
+                test_conf_set(conf, "produce.engine", engine_name);
 
                 rk = test_create_handle(args->client_type, conf);
 
@@ -143,10 +145,10 @@ static void do_test_destroy_flags(const char *topic,
         TEST_SAY(_C_GRN
                  "[ test destroy_flags 0x%x for client_type %d, "
                  "produce_cnt %d, subscribe %d, unsubscribe %d, "
-                 "%s mode: PASS ]\n" _C_CLR,
+                 "%s mode, produce.engine=%s: PASS ]\n" _C_CLR,
                  destroy_flags, args->client_type, args->produce_cnt,
                  args->consumer_subscribe, args->consumer_unsubscribe,
-                 local_mode ? "local" : "broker");
+                 local_mode ? "local" : "broker", engine_name);
 
         TEST_LATER_CHECK();
 }
@@ -155,7 +157,7 @@ static void do_test_destroy_flags(const char *topic,
 /**
  * @brief Destroy with flags
  */
-static void destroy_flags(int local_mode) {
+static void destroy_flags(int local_mode, const char *engine_name) {
         const struct df_args args[] = {
             {RD_KAFKA_PRODUCER, 0, 0, 0},
             {RD_KAFKA_PRODUCER, test_quick ? 100 : 10000, 0, 0},
@@ -179,7 +181,8 @@ static void destroy_flags(int local_mode) {
                         if (!can_subscribe && (args[i].consumer_subscribe ||
                                                args[i].consumer_unsubscribe))
                                 continue;
-                        do_test_destroy_flags(topic, flag_combos[j], local_mode,
+                        do_test_destroy_flags(topic, engine_name,
+                                              flag_combos[j], local_mode,
                                               &args[i]);
                 }
         }
@@ -188,21 +191,33 @@ static void destroy_flags(int local_mode) {
 
 
 int main_0084_destroy_flags_local(int argc, char **argv) {
+        const char *engine_names[] = {"v1", "v2"};
+        size_t i;
+
         /* FIXME: fix the test with subscribe/unsubscribe PR. */
         if (!test_consumer_group_protocol_classic()) {
                 TEST_SKIP("FIXME: fix the test with subscribe/unsubscribe PR");
                 return 0;
         }
-        destroy_flags(1 /*no brokers*/);
+
+        for (i = 0; i < RD_ARRAYSIZE(engine_names); i++)
+                destroy_flags(1 /*no brokers*/, engine_names[i]);
+
         return 0;
 }
 
 int main_0084_destroy_flags(int argc, char **argv) {
+        const char *engine_names[] = {"v1", "v2"};
+        size_t i;
+
         /* FIXME: fix the test with subscribe/unsubscribe PR. */
         if (!test_consumer_group_protocol_classic()) {
                 TEST_SKIP("FIXME: fix the test with subscribe/unsubscribe PR");
                 return 0;
         }
-        destroy_flags(0 /*with brokers*/);
+
+        for (i = 0; i < RD_ARRAYSIZE(engine_names); i++)
+                destroy_flags(0 /*with brokers*/, engine_names[i]);
+
         return 0;
 }

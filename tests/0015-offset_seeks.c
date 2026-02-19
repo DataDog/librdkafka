@@ -34,7 +34,10 @@
 
 
 
-static void do_legacy_seek(const char *topic, uint64_t testid, int msg_cnt) {
+static void do_legacy_seek(const char *engine_name,
+                           const char *topic,
+                           uint64_t testid,
+                           int msg_cnt) {
         rd_kafka_t *rk_c;
         rd_kafka_topic_t *rkt_c;
         int32_t partition = 0;
@@ -44,7 +47,7 @@ static void do_legacy_seek(const char *topic, uint64_t testid, int msg_cnt) {
         int msgs_per_dance   = 10;
         const int msg_base   = 0;
 
-        SUB_TEST_QUICK();
+        SUB_TEST_QUICK("%s", engine_name);
 
         rk_c  = test_create_consumer(NULL, NULL, NULL, NULL);
         rkt_c = test_create_consumer_topic(rk_c, topic);
@@ -90,13 +93,15 @@ static void do_legacy_seek(const char *topic, uint64_t testid, int msg_cnt) {
 static void do_seek(const char *topic,
                     uint64_t testid,
                     int msg_cnt,
-                    rd_bool_t with_timeout) {
+                    rd_bool_t with_timeout,
+                    const char *engine_name) {
         rd_kafka_t *c;
         rd_kafka_topic_partition_list_t *partitions;
         char errstr[512];
         int i;
 
-        SUB_TEST_QUICK("%s timeout", with_timeout ? "with" : "without");
+        SUB_TEST_QUICK("%s, %s timeout", engine_name,
+                       with_timeout ? "with" : "without");
 
         c = test_create_consumer(topic, NULL, NULL, NULL);
 
@@ -148,7 +153,7 @@ static void do_seek(const char *topic,
 }
 
 
-int main_0015_offsets_seek(int argc, char **argv) {
+static void test_offsets_seek_engine(const char *engine_name) {
         const char *topic    = test_mk_topic_name("0015", 1);
         int msg_cnt_per_part = test_quick ? 100 : 1000;
         int msg_cnt          = 3 * msg_cnt_per_part;
@@ -156,17 +161,28 @@ int main_0015_offsets_seek(int argc, char **argv) {
 
         testid = test_id_generate();
 
-        test_produce_msgs_easy_multi(
-            testid, topic, 0, 0 * msg_cnt_per_part, msg_cnt_per_part, topic, 1,
-            1 * msg_cnt_per_part, msg_cnt_per_part, topic, 2,
-            2 * msg_cnt_per_part, msg_cnt_per_part, NULL);
+        test_produce_msgs_easy_v(topic, testid, 0, 0 * msg_cnt_per_part,
+                                 msg_cnt_per_part, 0, "produce.engine",
+                                 engine_name, NULL);
+        test_produce_msgs_easy_v(topic, testid, 1, 1 * msg_cnt_per_part,
+                                 msg_cnt_per_part, 0, "produce.engine",
+                                 engine_name, NULL);
+        test_produce_msgs_easy_v(topic, testid, 2, 2 * msg_cnt_per_part,
+                                 msg_cnt_per_part, 0, "produce.engine",
+                                 engine_name, NULL);
 
         /* legacy seek: only reads partition 0 */
-        do_legacy_seek(topic, testid, msg_cnt_per_part);
+        do_legacy_seek(engine_name, topic, testid, msg_cnt_per_part);
 
-        do_seek(topic, testid, msg_cnt, rd_true /*with timeout*/);
+        do_seek(topic, testid, msg_cnt, rd_true /*with timeout*/, engine_name);
 
-        do_seek(topic, testid, msg_cnt, rd_true /*without timeout*/);
+        do_seek(topic, testid, msg_cnt, rd_true /*without timeout*/,
+                engine_name);
+}
+
+int main_0015_offsets_seek(int argc, char **argv) {
+        test_offsets_seek_engine("v1");
+        test_offsets_seek_engine("v2");
 
         return 0;
 }

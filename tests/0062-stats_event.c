@@ -116,7 +116,7 @@ static int json_stats_cb(rd_kafka_t *rk, char *json, size_t json_len, void *opaq
         return 0; /* Don't take ownership */
 }
 
-static void test_stats_event_typed_only(void) {
+static void test_stats_event_typed_only(const char *engine_name) {
         rd_kafka_t *rk;
         rd_kafka_conf_t *conf;
         rd_kafka_queue_t *rkqu;
@@ -124,6 +124,7 @@ static void test_stats_event_typed_only(void) {
         int i;
 
         conf = rd_kafka_conf_new();
+        test_conf_set(conf, "produce.engine", engine_name);
         const char *test_debug = getenv("TEST_DEBUG");
         if (test_debug && *test_debug)
             test_conf_set(conf, "debug", test_debug);
@@ -157,14 +158,17 @@ static void test_stats_event_typed_only(void) {
         rd_kafka_destroy(rk);
 }
 
-int main_0062_stats_event(int argc, char **argv) {
+static void do_test_stats_event(const char *engine_name) {
         rd_kafka_t *rk;
         rd_kafka_conf_t *conf;
         test_timing_t t_delivery;
         const int iterations = 5;
         int i;
         test_conf_init(&conf, NULL, 10);
+        test_conf_set(conf, "produce.engine", engine_name);
         rd_kafka_conf_set(conf, "statistics.interval.ms", "100", NULL, 0);
+
+        SUB_TEST("%s", engine_name);
 
         /* Reset typed stats state */
         typed_stats_count    = 0;
@@ -232,8 +236,17 @@ int main_0062_stats_event(int argc, char **argv) {
                           typed_stats_count, iterations);
         }
 
-        test_stats_event_typed_only();
+        test_stats_event_typed_only(engine_name);
         TEST_SAY("Typed stats callback verification: PASSED\n");
+
+        SUB_TEST_PASS();
+
+        return;
+}
+
+int main_0062_stats_event(int argc, char **argv) {
+        do_test_stats_event("v1");
+        do_test_stats_event("v2");
 
         return 0;
 }

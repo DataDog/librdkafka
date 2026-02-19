@@ -83,7 +83,7 @@ static void handle_drs(rd_kafka_event_t *rkev) {
 /**
  * @brief Test delivery report events
  */
-int main_0039_event_dr(int argc, char **argv) {
+static void do_test_event_dr(const char *engine_name, int argc, char **argv) {
         int partition = 0;
         int r;
         rd_kafka_t *rk;
@@ -96,7 +96,13 @@ int main_0039_event_dr(int argc, char **argv) {
         test_timing_t t_produce, t_delivery;
         rd_kafka_queue_t *eventq;
 
+        SUB_TEST("event dr (%s)", engine_name);
+
+        msgid_next = 0;
+        fails      = 0;
+
         test_conf_init(&conf, &topic_conf, 10);
+        test_conf_set(conf, "produce.engine", engine_name);
 
         /* Set delivery report callback */
         rd_kafka_conf_set_dr_msg_cb(conf, test_dr_msg_cb);
@@ -165,13 +171,21 @@ int main_0039_event_dr(int argc, char **argv) {
         TEST_SAY("Destroying kafka instance %s\n", rd_kafka_name(rk));
         rd_kafka_destroy(rk);
 
+        SUB_TEST_PASS();
+
+        return;
+}
+
+int main_0039_event_dr(int argc, char **argv) {
+        do_test_event_dr("v1", argc, argv);
+        do_test_event_dr("v2", argc, argv);
         return 0;
 }
 
 /**
  * @brief Local test: test log events
  */
-int main_0039_event_log(int argc, char **argv) {
+static void do_test_event_log(const char *engine_name, int argc, char **argv) {
         rd_kafka_t *rk;
         rd_kafka_conf_t *conf;
         rd_kafka_queue_t *eventq;
@@ -182,10 +196,15 @@ int main_0039_event_log(int argc, char **argv) {
         char ctx[60];
         int level;
 
+        SUB_TEST("event log (%s)", engine_name);
+        (void)argc;
+        (void)argv;
+
         conf = rd_kafka_conf_new();
         rd_kafka_conf_set(conf, "bootstrap.servers", "0:65534", NULL, 0);
         rd_kafka_conf_set(conf, "log.queue", "true", NULL, 0);
         rd_kafka_conf_set(conf, "debug", "all", NULL, 0);
+        test_conf_set(conf, "produce.engine", engine_name);
 
         /* Create kafka instance */
         rk     = test_create_handle(RD_KAFKA_PRODUCER, conf);
@@ -227,17 +246,29 @@ int main_0039_event_log(int argc, char **argv) {
         TEST_SAY("Destroying kafka instance %s\n", rd_kafka_name(rk));
         rd_kafka_destroy(rk);
 
+        SUB_TEST_PASS();
+
+        return;
+}
+
+int main_0039_event_log(int argc, char **argv) {
+        do_test_event_log("v1", argc, argv);
+        do_test_event_log("v2", argc, argv);
         return 0;
 }
 
 /**
  * @brief Local test: test event generation
  */
-int main_0039_event(int argc, char **argv) {
+static void do_test_event(const char *engine_name, int argc, char **argv) {
         rd_kafka_t *rk;
         rd_kafka_conf_t *conf;
         rd_kafka_queue_t *eventq;
         int waitevent = 1;
+
+        SUB_TEST("event (%s)", engine_name);
+        (void)argc;
+        (void)argv;
 
         /* Set up a config with ERROR events enabled and
          * configure an invalid broker so that _TRANSPORT or ALL_BROKERS_DOWN
@@ -247,6 +278,7 @@ int main_0039_event(int argc, char **argv) {
 
         rd_kafka_conf_set_events(conf, RD_KAFKA_EVENT_ERROR);
         rd_kafka_conf_set(conf, "bootstrap.servers", "0:65534", NULL, 0);
+        test_conf_set(conf, "produce.engine", engine_name);
 
         /* Create kafka instance */
         rk = test_create_handle(RD_KAFKA_PRODUCER, conf);
@@ -280,5 +312,13 @@ int main_0039_event(int argc, char **argv) {
         TEST_SAY("Destroying kafka instance %s\n", rd_kafka_name(rk));
         rd_kafka_destroy(rk);
 
+        SUB_TEST_PASS();
+
+        return;
+}
+
+int main_0039_event(int argc, char **argv) {
+        do_test_event("v1", argc, argv);
+        do_test_event("v2", argc, argv);
         return 0;
 }

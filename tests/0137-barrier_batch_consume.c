@@ -476,7 +476,7 @@ static void do_test_consume_batch_store_offset(void) {
 }
 
 
-static void do_test_consume_batch_control_msgs(void) {
+static void do_test_consume_batch_control_msgs(const char *engine_name) {
         const char *topic = test_mk_topic_name("0137-barrier_batch_consume", 1);
         const int32_t partition = 0;
         rd_kafka_conf_t *conf, *c_conf;
@@ -496,12 +496,13 @@ static void do_test_consume_batch_control_msgs(void) {
         rd_kafka_resp_err_t err;
         thrd_t thread_id;
 
-        SUB_TEST("Testing control msgs flow");
+        SUB_TEST("Testing control msgs flow, produce.engine=%s", engine_name);
 
         testid = test_id_generate();
 
         test_conf_init(&conf, NULL, 30);
 
+        test_conf_set(conf, "produce.engine", engine_name);
         test_conf_set(conf, "transactional.id", topic);
         test_conf_set(conf, "batch.num.messages", "1");
         rd_kafka_conf_set_dr_msg_cb(conf, test_dr_msg_cb);
@@ -609,11 +610,15 @@ static void do_test_consume_batch_control_msgs(void) {
 
 
 int main_0137_barrier_batch_consume(int argc, char **argv) {
+        const char *engine_names[] = {"v1", "v2"};
+        size_t i;
+
         do_test_consume_batch_with_seek();
         do_test_consume_batch_store_offset();
         do_test_consume_batch_with_pause_and_resume_different_batch();
         do_test_consume_batch_with_pause_and_resume_same_batch();
-        do_test_consume_batch_control_msgs();
+        for (i = 0; i < RD_ARRAYSIZE(engine_names); i++)
+                do_test_consume_batch_control_msgs(engine_names[i]);
 
         return 0;
 }

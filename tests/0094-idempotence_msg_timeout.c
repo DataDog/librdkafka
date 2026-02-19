@@ -133,7 +133,9 @@ is_fatal_cb(rd_kafka_t *rk, rd_kafka_resp_err_t err, const char *reason) {
 }
 
 
-static void do_test_produce_timeout(const char *topic, const int msgrate) {
+static void do_test_produce_timeout(const char *engine_name,
+                                    const char *topic,
+                                    const int msgrate) {
         rd_kafka_t *rk;
         rd_kafka_conf_t *conf;
         rd_kafka_topic_t *rkt;
@@ -148,15 +150,18 @@ static void do_test_produce_timeout(const char *topic, const int msgrate) {
 
         TEST_SAY(_C_BLU
                  "Test idempotent producer "
-                 "with message timeouts (%d msgs/s)\n",
-                 msgrate);
+                 "with message timeouts (%d msgs/s), produce.engine=%s\n",
+                 msgrate, engine_name);
 
         testid = test_id_generate();
 
         test_conf_init(&conf, NULL, 60);
+        counters.dr_ok   = 0;
+        counters.dr_fail = 0;
         test_msgver_init(&counters.mv_delivered, testid);
         sockem_ctrl_init(&ctrl);
 
+        test_conf_set(conf, "produce.engine", engine_name);
         test_conf_set(conf, "enable.idempotence", "true");
         test_conf_set(conf, "linger.ms", "300");
         test_conf_set(conf, "reconnect.backoff.ms", "2000");
@@ -210,21 +215,27 @@ static void do_test_produce_timeout(const char *topic, const int msgrate) {
 
         TEST_SAY(_C_GRN
                  "Test idempotent producer "
-                 "with message timeouts (%d msgs/s): SUCCESS\n",
-                 msgrate);
+                 "with message timeouts (%d msgs/s), produce.engine=%s: "
+                 "SUCCESS\n",
+                 msgrate, engine_name);
 }
 
 int main_0094_idempotence_msg_timeout(int argc, char **argv) {
-        const char *topic = test_mk_topic_name(__FUNCTION__, 1);
+        const char *engine_names[] = {"v1", "v2"};
+        size_t i;
 
-        do_test_produce_timeout(topic, 10);
+        for (i = 0; i < RD_ARRAYSIZE(engine_names); i++) {
+                const char *topic = test_mk_topic_name(__FUNCTION__, 1);
 
-        if (test_quick) {
-                TEST_SAY("Skipping further tests due to quick mode\n");
-                return 0;
+                do_test_produce_timeout(engine_names[i], topic, 10);
+
+                if (test_quick) {
+                        TEST_SAY("Skipping further tests due to quick mode\n");
+                        continue;
+                }
+
+                do_test_produce_timeout(engine_names[i], topic, 100);
         }
-
-        do_test_produce_timeout(topic, 100);
 
         return 0;
 }

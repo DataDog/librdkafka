@@ -44,7 +44,7 @@
  */
 
 
-int main_0036_partial_fetch(int argc, char **argv) {
+static void do_test_partial_fetch_engine(const char *engine_name) {
         const char *topic   = test_mk_topic_name(__FUNCTION__, 1);
         const int partition = 0;
         const int msgcnt    = 100;
@@ -53,11 +53,17 @@ int main_0036_partial_fetch(int argc, char **argv) {
         rd_kafka_conf_t *conf;
         rd_kafka_t *rk;
         rd_kafka_topic_t *rkt;
+        rd_kafka_conf_t *pconf;
+
+        SUB_TEST("%s", engine_name);
 
         TEST_SAY("Producing %d messages of size %d to %s [%d]\n", msgcnt,
                  (int)msgsize, topic, partition);
         testid = test_id_generate();
-        rk     = test_create_producer();
+        test_conf_init(&pconf, NULL, 0);
+        test_conf_set(pconf, "produce.engine", engine_name);
+        rd_kafka_conf_set_dr_msg_cb(pconf, test_dr_msg_cb);
+        rk     = test_create_handle(RD_KAFKA_PRODUCER, pconf);
         rkt    = test_create_producer_topic(rk, topic, NULL);
         test_wait_topic_exists(rk, topic, 5000);
 
@@ -82,6 +88,13 @@ int main_0036_partial_fetch(int argc, char **argv) {
 
         rd_kafka_topic_destroy(rkt);
         rd_kafka_destroy(rk);
+
+        SUB_TEST_PASS();
+}
+
+int main_0036_partial_fetch(int argc, char **argv) {
+        do_test_partial_fetch_engine("v1");
+        do_test_partial_fetch_engine("v2");
 
         return 0;
 }

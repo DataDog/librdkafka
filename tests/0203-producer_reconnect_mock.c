@@ -87,7 +87,7 @@ wait_matching_requests(rd_kafka_mock_cluster_t *mcluster,
         return matching;
 }
 
-int main_0203_producer_reconnect_mock(int argc, char **argv) {
+static void do_test_producer_reconnect_mock(const char *engine_name) {
         rd_kafka_mock_cluster_t *mcluster = NULL;
         rd_kafka_conf_t *conf = NULL;
         rd_kafka_t *rk = NULL;
@@ -119,8 +119,8 @@ int main_0203_producer_reconnect_mock(int argc, char **argv) {
         rd_bool_t broker_up   = rd_false;
         rd_bool_t tracking = rd_false;
 
-        TEST_SKIP_MOCK_CLUSTER(0);
-        SUB_TEST_QUICK();
+        TEST_SKIP_MOCK_CLUSTER();
+        SUB_TEST_QUICK("produce.engine=%s", engine_name);
 
         mcluster = test_mock_cluster_new(broker_cnt, &bootstraps);
         if (rd_kafka_mock_topic_create(mcluster, topic, 1, 1) != 0) {
@@ -152,6 +152,7 @@ int main_0203_producer_reconnect_mock(int argc, char **argv) {
         test_conf_set(conf, "reconnect.backoff.ms", "100");
         test_conf_set(conf, "reconnect.backoff.max.ms", "500");
         test_conf_set(conf, "message.timeout.ms", msg_timeout);
+        test_conf_set(conf, "produce.engine", engine_name);
         rd_kafka_conf_set_dr_msg_cb(conf, test_dr_msg_cb);
 
         test_curr->is_fatal_cb = test_error_is_not_fatal_cb;
@@ -241,5 +242,14 @@ done:
 
         TEST_LATER_CHECK();
         SUB_TEST_PASS();
+}
+
+int main_0203_producer_reconnect_mock(int argc, char **argv) {
+        const char *engine_names[] = {"v1", "v2"};
+        size_t i;
+
+        for (i = 0; i < RD_ARRAYSIZE(engine_names); i++)
+                do_test_producer_reconnect_mock(engine_names[i]);
+
         return 0;
 }

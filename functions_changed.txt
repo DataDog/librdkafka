@@ -1,0 +1,172 @@
+rd_buf.c
+    void rd_buf_write_ensure_contig
+       an optimization, we can probably leave in
+    size_t rd_slice_read_into_buf
+ 
+rdkafka_broker.c
+    -rd_bool_t buf_contains_toppar
+       was removed
+    +static int rd_kafka_broker_bufq_purge
+       the definition changed
+    static int rd_kafka_toppar_producer_serve
+       definition changes, lots of others.
+       This is probably the biggest central
+         change
+    static int rd_kafka_broker_produce_toppars
+       lots of logic changes
+    static void rd_kafka_broker_producer_serve
+       logic changes
+    void rd_kafka_broker_destroy_final
+       destruction of statistics
+    typedef struct rd_kafka_broker_batch_collector_s
+       added things. We should move this to V2 specific structs
+rdkafka_buf.c
+    void rd_kafka_buf_destroy_final
+       logic changes
+rdkafka_buf.h
+     struct rd_kafka_buf_s
+        added a few things to the Produce struct, maybe move these
+src/rdkafka_cgrp.c
+   We added a ton of changes here that were for debugging. We can
+     strip these I think.
+src/rdkafka_msg.c
+    rd_bool_t rd_kafka_msgq_allow_wakeup_at
+        changes? I think these consider adaptive linger
+src/rdkafka_msgset_writer.c
+    typedef struct rd_kafka_msgset_writer_s
+       some changes here
+    -rd_kafka_msgset_writer_select_MsgVersion
+       this was deleted in favor of +rd_kafka_msgset_writer_select_caps, put it back
+         lots of other logic changes
+    -static void rd_kafka_msgset_writer_alloc_buf
+      was replaced with +rd_kafka_produce_request_get_header_sizes
+        should add it back. TONS of other logic changes
+    +static void rd_kafka_produce_request_alloc_buf
+      this looks like it overlaps an old function.
+    static void rd_kafka_msgset_writer_write_MessageSet_v2_header
+      lots of changes
+    -rd_kafka_msgset_writer_write_Produce_header
+        was replaced with +rd_kafka_produce_write_produce_header, add it back
+        lots of other logic changes
+    +rd_kafka_produce_write_produce_header
+        signature change plus logic changes. Lots of logic changes.
+    static int rd_kafka_msgset_writer_write_msgq
+       lots of logic changes
+    rd_kafka_buf_t *rd_kafka_msgset_create_ProduceRequest
+       definition and lots of other changes
+    static void rd_kafka_handle_Produce_metadata_update
+      definition and tiny logic change
+    -static int rd_kafka_find_msgbatch
+       was removed
+    -static void produce_reply_tags_cleaup
+       was removed
+    -rd_kafka_handle_Produce_parse
+       definition and logic changes.
+    -rd_kafka_handle_idempotent_Produce_error
+       definitiona and logic changes
+    -static int rd_kafka_handle_Produce_error
+       definition and logic chnages.
+    -rd_kafka_handle_idempotent_Produce_success
+       definition and logic changes
+    static void rd_kafka_msgbatch_handle_Produce_result
+       definition and logic changes
+    static void rd_kafka_handle_Produce
+       logic changes
+    -static void rd_kafka_handle_MultiBatchProduce
+       a new function that envelopes a lot of old logic
+    int rd_kafka_ProduceRequest
+       definition and logic changes
+    -static void rd_kafka_fill_MultiBatch_header
+       definition and logic changes
+    -static int rd_kafka_buf_cmp_by_topic
+       was deleted, restore
+    -static void rd_kafka_copy_batch_buf
+       was deleted, restore
+    -static void select_batches_to_include
+       was deleted, restore
+    -static int64_t get_first_msg_timeout
+       was deleted, restore
+    -static void finalize_topic_encoding
+      was deleted, restore
+    -int rd_kafka_MultiBatchProduceRequest
+      was deleted, restore
+rdkafka_request.h
+    int rd_kafka_ProduceRequest
+       definition change
+    -int rd_kafka_MultiBatchProduceRequest
+       definition change
+rdkafka_subscription.c 
+    changes to debug the subcribe.
+
+
+Validation (Codex, against git diff origin/master)
+--------------------------------------------------
+Overall result: Mostly valid, with a few file-placement and direction mismatches.
+
+Valid as written
+- rdkafka_broker.c:
+  - buf_contains_toppar removed
+  - rd_kafka_broker_bufq_purge_by_toppar replaced by rd_kafka_broker_bufq_purge
+  - rd_kafka_toppar_producer_serve changed heavily
+  - rd_kafka_broker_produce_toppars changed heavily
+  - rd_kafka_broker_producer_serve changed
+  - rd_kafka_broker_destroy_final changed (additional avg/adaptive cleanup)
+- rdkafka_buf.c:
+  - rd_kafka_buf_destroy_final changed
+- src/rdkafka_msg.c:
+  - rd_kafka_msgq_allow_wakeup_at changed
+- src/rdkafka_msgset_writer.c:
+  - rd_kafka_msgset_writer_s changed
+  - rd_kafka_msgset_writer_select_MsgVersion -> rd_kafka_msgset_writer_select_caps
+  - rd_kafka_msgset_writer_alloc_buf replaced by produce-request sizing/allocation helpers
+  - rd_kafka_msgset_writer_write_MessageSet_v2_header changed
+  - rd_kafka_msgset_writer_write_Produce_header replaced by rd_kafka_produce_write_produce_header
+  - rd_kafka_msgset_writer_write_msgq changed
+  - rd_kafka_msgset_create_ProduceRequest changed
+- rdkafka_request.h:
+  - rd_kafka_ProduceRequest declaration changed
+- rdkafka_subscription.c:
+  - subscribe debug/probe changes are present
+
+Partial / needs correction
+- "rd_buf.c" should be `src/rdbuf.c`.
+  - `rd_buf_write_ensure_contig` changed.
+  - `rd_slice_read_into_buf` is removed.
+- rdkafka_broker batch-collector type location:
+  - `rd_kafka_broker_batch_collector_s` is defined in `src/rdkafka_broker.h`, not `rdkafka_broker.c`.
+- src/rdkafka_cgrp.c:
+  - Many debug/probe additions are present, but not all changes are purely debug-only.
+- rdkafka_request.h:
+  - `rd_kafka_MultiBatchProduceRequest` is removed (not just "definition change").
+
+Invalid / incorrect as written
+- rdkafka_buf.h note says "added a few things to the Produce struct":
+  - Diff shows `batch_list`, `batch_start_pos`, and `batch_end_pos` were removed from `struct rd_kafka_buf_s` vs origin/master.
+- In the src/rdkafka_msgset_writer.c section, the following functions are misfiled:
+  - `rd_kafka_handle_Produce_metadata_update`
+  - `rd_kafka_find_msgbatch`
+  - `produce_reply_tags_cleaup`
+  - `rd_kafka_handle_Produce_parse`
+  - `rd_kafka_handle_idempotent_Produce_error`
+  - `rd_kafka_handle_Produce_error`
+  - `rd_kafka_handle_idempotent_Produce_success`
+  - `rd_kafka_msgbatch_handle_Produce_result`
+  - `rd_kafka_handle_Produce`
+  - `rd_kafka_handle_MultiBatchProduce`
+  - `rd_kafka_ProduceRequest`
+  - `rd_kafka_fill_MultiBatch_header`
+  - `rd_kafka_buf_cmp_by_topic`
+  - `rd_kafka_copy_batch_buf`
+  - `select_batches_to_include`
+  - `get_first_msg_timeout`
+  - `finalize_topic_encoding`
+  - `rd_kafka_MultiBatchProduceRequest`
+  These are in `src/rdkafka_request.c`, not `src/rdkafka_msgset_writer.c`.
+- `rd_kafka_handle_MultiBatchProduce` note says "a new function":
+  - It existed in origin/master and is removed in this branch.
+
+
+
+
+    
+

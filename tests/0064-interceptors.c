@@ -303,7 +303,7 @@ static rd_kafka_resp_err_t on_new_producer(rd_kafka_t *rk,
         return RD_KAFKA_RESP_ERR_NO_ERROR;
 }
 
-static void do_test_producer(const char *topic) {
+static void do_test_producer(const char *engine_name, const char *topic) {
         rd_kafka_conf_t *conf;
         int i;
         rd_kafka_t *rk;
@@ -311,6 +311,9 @@ static void do_test_producer(const char *topic) {
         TEST_SAY(_C_MAG "[ %s ]\n" _C_CLR, __FUNCTION__);
 
         test_conf_init(&conf, NULL, 0);
+        test_conf_set(conf, "produce.engine", engine_name);
+
+        memset(&msgs[0], 0, sizeof(msgs));
 
         rd_kafka_conf_interceptor_add_on_new(conf, "on_new_prodcer",
                                              on_new_producer, NULL);
@@ -382,6 +385,7 @@ static void do_test_consumer(const char *topic) {
         TEST_SAY(_C_MAG "[ %s ]\n" _C_CLR, __FUNCTION__);
 
         test_conf_init(&conf, NULL, 0);
+        on_commit_bits = 0;
 
         rd_kafka_conf_interceptor_add_on_new(conf, "on_new_consumer",
                                              on_new_consumer, NULL);
@@ -427,7 +431,7 @@ static void do_test_consumer(const char *topic) {
  *        is not duplicated without the interceptor's knowledge or
  *        assistance.
  */
-static void do_test_conf_copy(const char *topic) {
+static void do_test_conf_copy(const char *engine_name, const char *topic) {
         rd_kafka_conf_t *conf, *conf2;
         int i;
         rd_kafka_t *rk;
@@ -437,6 +441,7 @@ static void do_test_conf_copy(const char *topic) {
         memset(&msgs[0], 0, sizeof(msgs));
 
         test_conf_init(&conf, NULL, 0);
+        test_conf_set(conf, "produce.engine", engine_name);
 
         rd_kafka_conf_interceptor_add_on_new(conf, "on_new_conf_copy",
                                              on_new_producer, NULL);
@@ -469,13 +474,17 @@ static void do_test_conf_copy(const char *topic) {
 
 
 int main_0064_interceptors(int argc, char **argv) {
-        const char *topic = test_mk_topic_name(__FUNCTION__, 1);
+        const char *topic;
 
-        do_test_producer(topic);
-
+        topic = test_mk_topic_name(__FUNCTION__, 1);
+        do_test_producer("v1", topic);
         do_test_consumer(topic);
+        do_test_conf_copy("v1", topic);
 
-        do_test_conf_copy(topic);
+        topic = test_mk_topic_name(__FUNCTION__, 1);
+        do_test_producer("v2", topic);
+        do_test_consumer(topic);
+        do_test_conf_copy("v2", topic);
 
         return 0;
 }

@@ -28,20 +28,21 @@
 
 #include "test.h"
 
-int main_0124_openssl_invalid_engine(int argc, char **argv) {
+static void do_test_openssl_invalid_engine(const char *engine_name) {
         rd_kafka_conf_t *conf;
         rd_kafka_t *rk;
         char errstr[512];
         rd_kafka_conf_res_t res;
 
         test_conf_init(&conf, NULL, 30);
+        test_conf_set(conf, "produce.engine", engine_name);
         res = rd_kafka_conf_set(conf, "ssl.engine.location", "invalid_path",
                                 errstr, sizeof(errstr));
 
         if (res == RD_KAFKA_CONF_INVALID) {
                 rd_kafka_conf_destroy(conf);
                 TEST_SKIP("%s\n", errstr);
-                return 0;
+                return;
         }
 
         if (res != RD_KAFKA_CONF_OK)
@@ -65,5 +66,14 @@ int main_0124_openssl_invalid_engine(int argc, char **argv) {
                     errstr);
 
         rd_kafka_conf_destroy(conf);
+}
+
+int main_0124_openssl_invalid_engine(int argc, char **argv) {
+        const char *engine_names[] = {"v1", "v2"};
+        size_t i;
+
+        for (i = 0; i < RD_ARRAYSIZE(engine_names); i++)
+                do_test_openssl_invalid_engine(engine_names[i]);
+
         return 0;
 }

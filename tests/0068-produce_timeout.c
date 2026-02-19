@@ -73,7 +73,7 @@ dr_msg_cb(rd_kafka_t *rk, const rd_kafka_message_t *rkmessage, void *opaque) {
 
 
 
-int main_0068_produce_timeout(int argc, char **argv) {
+static void do_test_produce_timeout(const char *engine_name) {
         rd_kafka_t *rk;
         const char *topic = test_mk_topic_name("0068_produce_timeout", 1);
         uint64_t testid;
@@ -83,7 +83,12 @@ int main_0068_produce_timeout(int argc, char **argv) {
         int msgcounter = 0;
         const char *bootstraps;
 
-        TEST_SKIP_MOCK_CLUSTER(0);
+        TEST_SKIP_MOCK_CLUSTER();
+
+        SUB_TEST("%s", engine_name);
+
+        msg_dr_cnt      = 0;
+        msg_dr_fail_cnt = 0;
 
         rd_kafka_mock_cluster_t *mcluster =
             test_mock_cluster_new(3, &bootstraps);
@@ -93,6 +98,7 @@ int main_0068_produce_timeout(int argc, char **argv) {
         testid = test_id_generate();
 
         test_conf_init(&conf, NULL, 60);
+        test_conf_set(conf, "produce.engine", engine_name);
         test_conf_set(conf, "bootstrap.servers", bootstraps);
         rd_kafka_conf_set_dr_msg_cb(conf, dr_msg_cb);
 
@@ -131,6 +137,15 @@ int main_0068_produce_timeout(int argc, char **argv) {
         test_mock_cluster_destroy(mcluster);
 
         TEST_LATER_CHECK();
+
+        SUB_TEST_PASS();
+
+        return;
+}
+
+int main_0068_produce_timeout(int argc, char **argv) {
+        do_test_produce_timeout("v1");
+        do_test_produce_timeout("v2");
 
         return 0;
 }

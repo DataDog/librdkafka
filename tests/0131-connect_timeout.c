@@ -49,13 +49,14 @@ log_cb(const rd_kafka_t *rk, int level, const char *fac, const char *buf) {
         rd_atomic32_add(log_cntp, 1);
 }
 
-int main_0131_connect_timeout(int argc, char **argv) {
+static void do_test_connect_timeout(const char *engine_name) {
         rd_kafka_t *rk;
         rd_kafka_conf_t *conf;
         rd_atomic32_t log_cnt;
 
         test_conf_init(NULL, NULL, 20);
         conf = rd_kafka_conf_new();
+        test_conf_set(conf, "produce.engine", engine_name);
         test_conf_set(conf, "test.mock.num.brokers", "2");
         test_conf_set(conf, "test.mock.broker.rtt", "10000");
         test_conf_set(conf, "socket.connection.setup.timeout.ms", "6000");
@@ -76,6 +77,17 @@ int main_0131_connect_timeout(int argc, char **argv) {
                     "disconnect by now");
 
         rd_kafka_destroy(rk);
+}
+
+int main_0131_connect_timeout(int argc, char **argv) {
+        const char *engine_names[] = {"v1", "v2"};
+        size_t i;
+
+        for (i = 0; i < RD_ARRAYSIZE(engine_names); i++) {
+                TEST_SAY("Running connect_timeout with produce.engine=%s\n",
+                         engine_names[i]);
+                do_test_connect_timeout(engine_names[i]);
+        }
 
         return 0;
 }

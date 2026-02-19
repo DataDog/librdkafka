@@ -41,7 +41,7 @@
  */
 
 
-int main_0038_performance(int argc, char **argv) {
+static void do_test_performance_engine(const char *engine_name) {
         const char *topic   = test_mk_topic_name(__FUNCTION__, 1);
         const int partition = 0;
         const int msgsize   = 100;
@@ -52,6 +52,8 @@ int main_0038_performance(int argc, char **argv) {
         test_timing_t t_create, t_produce, t_consume;
         int totsize = 1024 * 1024 * (test_quick ? 8 : 128);
         int msgcnt;
+
+        SUB_TEST("%s", engine_name);
 
         if (!strcmp(test_mode, "valgrind") || !strcmp(test_mode, "helgrind") ||
             !strcmp(test_mode, "drd"))
@@ -66,6 +68,7 @@ int main_0038_performance(int argc, char **argv) {
         rd_kafka_conf_set_dr_msg_cb(conf, test_dr_msg_cb);
         test_conf_set(conf, "queue.buffering.max.messages", "10000000");
         test_conf_set(conf, "linger.ms", "100");
+        test_conf_set(conf, "produce.engine", engine_name);
         rk  = test_create_handle(RD_KAFKA_PRODUCER, conf);
         rkt = test_create_producer_topic(rk, topic, "acks", "1", NULL);
         test_wait_topic_exists(rk, topic, 5000);
@@ -117,5 +120,12 @@ int main_0038_performance(int argc, char **argv) {
                 1000000.0f,
             (float)(msgcnt /
                     ((double)TIMING_DURATION(&t_consume) / 1000000.0f)));
+        SUB_TEST_PASS();
+}
+
+int main_0038_performance(int argc, char **argv) {
+        do_test_performance_engine("v1");
+        do_test_performance_engine("v2");
+
         return 0;
 }

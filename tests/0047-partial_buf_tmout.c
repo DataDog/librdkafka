@@ -64,7 +64,7 @@ my_error_cb(rd_kafka_t *rk, int err, const char *reason, void *opaque) {
                           reason);
 }
 
-int main_0047_partial_buf_tmout(int argc, char **argv) {
+static void do_test_partial_buf_tmout(const char *engine_name) {
         rd_kafka_t *rk;
         rd_kafka_topic_t *rkt;
         const char *topic = test_mk_topic_name(__FUNCTION__, 0);
@@ -72,7 +72,12 @@ int main_0047_partial_buf_tmout(int argc, char **argv) {
         const size_t msg_size = 10000;
         int msgcounter        = 0;
 
+        SUB_TEST("%s", engine_name);
+
+        got_timeout_err = 0;
+
         test_conf_init(&conf, NULL, 30);
+        test_conf_set(conf, "produce.engine", engine_name);
         test_conf_set(conf, "socket.send.buffer.bytes", "1000");
         test_conf_set(conf, "batch.num.messages", "100");
         test_conf_set(conf, "queue.buffering.max.messages", "10000000");
@@ -93,6 +98,13 @@ int main_0047_partial_buf_tmout(int argc, char **argv) {
 
         rd_kafka_topic_destroy(rkt);
         rd_kafka_destroy(rk);
+
+        SUB_TEST_PASS();
+}
+
+int main_0047_partial_buf_tmout(int argc, char **argv) {
+        do_test_partial_buf_tmout("v1");
+        do_test_partial_buf_tmout("v2");
 
         return 0;
 }

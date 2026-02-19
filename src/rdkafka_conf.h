@@ -116,6 +116,11 @@ rd_kafka_confsource2str(rd_kafka_confsource_t source) {
         return names[source];
 }
 
+typedef enum {
+        RD_KAFKA_PRODUCE_ENGINE_V1 = 0,
+        RD_KAFKA_PRODUCE_ENGINE_V2 = 1,
+} rd_kafka_produce_engine_t;
+
 
 typedef enum {
         _RK_GLOBAL       = 0x1,
@@ -445,14 +450,18 @@ struct rd_kafka_conf_s {
         rd_kafka_compression_t compression_codec;
         int dr_err_only;
         int sticky_partition_linger_ms;
-        int produce_request_max_partitions;
+        int multibatch; /**< Toggles V1 multibatch */
+        rd_kafka_produce_engine_t
+            produce_engine; /**< Selects the producer engine */
 
-        /* Broker-level batching configuration */
+        int produce_request_max_partitions; /**< Controls v2 engine partition cap */
+
+        /* Broker-level batching configuration. USED IN V2 ONLY */
         double broker_linger_ms_dbl;    /**< broker.linger.ms configured value */
         rd_ts_t broker_linger_us;       /**< broker.linger.ms in microseconds */
         int broker_batch_max_bytes;     /**< broker.batch.max.bytes (-1 = disabled) */
 
-        /* Adaptive batching configuration */
+        /* Adaptive batching configuration. USED IN V2 MULTIBATCH ONLY */
         rd_bool_t adaptive_batching_enabled; /**< adaptive.batching.enable */
         double adaptive_alpha;          /**< adaptive.alpha - low threshold */
         double adaptive_beta;           /**< adaptive.beta - high threshold */

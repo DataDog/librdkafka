@@ -76,6 +76,7 @@ static void jmx_verify(const char *exp_swname, const char *exp_swversion) {
 
 
 static void do_test_swname(const char *broker,
+                           const char *engine_name,
                            const char *swname,
                            const char *swversion,
                            const char *exp_swname,
@@ -85,14 +86,14 @@ static void do_test_swname(const char *broker,
         const rd_kafka_metadata_t *md;
         rd_kafka_resp_err_t err;
 
-        TEST_SAY(_C_MAG
-                 "[ Test client.software.name=%s, "
-                 "client.software.version=%s ]\n",
-                 swname ? swname : "NULL", swversion ? swversion : "NULL");
+        SUB_TEST("%s, client.software.name=%s, client.software.version=%s",
+                 engine_name, swname ? swname : "NULL",
+                 swversion ? swversion : "NULL");
 
         test_conf_init(&conf, NULL, 30 /* jmxtool is severely slow */);
         if (broker)
                 test_conf_set(conf, "bootstrap.servers", broker);
+        test_conf_set(conf, "produce.engine", engine_name);
         if (swname)
                 test_conf_set(conf, "client.software.name", swname);
         if (swversion)
@@ -109,10 +110,7 @@ static void do_test_swname(const char *broker,
 
         rd_kafka_destroy(rk);
 
-        TEST_SAY(_C_GRN
-                 "[ Test client.software.name=%s, "
-                 "client.software.version=%s: PASS ]\n",
-                 swname ? swname : "NULL", swversion ? swversion : "NULL");
+        SUB_TEST_PASS();
 }
 
 int main_0016_client_swname(int argc, char **argv) {
@@ -168,14 +166,21 @@ int main_0016_client_swname(int argc, char **argv) {
          * built librdkafka may not use the same string, and additionally we
          * don't want to perform the string mangling here to make the string
          * protocol safe. */
-        do_test_swname(broker, NULL, NULL, "librdkafka", NULL);
+        do_test_swname(broker, "v1", NULL, NULL, "librdkafka", NULL);
         /* Properly formatted */
-        do_test_swname(broker, "my-little-version", "1.2.3.4",
+        do_test_swname(broker, "v1", "my-little-version", "1.2.3.4",
                        "my-little-version", "1.2.3.4");
         /* Containing invalid characters, verify that safing the strings works
          */
-        do_test_swname(broker, "?1?this needs! ESCAPING?", "--v99.11 ~b~",
-                       "1-this-needs--ESCAPING", "v99.11--b");
+        do_test_swname(broker, "v1", "?1?this needs! ESCAPING?",
+                       "--v99.11 ~b~", "1-this-needs--ESCAPING", "v99.11--b");
+
+        /* Same matrix for v2 engine */
+        do_test_swname(broker, "v2", NULL, NULL, "librdkafka", NULL);
+        do_test_swname(broker, "v2", "my-little-version", "1.2.3.4",
+                       "my-little-version", "1.2.3.4");
+        do_test_swname(broker, "v2", "?1?this needs! ESCAPING?",
+                       "--v99.11 ~b~", "1-this-needs--ESCAPING", "v99.11--b");
 
         return 0;
 }

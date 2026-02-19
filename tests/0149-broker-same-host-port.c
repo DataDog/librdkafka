@@ -89,7 +89,7 @@ static void broker_same_host_port_mock_verify_broker_ids(rd_kafka_t *rk) {
  *        broker ids, when doing that, verify that the brokers are kept
  *        separate instances and that the hostname is propagated to all of them.
  */
-int main_0149_broker_same_host_port_mock(int argc, char **argv) {
+static void do_test_broker_same_host_port_mock(const char *engine_name) {
         rd_kafka_mock_cluster_t *cluster;
         const char *bootstraps;
         rd_kafka_t *rk;
@@ -101,15 +101,19 @@ int main_0149_broker_same_host_port_mock(int argc, char **argv) {
 
         if (test_needs_auth()) {
                 TEST_SKIP("Mock cluster does not support SSL/SASL\n");
-                return 0;
+                return;
         }
 
         cluster = test_mock_cluster_new(num_brokers, &bootstraps);
 
         test_conf_init(&conf, NULL, tmout_multip(10));
         test_conf_set(conf, "bootstrap.servers", bootstraps);
+        test_conf_set(conf, "produce.engine", engine_name);
         log_interceptor = test_conf_set_log_interceptor(
             conf, broker_same_host_port_mock_log_cb, debug_contexts);
+        broker1_changed = rd_false;
+        broker2_changed = rd_false;
+        broker3_changed = rd_false;
 
         rk = test_create_handle(RD_KAFKA_PRODUCER, conf);
 
@@ -135,6 +139,18 @@ int main_0149_broker_same_host_port_mock(int argc, char **argv) {
         rd_kafka_destroy(rk);
         test_mock_cluster_destroy(cluster);
         rd_free(log_interceptor);
+}
+
+int main_0149_broker_same_host_port_mock(int argc, char **argv) {
+        const char *engine_names[] = {"v1", "v2"};
+        size_t i;
+
+        for (i = 0; i < RD_ARRAYSIZE(engine_names); i++) {
+                TEST_SAY(
+                    "Running broker_same_host_port_mock with produce.engine=%s\n",
+                    engine_names[i]);
+                do_test_broker_same_host_port_mock(engine_names[i]);
+        }
 
         return 0;
 }

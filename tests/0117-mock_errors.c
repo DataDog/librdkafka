@@ -45,17 +45,20 @@
 /**
  * @brief Test producer handling (retry) of ERR_KAFKA_STORAGE_ERROR.
  */
-static void do_test_producer_storage_error(rd_bool_t too_few_retries) {
+static void do_test_producer_storage_error(const char *engine_name,
+                                           rd_bool_t too_few_retries) {
         rd_kafka_conf_t *conf;
         rd_kafka_t *rk;
         rd_kafka_mock_cluster_t *mcluster;
         rd_kafka_resp_err_t err;
 
-        SUB_TEST_QUICK("%s", too_few_retries ? "with too few retries" : "");
+        SUB_TEST_QUICK("produce.engine=%s %s", engine_name,
+                       too_few_retries ? "with too few retries" : "");
 
         test_conf_init(&conf, NULL, 10);
 
         test_conf_set(conf, "test.mock.num.brokers", "3");
+        test_conf_set(conf, "produce.engine", engine_name);
         test_conf_set(conf, "retries", too_few_retries ? "1" : "10");
         test_conf_set(conf, "retry.backoff.ms", "500");
         rd_kafka_conf_set_dr_msg_cb(conf, test_dr_msg_cb);
@@ -314,11 +317,15 @@ static void do_test_joingroup_coordinator_load_in_progress() {
 }
 
 int main_0117_mock_errors(int argc, char **argv) {
+        const char *engine_names[] = {"v1", "v2"};
+        size_t i;
 
         TEST_SKIP_MOCK_CLUSTER(0);
 
-        do_test_producer_storage_error(rd_false);
-        do_test_producer_storage_error(rd_true);
+        for (i = 0; i < RD_ARRAYSIZE(engine_names); i++) {
+                do_test_producer_storage_error(engine_names[i], rd_false);
+                do_test_producer_storage_error(engine_names[i], rd_true);
+        }
 
         do_test_offset_commit_error_during_rebalance();
 

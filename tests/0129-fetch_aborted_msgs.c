@@ -41,7 +41,7 @@
  * 4. Consume from start, verify that no error is received, wait for EOF.
  *
  */
-int main_0129_fetch_aborted_msgs(int argc, char **argv) {
+static void do_test_fetch_aborted_msgs(const char *engine_name) {
         rd_kafka_t *rk;
         rd_kafka_conf_t *conf;
         const char *topic    = test_mk_topic_name("0129_fetch_aborted_msgs", 1);
@@ -50,6 +50,7 @@ int main_0129_fetch_aborted_msgs(int argc, char **argv) {
 
         test_conf_init(&conf, NULL, 30);
 
+        test_conf_set(conf, "produce.engine", engine_name);
         test_conf_set(conf, "linger.ms", "10000");
         test_conf_set(conf, "transactional.id", topic);
         test_conf_set(conf, "message.max.bytes", "10000");
@@ -74,6 +75,17 @@ int main_0129_fetch_aborted_msgs(int argc, char **argv) {
 
         /* Verify messages were actually produced by consuming them back. */
         test_consume_msgs_easy(topic, topic, 0, 1, 0, NULL);
+}
+
+int main_0129_fetch_aborted_msgs(int argc, char **argv) {
+        const char *engine_names[] = {"v1", "v2"};
+        size_t i;
+
+        for (i = 0; i < RD_ARRAYSIZE(engine_names); i++) {
+                TEST_SAY("Running fetch_aborted_msgs with produce.engine=%s\n",
+                         engine_names[i]);
+                do_test_fetch_aborted_msgs(engine_names[i]);
+        }
 
         return 0;
 }

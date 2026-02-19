@@ -211,7 +211,11 @@ static int gapless_is_not_fatal_cb(rd_kafka_t *rk,
 }
 
 static void
-do_test_purge(const char *what, int remote, int idempotence, int gapless) {
+do_test_purge(const char *engine_name,
+              const char *what,
+              int remote,
+              int idempotence,
+              int gapless) {
         const char *topic = test_mk_topic_name("0086_purge", 0);
         rd_kafka_conf_t *conf;
         rd_kafka_t *rk;
@@ -226,10 +230,12 @@ do_test_purge(const char *what, int remote, int idempotence, int gapless) {
         }
 #endif
 
-        TEST_SAY(_C_MAG "Test rd_kafka_purge(): %s\n" _C_CLR, what);
+        TEST_SAY(_C_MAG "Test rd_kafka_purge(): %s, produce.engine=%s\n" _C_CLR,
+                 what, engine_name);
 
         test_conf_init(&conf, NULL, 20);
 
+        test_conf_set(conf, "produce.engine", engine_name);
         test_conf_set(conf, "batch.num.messages", "10");
         test_conf_set(conf, "max.in.flight", "1");
         test_conf_set(conf, "linger.ms", "5000");
@@ -316,9 +322,11 @@ do_test_purge(const char *what, int remote, int idempotence, int gapless) {
                             "%d sent produce requests",
                             produce_sent_req_cnt);
                 mtx_unlock(&produce_sent_req_lock);
-                /* Even if still not in-flight, it should be sent
-                 * almost immediately given there are 19 messages in queue. */
-                TIMING_ASSERT_LATER(&t_produce, 0, 100);
+                /* The second request should be sent once the first response
+                 * unblocks progress. Under load this can take a few seconds
+                 * (still below linger.ms), so keep this bounded but not
+                 * unrealistically tight for CI. */
+                TIMING_ASSERT_LATER(&t_produce, 0, 5000);
 
                 purge_and_expect(what, __LINE__, rk, RD_KAFKA_PURGE_F_QUEUE,
                                  &waitmsgs, 10,
@@ -346,23 +354,36 @@ do_test_purge(const char *what, int remote, int idempotence, int gapless) {
 
 
 int main_0086_purge_remote(int argc, char **argv) {
+        const char *engine_names[] = {"v1", "v2"};
         const rd_bool_t has_idempotence =
             test_broker_version >= TEST_BRKVER(0, 11, 0, 0);
+        size_t i;
 
-        do_test_purge("remote", 1 /*remote*/, 0 /*idempotence*/,
-                      0 /*!gapless*/);
+        for (i = 0; i < RD_ARRAYSIZE(engine_names); i++) {
+                do_test_purge(engine_names[i], "remote", 1 /*remote*/,
+                              0 /*idempotence*/, 0 /*!gapless*/);
 
-        if (has_idempotence) {
-                do_test_purge("remote,idempotence", 1 /*remote*/,
-                              1 /*idempotence*/, 0 /*!gapless*/);
-                do_test_purge("remote,idempotence,gapless", 1 /*remote*/,
-                              1 /*idempotence*/, 1 /*!gapless*/);
+                if (has_idempotence) {
+                        do_test_purge(engine_names[i], "remote,idempotence",
+                                      1 /*remote*/, 1 /*idempotence*/,
+                                      0 /*!gapless*/);
+                        do_test_purge(engine_names[i],
+                                      "remote,idempotence,gapless",
+                                      1 /*remote*/, 1 /*idempotence*/,
+                                      1 /*!gapless*/);
+                }
         }
+
         return 0;
 }
 
 
 int main_0086_purge_local(int argc, char **argv) {
-        do_test_purge("local", 0 /*local*/, 0, 0);
+        const char *engine_names[] = {"v1", "v2"};
+        size_t i;
+
+        for (i = 0; i < RD_ARRAYSIZE(engine_names); i++)
+                do_test_purge(engine_names[i], "local", 0 /*local*/, 0, 0);
+
         return 0;
 }

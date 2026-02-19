@@ -49,8 +49,9 @@
 
 
 
-int main_0040_io_event(int argc, char **argv) {
+static void do_test_io_event(const char *engine_name, int argc, char **argv) {
         rd_kafka_conf_t *conf;
+        rd_kafka_conf_t *pconf;
         rd_kafka_topic_conf_t *tconf;
         rd_kafka_t *rk_p, *rk_c;
         const char *topic;
@@ -65,15 +66,23 @@ int main_0040_io_event(int argc, char **argv) {
         int r;
         rd_kafka_resp_err_t err;
         enum { _NOPE, _YEP, _REBALANCE } expecting_io = _REBALANCE;
+        (void)argc;
+        (void)argv;
 
 #ifdef _WIN32
         TEST_SKIP("WSAPoll and pipes are not reliable on Win32 (FIXME)\n");
-        return 0;
+        return;
 #endif
+
+        SUB_TEST("io event (%s)", engine_name);
+
         testid = test_id_generate();
         topic  = test_mk_topic_name(__FUNCTION__, 1);
 
-        rk_p  = test_create_producer();
+        test_conf_init(&pconf, NULL, 0);
+        test_conf_set(pconf, "produce.engine", engine_name);
+        rd_kafka_conf_set_dr_msg_cb(pconf, test_dr_msg_cb);
+        rk_p  = test_create_handle(RD_KAFKA_PRODUCER, pconf);
         rkt_p = test_create_producer_topic(rk_p, topic, NULL);
         test_wait_topic_exists(rk_p, topic, 5000);
         err = test_auto_create_topic_rkt(rk_p, rkt_p, tmout_multip(5000));
@@ -253,5 +262,13 @@ int main_0040_io_event(int argc, char **argv) {
         _close(fds[1]);
 #endif
 
+        SUB_TEST_PASS();
+
+        return;
+}
+
+int main_0040_io_event(int argc, char **argv) {
+        do_test_io_event("v1", argc, argv);
+        do_test_io_event("v2", argc, argv);
         return 0;
 }

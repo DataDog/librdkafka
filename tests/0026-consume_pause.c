@@ -41,7 +41,7 @@
 
 
 
-static void consume_pause(void) {
+static void consume_pause(const char *engine_name) {
         const char *topic       = test_mk_topic_name(__FUNCTION__, 1);
         const int partition_cnt = 3;
         rd_kafka_t *rk;
@@ -56,7 +56,7 @@ static void consume_pause(void) {
         int fails    = 0;
         char group_id[32];
 
-        SUB_TEST();
+        SUB_TEST("%s", engine_name);
 
         test_conf_init(&conf, &tconf,
                        60 + (test_session_timeout_ms * 3 / 1000));
@@ -66,8 +66,10 @@ static void consume_pause(void) {
         test_create_topic_wait_exists(NULL, topic, partition_cnt, 1, 10 * 1000);
 
         /* Produce messages */
-        testid =
-            test_produce_msgs_easy(topic, 0, RD_KAFKA_PARTITION_UA, msgcnt);
+        testid = test_id_generate();
+        test_produce_msgs_easy_v(topic, testid, RD_KAFKA_PARTITION_UA, 0,
+                                 msgcnt, 0, "produce.engine", engine_name,
+                                 NULL);
 
         topics = rd_kafka_topic_partition_list_new(1);
         rd_kafka_topic_partition_list_add(topics, topic, -1);
@@ -240,7 +242,7 @@ static void consume_pause(void) {
  * 6. Assign partitions again
  * 7. Verify that consumption starts at N/2 and not N/4
  */
-static void consume_pause_resume_after_reassign(void) {
+static void consume_pause_resume_after_reassign(const char *engine_name) {
         const char *topic       = test_mk_topic_name(__FUNCTION__, 1);
         const int32_t partition = 0;
         const int msgcnt        = 4000;
@@ -255,7 +257,7 @@ static void consume_pause_resume_after_reassign(void) {
         test_msgver_t mv;
         rd_kafka_topic_partition_t *toppar;
 
-        SUB_TEST();
+        SUB_TEST("%s", engine_name);
 
         test_conf_init(&conf, NULL, 60);
 
@@ -263,7 +265,9 @@ static void consume_pause_resume_after_reassign(void) {
                                       10 * 1000);
 
         /* Produce messages */
-        testid = test_produce_msgs_easy(topic, 0, partition, msgcnt);
+        testid = test_id_generate();
+        test_produce_msgs_easy_v(topic, testid, partition, 0, msgcnt, 0,
+                                 "produce.engine", engine_name, NULL);
 
         /* Set start offset to beginning */
         partitions = rd_kafka_topic_partition_list_new(1);
@@ -405,7 +409,8 @@ static void rebalance_cb(rd_kafka_t *rk,
  * and relying on auto.offset.reset=latest (default) to catch the failure case
  * where the assigned offset was not honoured.
  */
-static void consume_subscribe_assign_pause_resume(void) {
+static void
+consume_subscribe_assign_pause_resume(const char *engine_name) {
         const char *topic       = test_mk_topic_name(__FUNCTION__, 1);
         const int32_t partition = 0;
         const int msgcnt        = 1;
@@ -415,7 +420,7 @@ static void consume_subscribe_assign_pause_resume(void) {
         int r;
         test_msgver_t mv;
 
-        SUB_TEST();
+        SUB_TEST("%s", engine_name);
 
         test_conf_init(&conf, NULL, 20);
 
@@ -423,7 +428,9 @@ static void consume_subscribe_assign_pause_resume(void) {
                                       10 * 1000);
 
         /* Produce messages */
-        testid = test_produce_msgs_easy(topic, 0, partition, msgcnt);
+        testid = test_id_generate();
+        test_produce_msgs_easy_v(topic, testid, partition, 0, msgcnt, 0,
+                                 "produce.engine", engine_name, NULL);
 
         /**
          * Create consumer.
@@ -456,7 +463,7 @@ static void consume_subscribe_assign_pause_resume(void) {
  * @brief seek() prior to pause() may overwrite the seek()ed offset
  *        when later resume()ing. #3471
  */
-static void consume_seek_pause_resume(void) {
+static void consume_seek_pause_resume(const char *engine_name) {
         const char *topic       = test_mk_topic_name(__FUNCTION__, 1);
         const int32_t partition = 0;
         const int msgcnt        = 1000;
@@ -467,7 +474,7 @@ static void consume_seek_pause_resume(void) {
         test_msgver_t mv;
         rd_kafka_topic_partition_list_t *parts;
 
-        SUB_TEST();
+        SUB_TEST("%s", engine_name);
 
         test_conf_init(&conf, NULL, 20);
 
@@ -475,7 +482,9 @@ static void consume_seek_pause_resume(void) {
                                       10 * 1000);
 
         /* Produce messages */
-        testid = test_produce_msgs_easy(topic, 0, partition, msgcnt);
+        testid = test_id_generate();
+        test_produce_msgs_easy_v(topic, testid, partition, 0, msgcnt, 0,
+                                 "produce.engine", engine_name, NULL);
 
         /**
          * Create consumer.
@@ -536,12 +545,17 @@ static void consume_seek_pause_resume(void) {
 }
 
 
+static void consume_pause_suite(const char *engine_name) {
+        consume_pause(engine_name);
+        consume_pause_resume_after_reassign(engine_name);
+        consume_subscribe_assign_pause_resume(engine_name);
+        consume_seek_pause_resume(engine_name);
+}
+
 int main_0026_consume_pause(int argc, char **argv) {
 
-        consume_pause();
-        consume_pause_resume_after_reassign();
-        consume_subscribe_assign_pause_resume();
-        consume_seek_pause_resume();
+        consume_pause_suite("v1");
+        consume_pause_suite("v2");
 
         return 0;
 }

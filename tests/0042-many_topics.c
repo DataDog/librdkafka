@@ -48,15 +48,22 @@ const int msgs_per_topic = 100;
 
 
 
-static void produce_many(char **topics, int topic_cnt, uint64_t testid) {
+static void produce_many(const char *engine_name,
+                         char **topics,
+                         int topic_cnt,
+                         uint64_t testid) {
         rd_kafka_t *rk;
+        rd_kafka_conf_t *conf;
         test_timing_t t_rkt_create;
         int i;
         rd_kafka_topic_t **rkts;
 
         TEST_SAY(_C_MAG "%s\n" _C_CLR, __FUNCTION__);
 
-        rk = test_create_producer();
+        test_conf_init(&conf, NULL, 0);
+        test_conf_set(conf, "produce.engine", engine_name);
+        rd_kafka_conf_set_dr_msg_cb(conf, test_dr_msg_cb);
+        rk = test_create_handle(RD_KAFKA_PRODUCER, conf);
 
         TEST_SAY("Creating %d topic objects\n", topic_cnt);
 
@@ -218,7 +225,7 @@ static void assign_consume_many(char **topics, int topic_cnt, uint64_t testid) {
 
 
 
-int main_0042_many_topics(int argc, char **argv) {
+static void do_test_many_topics(const char *engine_name, int argc, char **argv) {
         char **topics;
         int topic_cnt = test_quick ? 4 : 20; /* up this as needed,
                                               * topic creation takes time so
@@ -227,6 +234,10 @@ int main_0042_many_topics(int argc, char **argv) {
                                               * test suite run time down. */
         uint64_t testid;
         int i;
+        (void)argc;
+        (void)argv;
+
+        SUB_TEST("many topics (%s)", engine_name);
 
         test_conf_init(NULL, NULL, 60);
 
@@ -237,7 +248,7 @@ int main_0042_many_topics(int argc, char **argv) {
         for (i = 0; i < topic_cnt; i++)
                 topics[i] = rd_strdup(test_mk_topic_name(__FUNCTION__, 1));
 
-        produce_many(topics, topic_cnt, testid);
+        produce_many(engine_name, topics, topic_cnt, testid);
         legacy_consume_many(topics, topic_cnt, testid);
         if (test_broker_version >= TEST_BRKVER(0, 9, 0, 0)) {
                 subscribe_consume_many(topics, topic_cnt, testid);
@@ -248,5 +259,13 @@ int main_0042_many_topics(int argc, char **argv) {
                 free(topics[i]);
         free(topics);
 
+        SUB_TEST_PASS();
+
+        return;
+}
+
+int main_0042_many_topics(int argc, char **argv) {
+        do_test_many_topics("v1", argc, argv);
+        do_test_many_topics("v2", argc, argv);
         return 0;
 }

@@ -19,6 +19,11 @@
 #include "rdkafka_adaptive.h"
 #include "rdkafka_broker.h"
 
+#define ADAPT_STATE(rkb) \
+        ((rkb)->rkb_producer_mbv2 ? &(rkb)->rkb_producer_mbv2->rkbp_adaptive_state : NULL)
+#define ADAPT_PARAMS(rkb) \
+        ((rkb)->rkb_producer_mbv2 ? &(rkb)->rkb_producer_mbv2->rkbp_adaptive_params : NULL)
+
 /* EWMA smoothing factor for RTT and internal latency.
  * Lower = smoother but slower to react.
  * Higher = more responsive but noisier. */
@@ -52,9 +57,12 @@
  * @brief Initialize adaptive batching state for a broker.
  */
 void rd_kafka_adaptive_init(rd_kafka_broker_t *rkb) {
-        rd_kafka_adaptive_state_t *state  = &rkb->rkb_adaptive_state;
-        rd_kafka_adaptive_params_t *params = &rkb->rkb_adaptive_params;
+        rd_kafka_adaptive_state_t *state  = ADAPT_STATE(rkb);
+        rd_kafka_adaptive_params_t *params = ADAPT_PARAMS(rkb);
         rd_kafka_conf_t *conf              = &rkb->rkb_rk->rk_conf;
+
+        if (!state)
+                return;
 
         memset(state, 0, sizeof(*state));
         memset(params, 0, sizeof(*params));
@@ -108,10 +116,11 @@ void rd_kafka_adaptive_destroy(rd_kafka_broker_t *rkb) {
  * - Baseline (minimum) RTT with slow decay
  */
 void rd_kafka_adaptive_record_rtt(rd_kafka_broker_t *rkb, rd_ts_t rtt_us) {
-        rd_kafka_adaptive_rtt_stats_t *stats = &rkb->rkb_adaptive_state.rtt_stats;
+        rd_kafka_adaptive_state_t *state = ADAPT_STATE(rkb);
+        rd_kafka_adaptive_rtt_stats_t *stats = state ? &state->rtt_stats : NULL;
         rd_ts_t now                          = rd_clock();
 
-        if (rtt_us <= 0)
+        if (!stats || rtt_us <= 0)
                 return;
 
         /* Add to circular buffer */
@@ -159,11 +168,12 @@ void rd_kafka_adaptive_record_rtt(rd_kafka_broker_t *rkb, rd_ts_t rtt_us) {
  */
 void rd_kafka_adaptive_record_int_latency(rd_kafka_broker_t *rkb,
                                           rd_ts_t int_latency_us) {
+        rd_kafka_adaptive_state_t *state = ADAPT_STATE(rkb);
         rd_kafka_adaptive_int_latency_stats_t *stats =
-            &rkb->rkb_adaptive_state.int_lat_stats;
+            state ? &state->int_lat_stats : NULL;
         rd_ts_t now = rd_clock();
 
-        if (int_latency_us <= 0)
+        if (!stats || int_latency_us <= 0)
                 return;
 
         /* Update EWMA smoothed internal latency */
@@ -210,7 +220,10 @@ void rd_kafka_adaptive_record_int_latency(rd_kafka_broker_t *rkb,
  * TODO: Re-enable int_latency with EWMA baseline + floor once RTT-only is stable.
  */
 double rd_kafka_adaptive_calc_congestion(rd_kafka_broker_t *rkb) {
-        rd_kafka_adaptive_state_t *state = &rkb->rkb_adaptive_state;
+        rd_kafka_adaptive_state_t *state = ADAPT_STATE(rkb);
+
+        if (!state)
+                return 0.0;
 
         /* Signal 1: RTT-based (Vegas) - authoritative, stable baseline */
         double rtt_congestion = 0.0;
@@ -303,12 +316,15 @@ rd_kafka_adaptive_check_covariance(rd_kafka_broker_t *rkb,
  * we increase BOTH linger AND batch limits together.
  */
 void rd_kafka_adaptive_adjust(rd_kafka_broker_t *rkb) {
-        rd_kafka_adaptive_state_t *state   = &rkb->rkb_adaptive_state;
-        rd_kafka_adaptive_params_t *params = &rkb->rkb_adaptive_params;
+        rd_kafka_adaptive_state_t *state   = ADAPT_STATE(rkb);
+        rd_kafka_adaptive_params_t *params = ADAPT_PARAMS(rkb);
         rd_ts_t old_linger                 = params->linger_us;
         int64_t old_batch                  = params->batch_max_bytes;
         const char *action;
         rd_ts_t now = rd_clock();
+
+        if (!state || !params)
+                return;
 
         /* Don't adjust if broker is not connected */
         if (rkb->rkb_state != RD_KAFKA_BROKER_STATE_UP)
@@ -454,9 +470,11 @@ void rd_kafka_adaptive_adjust(rd_kafka_broker_t *rkb) {
  * @brief Get current adaptive linger value.
  */
 rd_ts_t rd_kafka_adaptive_get_linger_us(rd_kafka_broker_t *rkb) {
-        if (rkb->rkb_rk->rk_conf.adaptive_batching_enabled)
-                return rkb->rkb_adaptive_params.linger_us;
-        else
+        if (rkb->rkb_rk->rk_conf.adaptive_batching_enabled) {
+                rd_kafka_adaptive_params_t *params = ADAPT_PARAMS(rkb);
+                return params ? params->linger_us
+                              : rkb->rkb_rk->rk_conf.broker_linger_us;
+        } else
                 return rkb->rkb_rk->rk_conf.broker_linger_us;
 }
 
@@ -465,9 +483,11 @@ rd_ts_t rd_kafka_adaptive_get_linger_us(rd_kafka_broker_t *rkb) {
  * @brief Get current adaptive batch max bytes.
  */
 int64_t rd_kafka_adaptive_get_batch_max_bytes(rd_kafka_broker_t *rkb) {
-        if (rkb->rkb_rk->rk_conf.adaptive_batching_enabled)
-                return rkb->rkb_adaptive_params.batch_max_bytes;
-        else
+        if (rkb->rkb_rk->rk_conf.adaptive_batching_enabled) {
+                rd_kafka_adaptive_params_t *params = ADAPT_PARAMS(rkb);
+                return params ? params->batch_max_bytes
+                              : rkb->rkb_rk->rk_conf.broker_batch_max_bytes;
+        } else
                 return rkb->rkb_rk->rk_conf.broker_batch_max_bytes;
 }
 
@@ -476,10 +496,10 @@ int64_t rd_kafka_adaptive_get_batch_max_bytes(rd_kafka_broker_t *rkb) {
  * @brief Check if it's time to perform an adjustment.
  */
 rd_bool_t rd_kafka_adaptive_should_adjust(rd_kafka_broker_t *rkb) {
-        rd_kafka_adaptive_state_t *state = &rkb->rkb_adaptive_state;
+        rd_kafka_adaptive_state_t *state = ADAPT_STATE(rkb);
         rd_ts_t now                      = rd_clock();
 
-        if (!rkb->rkb_rk->rk_conf.adaptive_batching_enabled)
+        if (!rkb->rkb_rk->rk_conf.adaptive_batching_enabled || !state)
                 return rd_false;
 
         return (now - state->last_adjustment) >

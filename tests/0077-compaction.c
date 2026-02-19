@@ -98,7 +98,8 @@ static void wait_compaction(rd_kafka_t *rk,
         }
 }
 
-static void produce_compactable_msgs(const char *topic,
+static void produce_compactable_msgs(const char *engine_name,
+                                     const char *topic,
                                      int32_t partition,
                                      uint64_t testid,
                                      int msgcnt,
@@ -124,6 +125,7 @@ static void produce_compactable_msgs(const char *topic,
                  msgcnt, (size_t)msgcnt * msgsize);
 
         test_conf_init(&conf, NULL, 0);
+        test_conf_set(conf, "produce.engine", engine_name);
         rd_kafka_conf_set_dr_msg_cb(conf, test_dr_msg_cb);
         /* Make sure batch size does not exceed segment.bytes since that
          * will make the ProduceRequest fail. */
@@ -158,7 +160,9 @@ static void produce_compactable_msgs(const char *topic,
 
 
 
-static void do_test_compaction(int msgs_per_key, const char *compression) {
+static void do_test_compaction(const char *engine_name,
+                               int msgs_per_key,
+                               const char *compression) {
         const char *topic = test_mk_topic_name(__FILE__, 1);
         const char *topic_configs[] = {"cleanup.policy",
                                        "compact",
@@ -216,6 +220,7 @@ static void do_test_compaction(int msgs_per_key, const char *compression) {
         test_wait_topic_exists(NULL, topic, 5000);
 
         test_conf_init(&conf, NULL, 120);
+        test_conf_set(conf, "produce.engine", engine_name);
         rd_kafka_conf_set_dr_msg_cb(conf, test_dr_msg_cb);
         if (compression)
                 test_conf_set(conf, "compression.codec", compression);
@@ -229,7 +234,8 @@ static void do_test_compaction(int msgs_per_key, const char *compression) {
         /* The low watermark is not updated on message deletion(compaction)
          * but on segment deletion, so fill up the first segment with
          * random messages eligible for hasty compaction. */
-        produce_compactable_msgs(topic, 0, partition, fillcnt, 1000);
+        produce_compactable_msgs(engine_name, topic, 0, partition, fillcnt,
+                                 1000);
 
         /* Populate a correct msgver for later comparison after compact. */
         test_msgver_init(&mv_correct, testid);
@@ -315,7 +321,7 @@ static void do_test_compaction(int msgs_per_key, const char *compression) {
          * We can't reuse the existing producer instance because it
          * might be using compression which makes it hard to know how
          * much data we need to produce to trigger compaction. */
-        produce_compactable_msgs(topic, 0, partition, 20, 1024);
+        produce_compactable_msgs(engine_name, topic, 0, partition, 20, 1024);
 
         /* Wait for compaction:
          * this doesn't really work because the low watermark offset
@@ -348,6 +354,28 @@ static void do_test_compaction(int msgs_per_key, const char *compression) {
                  compression ? compression : "no");
 }
 
+static void run_compaction_suite(const char *engine_name) {
+        do_test_compaction(engine_name, 10, NULL);
+
+        if (test_quick) {
+                TEST_SAY(
+                    "Skipping further compaction tests "
+                    "due to quick mode\n");
+                return;
+        }
+
+        do_test_compaction(engine_name, 1000, NULL);
+#if WITH_SNAPPY
+        do_test_compaction(engine_name, 10, "snappy");
+#endif
+#if WITH_ZSTD
+        do_test_compaction(engine_name, 10, "zstd");
+#endif
+#if WITH_ZLIB
+        do_test_compaction(engine_name, 10000, "gzip");
+#endif
+}
+
 int main_0077_compaction(int argc, char **argv) {
 
         if (!test_can_create_topics(1))
@@ -358,25 +386,8 @@ int main_0077_compaction(int argc, char **argv) {
                 return 0;
         }
 
-        do_test_compaction(10, NULL);
-
-        if (test_quick) {
-                TEST_SAY(
-                    "Skipping further compaction tests "
-                    "due to quick mode\n");
-                return 0;
-        }
-
-        do_test_compaction(1000, NULL);
-#if WITH_SNAPPY
-        do_test_compaction(10, "snappy");
-#endif
-#if WITH_ZSTD
-        do_test_compaction(10, "zstd");
-#endif
-#if WITH_ZLIB
-        do_test_compaction(10000, "gzip");
-#endif
+        run_compaction_suite("v1");
+        run_compaction_suite("v2");
 
         return 0;
 }
