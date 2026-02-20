@@ -5635,7 +5635,7 @@ static int rd_kafka_toppar_producer_serve_mbv2(rd_kafka_broker_t *rkb,
  *
  * @returns the total number of messages produced.
  */
-static int rd_kafka_broker_produce_toppars_v1(rd_kafka_broker_t *rkb,
+static int rd_kafka_broker_produce_toppars_mbv1(rd_kafka_broker_t *rkb,
                                            rd_ts_t now,
                                            rd_ts_t *next_wakeup,
                                            rd_bool_t do_timeout_scan) {
@@ -5705,7 +5705,7 @@ static int rd_kafka_broker_produce_toppars_v1(rd_kafka_broker_t *rkb,
         return cnt;
 }
 
-static int rd_kafka_broker_produce_toppars_v2(rd_kafka_broker_t *rkb,
+static int rd_kafka_broker_produce_toppars_mbv2(rd_kafka_broker_t *rkb,
                                            rd_ts_t now,
                                            rd_ts_t *next_wakeup,
                                            rd_bool_t do_timeout_scan) {
@@ -5868,7 +5868,7 @@ static void rd_kafka_broker_producer_serve_mbv1(rd_kafka_broker_t *rkb,
                 overshot = rd_interval(&timeout_scan, 1000 * 1000, now) >= 0;
                 do_timeout_scan = cnt++ == 0 || overshot;
 
-                rd_kafka_broker_produce_toppars_v1(rkb, now, &next_wakeup,
+                rd_kafka_broker_produce_toppars_mbv1(rkb, now, &next_wakeup,
                                                 do_timeout_scan);
 
                 /* Check and move retry buffers */
@@ -5916,7 +5916,7 @@ static void rd_kafka_broker_producer_serve_mbv2(rd_kafka_broker_t *rkb,
                 overshot = rd_interval(&timeout_scan, 1000 * 1000, now) >= 0;
                 do_timeout_scan = cnt++ == 0 || overshot;
 
-                rd_kafka_broker_produce_toppars_v2(rkb, now, &next_wakeup,
+                rd_kafka_broker_produce_toppars_mbv2(rkb, now, &next_wakeup,
                                                 do_timeout_scan);
 
                 /* Check and move retry buffers */
