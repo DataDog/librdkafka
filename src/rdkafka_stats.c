@@ -164,8 +164,15 @@ static void rd_kafka_stats_partition_populate(rd_kafka_partition_stats_t *dst,
         /* Producer queue stats */
         dst->msgq_cnt        = rd_kafka_msgq_len(&rktp->rktp_msgq);
         dst->msgq_bytes      = rd_kafka_msgq_size(&rktp->rktp_msgq);
-        dst->xmit_msgq_cnt   = rd_atomic32_get(&rktp->rktp_xmit_msgq_cnt);
-        dst->xmit_msgq_bytes = rd_atomic64_get(&rktp->rktp_xmit_msgq_bytes);
+        if (rktp->rktp_producer_mbv2) {
+                dst->xmit_msgq_cnt =
+                    rd_atomic32_get(&rktp->rktp_producer_mbv2->rktp_xmit_msgq_cnt);
+                dst->xmit_msgq_bytes =
+                    rd_atomic64_get(&rktp->rktp_producer_mbv2->rktp_xmit_msgq_bytes);
+        } else {
+                dst->xmit_msgq_cnt   = 0;
+                dst->xmit_msgq_bytes = 0;
+        }
 
         /* Consumer stats */
         dst->fetchq_cnt  = rd_kafka_q_len(rktp->rktp_fetchq);
@@ -394,30 +401,46 @@ static void rd_kafka_stats_broker_populate(rd_kafka_broker_stats_t *dst,
         rd_kafka_stats_avg_populate(&dst->throttle, &rkb->rkb_avg_throttle);
 
         /* Producer request stats */
-        rd_kafka_stats_avg_populate(&dst->produce_partitions, &rkb->rkb_avg_produce_partitions);
-        rd_kafka_stats_avg_populate(&dst->produce_messages, &rkb->rkb_avg_produce_messages);
-        rd_kafka_stats_avg_populate(&dst->produce_reqsize, &rkb->rkb_avg_produce_reqsize);
-        rd_kafka_stats_avg_populate(&dst->produce_fill, &rkb->rkb_avg_produce_fill);
-        rd_kafka_stats_avg_populate(&dst->batch_wait, &rkb->rkb_avg_batch_wait);
+        if (rkb->rkb_producer_mbv2) {
+                rd_kafka_stats_avg_populate(
+                    &dst->produce_partitions,
+                    &rkb->rkb_producer_mbv2->rkbp_avg_produce_partitions);
+                rd_kafka_stats_avg_populate(
+                    &dst->produce_messages,
+                    &rkb->rkb_producer_mbv2->rkbp_avg_produce_messages);
+                rd_kafka_stats_avg_populate(
+                    &dst->produce_reqsize,
+                    &rkb->rkb_producer_mbv2->rkbp_avg_produce_reqsize);
+                rd_kafka_stats_avg_populate(
+                    &dst->produce_fill,
+                    &rkb->rkb_producer_mbv2->rkbp_avg_produce_fill);
+                rd_kafka_stats_avg_populate(
+                    &dst->batch_wait,
+                    &rkb->rkb_producer_mbv2->rkbp_avg_batch_wait);
+        }
 
         /* Adaptive batching stats */
         dst->adaptive_enabled = rkb->rkb_rk->rk_conf.adaptive_batching_enabled;
         if (dst->adaptive_enabled) {
-                rd_kafka_adaptive_state_t *state = &rkb->rkb_adaptive_state;
-                rd_kafka_adaptive_params_t *params = &rkb->rkb_adaptive_params;
+                if (rkb->rkb_producer_mbv2) {
+                        rd_kafka_adaptive_state_t *state =
+                            &rkb->rkb_producer_mbv2->rkbp_adaptive_state;
+                        rd_kafka_adaptive_params_t *params =
+                            &rkb->rkb_producer_mbv2->rkbp_adaptive_params;
 
-                dst->adaptive_linger_us = params->linger_us;
-                dst->adaptive_batch_max_bytes = params->batch_max_bytes;
-                dst->adaptive_congestion = state->congestion_score;
-                dst->adaptive_rtt_congestion = state->rtt_congestion;
-                dst->adaptive_int_lat_congestion = state->int_lat_congestion;
-                dst->adaptive_rtt_base_us = state->rtt_stats.rtt_base;
-                dst->adaptive_rtt_current_us = state->rtt_stats.rtt_current;
-                dst->adaptive_int_lat_base_us = state->int_lat_stats.int_lat_base;
-                dst->adaptive_int_lat_current_us = state->int_lat_stats.int_lat_current;
-                dst->adaptive_adjustments_up = state->adjustments_up;
-                dst->adaptive_adjustments_down = state->adjustments_down;
-                dst->adaptive_backlog_drain_events = state->backlog_drain_events;
+                        dst->adaptive_linger_us = params->linger_us;
+                        dst->adaptive_batch_max_bytes = params->batch_max_bytes;
+                        dst->adaptive_congestion = state->congestion_score;
+                        dst->adaptive_rtt_congestion = state->rtt_congestion;
+                        dst->adaptive_int_lat_congestion = state->int_lat_congestion;
+                        dst->adaptive_rtt_base_us = state->rtt_stats.rtt_base;
+                        dst->adaptive_rtt_current_us = state->rtt_stats.rtt_current;
+                        dst->adaptive_int_lat_base_us = state->int_lat_stats.int_lat_base;
+                        dst->adaptive_int_lat_current_us = state->int_lat_stats.int_lat_current;
+                        dst->adaptive_adjustments_up = state->adjustments_up;
+                        dst->adaptive_adjustments_down = state->adjustments_down;
+                        dst->adaptive_backlog_drain_events = state->backlog_drain_events;
+                }
         }
 
         /* Request type counts (only non-zero entries with names) */

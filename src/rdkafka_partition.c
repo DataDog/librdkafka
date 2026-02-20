@@ -264,9 +264,16 @@ rd_kafka_toppar_t *rd_kafka_toppar_new0(rd_kafka_topic_t *rkt,
         rktp->rktp_op_version = rd_atomic32_get(&rktp->rktp_version);
 
         rd_atomic32_init(&rktp->rktp_msgs_inflight, 0);
-        rd_atomic32_init(&rktp->rktp_xmit_msgq_cnt, 0);
-        rd_atomic64_init(&rktp->rktp_xmit_msgq_bytes, 0);
         rd_kafka_pid_reset(&rktp->rktp_eos.pid);
+
+        if (rkt->rkt_rk->rk_conf.multibatch_v2) {
+                rktp->rktp_producer_mbv2 =
+                    rd_calloc(1, sizeof(*rktp->rktp_producer_mbv2));
+                rd_atomic32_init(&rktp->rktp_producer_mbv2->rktp_xmit_msgq_cnt, 0);
+                rd_atomic64_init(&rktp->rktp_producer_mbv2->rktp_xmit_msgq_bytes, 0);
+                rktp->rktp_producer_mbv2->rktp_ts_xmit_enq = 0;
+                rktp->rktp_producer_mbv2->rktp_in_batch_collector = rd_false;
+        }
 
         /* Consumer: If statistics is available we query the log start offset
          * of each partition.
@@ -318,6 +325,9 @@ static void rd_kafka_toppar_remove(rd_kafka_toppar_t *rktp) {
                             &rktp->rktp_offset_query_tmr, 1 /*lock*/);
         rd_kafka_timer_stop(&rktp->rktp_rkt->rkt_rk->rk_timers,
                             &rktp->rktp_consumer_lag_tmr, 1 /*lock*/);
+
+        if (rktp->rktp_producer_mbv2)
+                rd_free(rktp->rktp_producer_mbv2);
 
         rd_kafka_q_fwd_set(rktp->rktp_ops, NULL);
 }
