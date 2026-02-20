@@ -7224,12 +7224,16 @@ int rd_kafka_ProduceRequest_finalize_mbv2(rd_kafka_produce_ctx_t *rkpc) {
         fill_permille = (int64_t)((req_size * 1000) /
                                   (size_t)rkpc->rkpc_rkb->rkb_rk->rk_conf
                                       .max_msg_size);
-        rd_avg_add(&rkpc->rkpc_rkb->rkb_avg_produce_partitions,
-                   rkprc->rkprc_toppar_cnt);
-        rd_avg_add(&rkpc->rkpc_rkb->rkb_avg_produce_messages,
-                   rkpc->rkpc_appended_message_cnt);
-        rd_avg_add(&rkpc->rkpc_rkb->rkb_avg_produce_reqsize, (int64_t)req_size);
-        rd_avg_add(&rkpc->rkpc_rkb->rkb_avg_produce_fill, fill_permille);
+        if (rkpc->rkpc_rkb->rkb_producer_mbv2) {
+                rd_kafka_broker_producer_mbv2_t *bp =
+                    rkpc->rkpc_rkb->rkb_producer_mbv2;
+                rd_avg_add(&bp->rkbp_avg_produce_partitions,
+                           rkprc->rkprc_toppar_cnt);
+                rd_avg_add(&bp->rkbp_avg_produce_messages,
+                           rkpc->rkpc_appended_message_cnt);
+                rd_avg_add(&bp->rkbp_avg_produce_reqsize, (int64_t)req_size);
+                rd_avg_add(&bp->rkbp_avg_produce_fill, fill_permille);
+        }
 
         /* Temporary debug: log a few samples to verify reqsize/fill recording. */
         static int log_reqsize_samples = 5;

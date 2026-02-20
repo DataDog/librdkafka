@@ -1909,16 +1909,23 @@ static void rd_kafka_stats_emit_all(rd_kafka_t *rk) {
                                         &rkb->rkb_avg_outbuf_latency);
                 rd_kafka_stats_emit_avg(st, "rtt", &rkb->rkb_avg_rtt);
                 rd_kafka_stats_emit_avg(st, "throttle", &rkb->rkb_avg_throttle);
-                rd_kafka_stats_emit_avg(st, "produce_partitions",
-                                        &rkb->rkb_avg_produce_partitions);
-                rd_kafka_stats_emit_avg(st, "produce_messages",
-                                        &rkb->rkb_avg_produce_messages);
-                rd_kafka_stats_emit_avg(st, "produce_reqsize",
-                                        &rkb->rkb_avg_produce_reqsize);
-                rd_kafka_stats_emit_avg(st, "produce_fill",
-                                        &rkb->rkb_avg_produce_fill);
-                rd_kafka_stats_emit_avg(st, "batch_wait",
-                                        &rkb->rkb_avg_batch_wait);
+                if (rkb->rkb_producer_mbv2) {
+                        rd_kafka_stats_emit_avg(
+                            st, "produce_partitions",
+                            &rkb->rkb_producer_mbv2->rkbp_avg_produce_partitions);
+                        rd_kafka_stats_emit_avg(
+                            st, "produce_messages",
+                            &rkb->rkb_producer_mbv2->rkbp_avg_produce_messages);
+                        rd_kafka_stats_emit_avg(
+                            st, "produce_reqsize",
+                            &rkb->rkb_producer_mbv2->rkbp_avg_produce_reqsize);
+                        rd_kafka_stats_emit_avg(
+                            st, "produce_fill",
+                            &rkb->rkb_producer_mbv2->rkbp_avg_produce_fill);
+                        rd_kafka_stats_emit_avg(
+                            st, "batch_wait",
+                            &rkb->rkb_producer_mbv2->rkbp_avg_batch_wait);
+                }
 
                 rd_kafka_stats_emit_broker_reqs(st, rkb);
 

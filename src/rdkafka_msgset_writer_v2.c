@@ -1492,15 +1492,18 @@ int rd_kafka_produce_ctx_append_toppar_mbv2(rd_kafka_produce_ctx_t *rkpc,
 
         /* Batch wait time: time spent in the broker's per-partition queue
          * before being packaged into a (multi)Produce request. */
-        if (rktp->rktp_ts_xmit_enq) {
-                rd_ts_t wait_us = rd_clock() - rktp->rktp_ts_xmit_enq;
-                if (wait_us >= 0)
-                        rd_avg_add(&rkpc->rkpc_rkb->rkb_avg_batch_wait,
-                                   (int64_t)wait_us);
+        rd_kafka_toppar_producer_mbv2_t *tpv2 = rktp->rktp_producer_mbv2;
+
+        if (tpv2 && tpv2->rktp_ts_xmit_enq) {
+            rd_ts_t wait_us = rd_clock() - tpv2->rktp_ts_xmit_enq;
+            if (wait_us >= 0 && rkpc->rkpc_rkb->rkb_producer_mbv2)
+                rd_avg_add(
+                    &rkpc->rkpc_rkb->rkb_producer_mbv2->rkbp_avg_batch_wait,
+                    (int64_t)wait_us);
         }
 
-        if (queue_msg_cnt_end == 0)
-                rktp->rktp_ts_xmit_enq = 0;
+        if (queue_msg_cnt_end == 0 && tpv2)
+                tpv2->rktp_ts_xmit_enq = 0;
 
         return 1;
 }

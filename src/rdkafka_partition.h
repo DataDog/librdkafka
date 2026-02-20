@@ -132,13 +132,23 @@ typedef TAILQ_HEAD(rd_kafka_toppar_tqhead_s,
                    rd_kafka_toppar_s) rd_kafka_toppar_tqhead_t;
 
 /**
+ * @brief Producer mbv2 per-toppar state (allocated on demand).
+ */
+typedef struct rd_kafka_toppar_producer_mbv2_s {
+        rd_bool_t rktp_in_batch_collector;
+        rd_ts_t rktp_ts_xmit_enq; /* enqueue time for batch-wait metric */
+        rd_atomic32_t rktp_xmit_msgq_cnt;   /* Atomic count of xmit_msgq */
+        rd_atomic64_t rktp_xmit_msgq_bytes; /* Atomic size of xmit_msgq */
+} rd_kafka_toppar_producer_mbv2_t;
+
+/**
  * Topic + Partition combination
  */
 struct rd_kafka_toppar_s {                           /* rd_kafka_toppar_t */
         TAILQ_ENTRY(rd_kafka_toppar_s) rktp_rklink;  /* rd_kafka_t link */
         TAILQ_ENTRY(rd_kafka_toppar_s) rktp_rkblink; /* rd_kafka_broker_t link*/
         TAILQ_ENTRY(rd_kafka_toppar_s) rktp_batch_link; /* rd_kafka_broker_t link for batch produce */
-        TAILQ_ENTRY(rd_kafka_toppar_s) rktp_collector_link; /* rkb_batch_collector link */
+        TAILQ_ENTRY(rd_kafka_toppar_s) rktp_collector_link; /* rkb_batch_collector link (mbv2) */
         CIRCLEQ_ENTRY(rd_kafka_toppar_s)
         rktp_activelink;                              /* rkb_active_toppars */
         TAILQ_ENTRY(rd_kafka_toppar_s) rktp_rktlink;  /* rd_kafka_topic_t link*/
@@ -177,19 +187,9 @@ struct rd_kafka_toppar_s {                           /* rd_kafka_toppar_t */
                                            * protected by rktp_lock */
         rd_kafka_msgq_t rktp_xmit_msgq;   /* internal broker xmit queue.
                                            * local to broker thread. */
-        rd_ts_t rktp_ts_xmit_enq;         /**< When the current xmit queue
-                                           *   contents were enqueued on this
-                                           *   broker (for batch wait stats). */
-
-        /* Atomic mirrors of xmit_msgq for stats visibility.
-         * Updated by broker thread, read by stats thread. */
-        rd_atomic32_t rktp_xmit_msgq_cnt;   /**< Atomic count of xmit_msgq */
-        rd_atomic64_t rktp_xmit_msgq_bytes; /**< Atomic size of xmit_msgq */
+        rd_kafka_toppar_producer_mbv2_t *rktp_producer_mbv2;
 
         int rktp_fetch; /* On rkb_active_toppars list */
-        rd_bool_t rktp_in_batch_collector; /**< True if partition is in
-                                            *   broker's batch collector */
-
         /* Consumer */
         rd_kafka_q_t *rktp_fetchq; /* Queue of fetched messages
                                     * from broker.

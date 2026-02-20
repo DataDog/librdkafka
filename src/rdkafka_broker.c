@@ -316,7 +316,8 @@ finalize:
  * @locality broker thread or main thread during broker creation
  */
 void rd_kafka_broker_batch_collector_init_mbv2(rd_kafka_broker_t *rkb) {
-        rd_kafka_broker_batch_collector_t *col = &rkb->rkb_batch_collector;
+        rd_kafka_broker_batch_collector_t *col =
+            &rkb->rkb_producer_mbv2->rkbp_collector;
 
         TAILQ_INIT(&col->rkbbcol_toppars);
         col->rkbbcol_first_add_ts  = 0;
@@ -340,16 +341,19 @@ void rd_kafka_broker_batch_collector_init_mbv2(rd_kafka_broker_t *rkb) {
  */
 void rd_kafka_broker_batch_collector_add_mbv2(rd_kafka_broker_t *rkb,
                                          rd_kafka_toppar_t *rktp) {
-        rd_kafka_broker_batch_collector_t *col = &rkb->rkb_batch_collector;
+        rd_kafka_broker_batch_collector_t *col =
+            &rkb->rkb_producer_mbv2->rkbp_collector;
 
         /* Caller already verified partition has messages in xmit_msgq.
          * We just ensure partition is in the collector list - actual
          * state (bytes, first_add_ts) is calculated fresh in maybe_send(). */
-        if (!rktp->rktp_in_batch_collector) {
+        rd_kafka_toppar_producer_mbv2_t *tpv2 = rktp->rktp_producer_mbv2;
+
+        if (!tpv2->rktp_in_batch_collector) {
                 /* New partition - add to collector */
                 TAILQ_INSERT_TAIL(&col->rkbbcol_toppars, rktp,
                                   rktp_collector_link);
-                rktp->rktp_in_batch_collector = rd_true;
+                tpv2->rktp_in_batch_collector = rd_true;
                 rd_rkb_dbg(rkb, BATCHCOL, "BATCHCOL",
                            "Collector add: %s [%" PRId32
                            "]",
@@ -382,10 +386,12 @@ void rd_kafka_broker_batch_collector_add_mbv2(rd_kafka_broker_t *rkb,
  */
 static void rd_kafka_broker_batch_collector_del_mbv2(rd_kafka_broker_t *rkb,
                                                 rd_kafka_toppar_t *rktp) {
-        rd_kafka_broker_batch_collector_t *col = &rkb->rkb_batch_collector;
+        rd_kafka_broker_batch_collector_t *col =
+            &rkb->rkb_producer_mbv2->rkbp_collector;
+        rd_kafka_toppar_producer_mbv2_t *tpv2 = rktp->rktp_producer_mbv2;
         rd_kafka_toppar_t *it;
 
-        if (!rktp->rktp_in_batch_collector)
+        if (!tpv2 || !tpv2->rktp_in_batch_collector)
                 return;
 
         TAILQ_FOREACH(it, &col->rkbbcol_toppars, rktp_collector_link) {
@@ -402,7 +408,7 @@ static void rd_kafka_broker_batch_collector_del_mbv2(rd_kafka_broker_t *rkb,
 
                 TAILQ_REMOVE(&col->rkbbcol_toppars, rktp,
                              rktp_collector_link);
-                rktp->rktp_in_batch_collector = rd_false;
+                tpv2->rktp_in_batch_collector = rd_false;
                 rd_rkb_dbg(rkb, BATCHCOL, "BATCHCOL",
                            "Collector remove: %s [%" PRId32
                            "] rktp %p broker=%s",
@@ -412,7 +418,7 @@ static void rd_kafka_broker_batch_collector_del_mbv2(rd_kafka_broker_t *rkb,
                 return;
         }
 
-        rktp->rktp_in_batch_collector = rd_false;
+        tpv2->rktp_in_batch_collector = rd_false;
         rd_rkb_dbg(rkb, BATCHCOL, "BATCHCOL",
                    "Collector remove: %s [%" PRId32
                    "] rktp %p not in list, clearing flag (broker=%s)",
@@ -434,7 +440,8 @@ static void rd_kafka_broker_batch_collector_del_mbv2(rd_kafka_broker_t *rkb,
  * @locality broker thread
  */
 int rd_kafka_broker_batch_collector_send_mbv2(rd_kafka_broker_t *rkb) {
-        rd_kafka_broker_batch_collector_t *col = &rkb->rkb_batch_collector;
+        rd_kafka_broker_batch_collector_t *col =
+            &rkb->rkb_producer_mbv2->rkbp_collector;
         rd_kafka_toppar_t *rktp, *start_rktp;
         produce_batch_t batch;
         int total_msg_cnt      = 0;
@@ -562,7 +569,8 @@ done:
 int rd_kafka_broker_batch_collector_maybe_send_mbv2(rd_kafka_broker_t *rkb,
                                                rd_ts_t now,
                                                rd_bool_t flushing) {
-        rd_kafka_broker_batch_collector_t *col = &rkb->rkb_batch_collector;
+        rd_kafka_broker_batch_collector_t *col =
+            &rkb->rkb_producer_mbv2->rkbp_collector;
         rd_kafka_conf_t *conf = &rkb->rkb_rk->rk_conf;
         rd_bool_t should_send = rd_false;
         const char *reason = NULL;
@@ -676,7 +684,8 @@ int rd_kafka_broker_batch_collector_maybe_send_mbv2(rd_kafka_broker_t *rkb,
  * @locality broker thread
  */
 rd_ts_t rd_kafka_broker_batch_collector_next_wakeup_mbv2(rd_kafka_broker_t *rkb) {
-        rd_kafka_broker_batch_collector_t *col = &rkb->rkb_batch_collector;
+        rd_kafka_broker_batch_collector_t *col =
+            &rkb->rkb_producer_mbv2->rkbp_collector;
         rd_ts_t wakeup = 0, now;
         rd_ts_t linger = rd_kafka_adaptive_get_linger_us(rkb);
 
@@ -5315,8 +5324,9 @@ static int rd_kafka_toppar_producer_serve_mbv2(rd_kafka_broker_t *rkb,
 
         rd_kafka_toppar_lock(rktp);
 
-        if (rd_kafka_msgq_len(&rktp->rktp_xmit_msgq) == 0)
-                rktp->rktp_ts_xmit_enq = 0;
+        if (rktp->rktp_producer_mbv2 &&
+            rd_kafka_msgq_len(&rktp->rktp_xmit_msgq) == 0)
+                rktp->rktp_producer_mbv2->rktp_ts_xmit_enq = 0;
 
         if (unlikely(rktp->rktp_broker != rkb)) {
                 /* Currently migrating away from this
@@ -5334,7 +5344,9 @@ static int rd_kafka_toppar_producer_serve_mbv2(rd_kafka_broker_t *rkb,
                            rktp->rktp_next_broker
                                ? rd_kafka_broker_name(rktp->rktp_next_broker)
                                : "none",
-                           rktp->rktp_in_batch_collector);
+                           rktp->rktp_producer_mbv2
+                               ? rktp->rktp_producer_mbv2->rktp_in_batch_collector
+                               : 0);
                 rd_kafka_toppar_unlock(rktp);
                 return 0;
         }
@@ -5419,9 +5431,10 @@ static int rd_kafka_toppar_producer_serve_mbv2(rd_kafka_broker_t *rkb,
                             &rktp->rktp_xmit_msgq, &rktp->rktp_msgq,
                             rktp->rktp_rkt->rkt_conf.msg_order_cmp);
 
-                        if (rktp->rktp_ts_xmit_enq == 0 &&
+                        if (rktp->rktp_producer_mbv2 &&
+                            rktp->rktp_producer_mbv2->rktp_ts_xmit_enq == 0 &&
                             rd_kafka_msgq_len(&rktp->rktp_xmit_msgq) > 0)
-                                rktp->rktp_ts_xmit_enq = now;
+                                rktp->rktp_producer_mbv2->rktp_ts_xmit_enq = now;
                 }
 
         }
@@ -5742,12 +5755,16 @@ static int rd_kafka_broker_produce_toppars_mbv2(rd_kafka_broker_t *rkb,
                  * on broker.linger.ms - we add regardless of per-partition
                  * batch_ready status since the collector controls when to send. */
                 {
+                        rd_kafka_toppar_producer_mbv2_t *tpv2 =
+                            rktp->rktp_producer_mbv2;
                         int msgq_len = rd_kafka_msgq_len(&rktp->rktp_xmit_msgq);
                         size_t msgq_bytes = rd_kafka_msgq_size(&rktp->rktp_xmit_msgq);
 
                         /* Update atomic counters for stats visibility */
-                        rd_atomic32_set(&rktp->rktp_xmit_msgq_cnt, msgq_len);
-                        rd_atomic64_set(&rktp->rktp_xmit_msgq_bytes, msgq_bytes);
+                        if (tpv2) {
+                                rd_atomic32_set(&tpv2->rktp_xmit_msgq_cnt, msgq_len);
+                                rd_atomic64_set(&tpv2->rktp_xmit_msgq_bytes, msgq_bytes);
+                        }
 
                         if (msgq_len > 0) {
                                 total_msg_cnt += msgq_len;
@@ -5792,7 +5809,7 @@ done:
                 rd_kafka_bufq_cnt(&rkb->rkb_outbufs),
                 rkb->rkb_rk->rk_conf.queue_backpressure_thres,
                 rd_kafka_bufq_cnt(&rkb->rkb_waitresps),
-                rkb->rkb_batch_collector.rkbbcol_active_partition_cnt,
+                rkb->rkb_producer_mbv2->rkbp_collector.rkbbcol_active_partition_cnt,
                 total_msg_cnt,
                 sent_msg_cnt);
         return sent_msg_cnt;
@@ -6444,11 +6461,14 @@ void rd_kafka_broker_destroy_final(rd_kafka_broker_t *rkb) {
         rd_avg_destroy(&rkb->rkb_avg_outbuf_latency);
         rd_avg_destroy(&rkb->rkb_avg_rtt);
         rd_avg_destroy(&rkb->rkb_avg_throttle);
-        rd_avg_destroy(&rkb->rkb_avg_produce_partitions);
-        rd_avg_destroy(&rkb->rkb_avg_produce_messages);
-        rd_avg_destroy(&rkb->rkb_avg_produce_reqsize);
-        rd_avg_destroy(&rkb->rkb_avg_produce_fill);
-        rd_avg_destroy(&rkb->rkb_avg_batch_wait);
+        if (rkb->rkb_producer_mbv2) {
+                rd_avg_destroy(&rkb->rkb_producer_mbv2->rkbp_avg_produce_partitions);
+                rd_avg_destroy(&rkb->rkb_producer_mbv2->rkbp_avg_produce_messages);
+                rd_avg_destroy(&rkb->rkb_producer_mbv2->rkbp_avg_produce_reqsize);
+                rd_avg_destroy(&rkb->rkb_producer_mbv2->rkbp_avg_produce_fill);
+                rd_avg_destroy(&rkb->rkb_producer_mbv2->rkbp_avg_batch_wait);
+                rd_free(rkb->rkb_producer_mbv2);
+        }
         rd_avg_destroy(&rkb->rkb_telemetry.rd_avg_rollover.rkb_avg_rtt);
         rd_avg_destroy(&rkb->rkb_telemetry.rd_avg_current.rkb_avg_rtt);
         rd_avg_destroy(&rkb->rkb_telemetry.rd_avg_rollover.rkb_avg_throttle);
@@ -6554,7 +6574,6 @@ rd_kafka_broker_t *rd_kafka_broker_add(rd_kafka_t *rk,
         rkb->rkb_logname = rd_strdup(rkb->rkb_name);
         TAILQ_INIT(&rkb->rkb_toppars);
         CIRCLEQ_INIT(&rkb->rkb_active_toppars);
-        rd_kafka_broker_batch_collector_init_mbv2(rkb);
         TAILQ_INIT(&rkb->rkb_monitors);
         rd_kafka_bufq_init(&rkb->rkb_outbufs);
         rd_kafka_bufq_init(&rkb->rkb_waitresps);
@@ -6568,20 +6587,29 @@ rd_kafka_broker_t *rd_kafka_broker_add(rd_kafka_t *rk,
                     rk->rk_conf.stats_interval_ms);
         rd_avg_init(&rkb->rkb_avg_throttle, RD_AVG_GAUGE, 0, 5000 * 1000, 2,
                     rk->rk_conf.stats_interval_ms);
-        rd_avg_init(&rkb->rkb_avg_produce_partitions, RD_AVG_GAUGE, 0,
-                    rk->rk_conf.produce_request_max_partitions, 2,
-                    rk->rk_conf.stats_interval_ms);
-        rd_avg_init(&rkb->rkb_avg_produce_messages, RD_AVG_GAUGE, 0,
-                    rk->rk_conf.queue_buffering_max_msgs, 2,
-                    rk->rk_conf.stats_interval_ms);
-        rd_avg_init(&rkb->rkb_avg_produce_reqsize, RD_AVG_GAUGE, 0,
-                    rk->rk_conf.max_msg_size, 2,
-                    rk->rk_conf.stats_interval_ms);
-        /* store fill ratio in permille (0-1000). */
-        rd_avg_init(&rkb->rkb_avg_produce_fill, RD_AVG_GAUGE, 0, 1000, 2,
-                    rk->rk_conf.stats_interval_ms);
-        rd_avg_init(&rkb->rkb_avg_batch_wait, RD_AVG_GAUGE, 0, 5 * 1000 * 1000,
-                    2, rk->rk_conf.stats_interval_ms);
+        if (rk->rk_conf.multibatch_v2) {
+                rkb->rkb_producer_mbv2 = rd_calloc(1, sizeof(*rkb->rkb_producer_mbv2));
+                rd_kafka_broker_batch_collector_init_mbv2(rkb);
+                rd_avg_init(&rkb->rkb_producer_mbv2->rkbp_avg_produce_partitions,
+                            RD_AVG_GAUGE, 0,
+                            rk->rk_conf.produce_request_max_partitions, 2,
+                            rk->rk_conf.stats_interval_ms);
+                rd_avg_init(&rkb->rkb_producer_mbv2->rkbp_avg_produce_messages,
+                            RD_AVG_GAUGE, 0,
+                            rk->rk_conf.queue_buffering_max_msgs, 2,
+                            rk->rk_conf.stats_interval_ms);
+                rd_avg_init(&rkb->rkb_producer_mbv2->rkbp_avg_produce_reqsize,
+                            RD_AVG_GAUGE, 0,
+                            rk->rk_conf.max_msg_size, 2,
+                            rk->rk_conf.stats_interval_ms);
+                /* store fill ratio in permille (0-1000). */
+                rd_avg_init(&rkb->rkb_producer_mbv2->rkbp_avg_produce_fill,
+                            RD_AVG_GAUGE, 0, 1000, 2,
+                            rk->rk_conf.stats_interval_ms);
+                rd_avg_init(&rkb->rkb_producer_mbv2->rkbp_avg_batch_wait,
+                            RD_AVG_GAUGE, 0, 5 * 1000 * 1000, 2,
+                            rk->rk_conf.stats_interval_ms);
+        }
         rd_avg_init(&rkb->rkb_telemetry.rd_avg_rollover.rkb_avg_rtt,
                     RD_AVG_GAUGE, 0, 500 * 1000, 2,
                     rk->rk_conf.enable_metrics_push);
