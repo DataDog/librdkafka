@@ -434,14 +434,14 @@ unsigned int rd_kafka_broker_outbufs_space(rd_kafka_broker_t *rkb);
  * @name Broker-level batch collector functions
  * @{
  */
-void rd_kafka_broker_batch_collector_init(rd_kafka_broker_t *rkb);
-void rd_kafka_broker_batch_collector_add(rd_kafka_broker_t *rkb,
+void rd_kafka_broker_batch_collector_init_mbv2(rd_kafka_broker_t *rkb);
+void rd_kafka_broker_batch_collector_add_mbv2(rd_kafka_broker_t *rkb,
                                          rd_kafka_toppar_t *rktp);
-int rd_kafka_broker_batch_collector_maybe_send(rd_kafka_broker_t *rkb,
+int rd_kafka_broker_batch_collector_maybe_send_mbv2(rd_kafka_broker_t *rkb,
                                                rd_ts_t now,
                                                rd_bool_t flushing);
-int rd_kafka_broker_batch_collector_send(rd_kafka_broker_t *rkb);
-rd_ts_t rd_kafka_broker_batch_collector_next_wakeup(rd_kafka_broker_t *rkb);
+int rd_kafka_broker_batch_collector_send_mbv2(rd_kafka_broker_t *rkb);
+rd_ts_t rd_kafka_broker_batch_collector_next_wakeup_mbv2(rd_kafka_broker_t *rkb);
 /**@}*/
 
 /**

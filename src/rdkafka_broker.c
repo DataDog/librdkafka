@@ -315,7 +315,7 @@ finalize:
  *
  * @locality broker thread or main thread during broker creation
  */
-void rd_kafka_broker_batch_collector_init(rd_kafka_broker_t *rkb) {
+void rd_kafka_broker_batch_collector_init_mbv2(rd_kafka_broker_t *rkb) {
         rd_kafka_broker_batch_collector_t *col = &rkb->rkb_batch_collector;
 
         TAILQ_INIT(&col->rkbbcol_toppars);
@@ -324,43 +324,6 @@ void rd_kafka_broker_batch_collector_init(rd_kafka_broker_t *rkb) {
         col->rkbbcol_active_partition_cnt = 0;
         col->rkbbcol_total_bytes   = 0;
         col->rkbbcol_next          = NULL;
-}
-
-/**
- * @brief Get the oldest message timestamp from a partition's message queue.
- *
- * @returns The timestamp of the oldest message in the partition's msgq,
- *          or 0 if the queue is empty.
- *
- * @locality broker thread
- */
-static rd_ts_t rd_kafka_toppar_oldest_msg_ts(rd_kafka_toppar_t *rktp) {
-        rd_kafka_msg_t *rkm;
-
-        /* Check xmit queue first (messages ready for transmission) */
-        rkm = TAILQ_FIRST(&rktp->rktp_xmit_msgq.rkmq_msgs);
-        if (rkm)
-                return rkm->rkm_ts_enq;
-
-        /* Then check main queue */
-        rkm = TAILQ_FIRST(&rktp->rktp_msgq.rkmq_msgs);
-        if (rkm)
-                return rkm->rkm_ts_enq;
-
-        return 0;
-}
-
-/**
- * @brief Estimate the size of messages in a partition's queue.
- *
- * @returns Estimated bytes for all messages in the partition.
- *
- * @locality broker thread
- */
-static int64_t rd_kafka_toppar_estimate_batch_bytes(rd_kafka_toppar_t *rktp) {
-        /* Use the msgq byte count as an estimate */
-        return (int64_t)rd_kafka_msgq_size(&rktp->rktp_msgq) +
-               (int64_t)rd_kafka_msgq_size(&rktp->rktp_xmit_msgq);
 }
 
 /**
@@ -375,7 +338,7 @@ static int64_t rd_kafka_toppar_estimate_batch_bytes(rd_kafka_toppar_t *rktp) {
  *
  * @locality broker thread
  */
-void rd_kafka_broker_batch_collector_add(rd_kafka_broker_t *rkb,
+void rd_kafka_broker_batch_collector_add_mbv2(rd_kafka_broker_t *rkb,
                                          rd_kafka_toppar_t *rktp) {
         rd_kafka_broker_batch_collector_t *col = &rkb->rkb_batch_collector;
 
@@ -417,7 +380,7 @@ void rd_kafka_broker_batch_collector_add(rd_kafka_broker_t *rkb,
  *
  * @locality broker thread
  */
-static void rd_kafka_broker_batch_collector_del(rd_kafka_broker_t *rkb,
+static void rd_kafka_broker_batch_collector_del_mbv2(rd_kafka_broker_t *rkb,
                                                 rd_kafka_toppar_t *rktp) {
         rd_kafka_broker_batch_collector_t *col = &rkb->rkb_batch_collector;
         rd_kafka_toppar_t *it;
@@ -470,7 +433,7 @@ static void rd_kafka_broker_batch_collector_del(rd_kafka_broker_t *rkb,
  *
  * @locality broker thread
  */
-int rd_kafka_broker_batch_collector_send(rd_kafka_broker_t *rkb) {
+int rd_kafka_broker_batch_collector_send_mbv2(rd_kafka_broker_t *rkb) {
         rd_kafka_broker_batch_collector_t *col = &rkb->rkb_batch_collector;
         rd_kafka_toppar_t *rktp, *start_rktp;
         produce_batch_t batch;
@@ -596,7 +559,7 @@ done:
  *
  * @locality broker thread
  */
-int rd_kafka_broker_batch_collector_maybe_send(rd_kafka_broker_t *rkb,
+int rd_kafka_broker_batch_collector_maybe_send_mbv2(rd_kafka_broker_t *rkb,
                                                rd_ts_t now,
                                                rd_bool_t flushing) {
         rd_kafka_broker_batch_collector_t *col = &rkb->rkb_batch_collector;
@@ -696,7 +659,7 @@ int rd_kafka_broker_batch_collector_maybe_send(rd_kafka_broker_t *rkb,
                                : 0.0,
                            reason);
 
-                return rd_kafka_broker_batch_collector_send(rkb);
+                return rd_kafka_broker_batch_collector_send_mbv2(rkb);
         }
 
         return 0;
@@ -712,7 +675,7 @@ int rd_kafka_broker_batch_collector_maybe_send(rd_kafka_broker_t *rkb,
  *
  * @locality broker thread
  */
-rd_ts_t rd_kafka_broker_batch_collector_next_wakeup(rd_kafka_broker_t *rkb) {
+rd_ts_t rd_kafka_broker_batch_collector_next_wakeup_mbv2(rd_kafka_broker_t *rkb) {
         rd_kafka_broker_batch_collector_t *col = &rkb->rkb_batch_collector;
         rd_ts_t wakeup = 0, now;
         rd_ts_t linger = rd_kafka_adaptive_get_linger_us(rkb);
@@ -4552,7 +4515,7 @@ rd_kafka_broker_op_serve_v2(rd_kafka_broker_t *rkb, rd_kafka_op_t *rko) {
                            rktp);
 
                 if (rkb->rkb_rk->rk_type == RD_KAFKA_PRODUCER)
-                        rd_kafka_broker_batch_collector_del(rkb, rktp);
+                        rd_kafka_broker_batch_collector_del_mbv2(rkb, rktp);
 
                 /* Insert xmitq(broker-local) messages to the msgq(global)
                  * at their sorted position to maintain ordering. */
@@ -5788,7 +5751,7 @@ static int rd_kafka_broker_produce_toppars_mbv2(rd_kafka_broker_t *rkb,
 
                         if (msgq_len > 0) {
                                 total_msg_cnt += msgq_len;
-                                rd_kafka_broker_batch_collector_add(rkb, rktp);
+                                rd_kafka_broker_batch_collector_add_mbv2(rkb, rktp);
                         }
                 }
 
@@ -5809,12 +5772,12 @@ static int rd_kafka_broker_produce_toppars_mbv2(rd_kafka_broker_t *rkb,
          * This implements broker-level batching where we collect partitions
          * and send when broker.linger.ms expires or thresholds are reached. */
         sent_msg_cnt =
-            rd_kafka_broker_batch_collector_maybe_send(rkb, now, flushing);
+            rd_kafka_broker_batch_collector_maybe_send_mbv2(rkb, now, flushing);
 
         /* Update wakeup time based on collector's next deadline */
         {
                 rd_ts_t collector_wakeup =
-                    rd_kafka_broker_batch_collector_next_wakeup(rkb);
+                    rd_kafka_broker_batch_collector_next_wakeup_mbv2(rkb);
                 if (collector_wakeup > 0)
                         rd_kafka_set_next_wakeup(&ret_next_wakeup,
                                                  collector_wakeup);
@@ -6591,7 +6554,7 @@ rd_kafka_broker_t *rd_kafka_broker_add(rd_kafka_t *rk,
         rkb->rkb_logname = rd_strdup(rkb->rkb_name);
         TAILQ_INIT(&rkb->rkb_toppars);
         CIRCLEQ_INIT(&rkb->rkb_active_toppars);
-        rd_kafka_broker_batch_collector_init(rkb);
+        rd_kafka_broker_batch_collector_init_mbv2(rkb);
         TAILQ_INIT(&rkb->rkb_monitors);
         rd_kafka_bufq_init(&rkb->rkb_outbufs);
         rd_kafka_bufq_init(&rkb->rkb_waitresps);
