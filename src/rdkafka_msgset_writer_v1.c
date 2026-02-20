@@ -35,6 +35,15 @@
 #include "rdkafka_partition.h"
 #include "rdkafka_header.h"
 #include "rdkafka_lz4.h"
+#include "rdkafka_msgset_writer_int.h"
+#include "crc32c.h"
+#include "rdvarint.h"
+
+/* Forward declarations for helpers defined later in this file */
+static int rd_kafka_msgset_writer_write_msgq_mbv1(rd_kafka_msgset_writer_t *msetw,
+                                                  rd_kafka_msgq_t *rkmq);
+static void rd_kafka_msgset_writer_finalize_MessageSet_mbv1(
+    rd_kafka_msgset_writer_t *msetw);
 
 #if WITH_ZSTD
 #include "rdkafka_zstd.h"
@@ -180,6 +189,61 @@ static void rd_kafka_msgset_writer_alloc_buf_mbv1(rd_kafka_msgset_writer_t *mset
 }
 
 /**
+ * @brief Write the MessageSet header.
+ * @remark Must only be called for MsgVersion 2
+ */
+static void rd_kafka_msgset_writer_write_MessageSet_v2_header_mbv1(
+    rd_kafka_msgset_writer_t *msetw) {
+        rd_kafka_buf_t *rkbuf = msetw->msetw_rkbuf;
+
+        rd_kafka_assert(NULL, msetw->msetw_ApiVersion >= 3);
+        rd_kafka_assert(NULL, msetw->msetw_MsgVersion == 2);
+
+        /* BaseOffset (also store the offset to the start of
+         * the messageset header fields) */
+        msetw->msetw_of_start = rd_kafka_buf_write_i64(rkbuf, 0);
+
+        /* Length: updated later */
+        rd_kafka_buf_write_i32(rkbuf, 0);
+
+        /* PartitionLeaderEpoch (KIP-101) */
+        rd_kafka_buf_write_i32(rkbuf, 0);
+
+        /* Magic (MsgVersion) */
+        rd_kafka_buf_write_i8(rkbuf, msetw->msetw_MsgVersion);
+
+        /* CRC (CRC32C): updated later.
+         * CRC needs to be done after the entire messageset+messages has
+         * been constructed and the following header fields updated. :(
+         * Save the offset for this position. so it can be udpated later. */
+        msetw->msetw_of_CRC = rd_kafka_buf_write_i32(rkbuf, 0);
+
+        /* Attributes: updated later */
+        rd_kafka_buf_write_i16(rkbuf, 0);
+
+        /* LastOffsetDelta: updated later */
+        rd_kafka_buf_write_i32(rkbuf, 0);
+
+        /* BaseTimestamp: updated later */
+        rd_kafka_buf_write_i64(rkbuf, 0);
+
+        /* MaxTimestamp: updated later */
+        rd_kafka_buf_write_i64(rkbuf, 0);
+
+        /* ProducerId */
+        rd_kafka_buf_write_i64(rkbuf, msetw->msetw_pid.id);
+
+        /* ProducerEpoch */
+        rd_kafka_buf_write_i16(rkbuf, msetw->msetw_pid.epoch);
+
+        /* BaseSequence: updated later in case of Idempotent Producer */
+        rd_kafka_buf_write_i32(rkbuf, -1);
+
+        /* RecordCount: udpated later */
+        rd_kafka_buf_write_i32(rkbuf, 0);
+}
+
+/**
  * @brief Write ProduceRequest headers.
  *        When this function returns the msgset is ready for
  *        writing individual messages.
@@ -218,16 +282,151 @@ rd_kafka_msgset_writer_write_Produce_header(rd_kafka_msgset_writer_t *msetw) {
         msetw->msetw_of_MessageSetSize = rd_kafka_buf_write_arraycnt_pos(rkbuf);
 
         // For multi-batch requests, here where we start copying the batch
-        rkbuf->rkbuf_u.Produce.batch_start_pos = msetw->msetw_of_MessageSetSize;
+        rkbuf->rkbuf_u.Produce.v1.batch_start_pos = msetw->msetw_of_MessageSetSize;
 
         if (msetw->msetw_MsgVersion == 2) {
                 /* MessageSet v2 header */
-                rd_kafka_msgset_writer_write_MessageSet_v2_header(msetw);
+                rd_kafka_msgset_writer_write_MessageSet_v2_header_mbv1(msetw);
                 msetw->msetw_MessageSetSize = RD_KAFKAP_MSGSET_V2_SIZE;
         } else {
                 /* Older MessageSet */
                 msetw->msetw_MessageSetSize = RD_KAFKAP_MSGSET_V0_SIZE;
         }
+}
+
+/**
+ * @brief Select ApiVersion and MsgVersion to use based on broker's
+ *        feature compatibility.
+ *
+ * @returns -1 if a MsgVersion (or ApiVersion) could not be selected, else 0.
+ * @locality broker thread
+ */
+static RD_INLINE int
+rd_kafka_msgset_writer_select_MsgVersion_mbv1(rd_kafka_msgset_writer_t *msetw) {
+        rd_kafka_broker_t *rkb       = msetw->msetw_rkb;
+        rd_kafka_toppar_t *rktp      = msetw->msetw_rktp;
+        const int16_t max_ApiVersion = rd_kafka_ProduceRequest_max_version;
+        int16_t min_ApiVersion       = 0;
+        int feature;
+        /* Map compression types to required feature and ApiVersion */
+        static const struct {
+                int feature;
+                int16_t ApiVersion;
+        } compr_req[RD_KAFKA_COMPRESSION_NUM] = {
+            [RD_KAFKA_COMPRESSION_LZ4] = {RD_KAFKA_FEATURE_LZ4, 0},
+#if WITH_ZSTD
+            [RD_KAFKA_COMPRESSION_ZSTD] = {RD_KAFKA_FEATURE_ZSTD, 7},
+#endif
+        };
+
+        if ((feature = rkb->rkb_features & RD_KAFKA_FEATURE_MSGVER2)) {
+                min_ApiVersion          = 3;
+                msetw->msetw_MsgVersion = 2;
+                msetw->msetw_features |= feature;
+        } else if ((feature = rkb->rkb_features & RD_KAFKA_FEATURE_MSGVER1)) {
+                min_ApiVersion          = 2;
+                msetw->msetw_MsgVersion = 1;
+                msetw->msetw_features |= feature;
+        } else {
+                if ((feature =
+                         rkb->rkb_features & RD_KAFKA_FEATURE_THROTTLETIME)) {
+                        min_ApiVersion = 1;
+                        msetw->msetw_features |= feature;
+                } else
+                        min_ApiVersion = 0;
+                msetw->msetw_MsgVersion = 0;
+        }
+
+        msetw->msetw_compression = rktp->rktp_rkt->rkt_conf.compression_codec;
+
+        /*
+         * Check that the configured compression type is supported
+         * by both client and broker, else disable compression.
+         */
+        if (msetw->msetw_compression &&
+            (rd_kafka_broker_ApiVersion_supported(
+                 rkb, RD_KAFKAP_Produce, 0,
+                 compr_req[msetw->msetw_compression].ApiVersion, NULL) == -1 ||
+             (compr_req[msetw->msetw_compression].feature &&
+              !(msetw->msetw_rkb->rkb_features &
+                compr_req[msetw->msetw_compression].feature)))) {
+                if (unlikely(
+                        rd_interval(&rkb->rkb_suppress.unsupported_compression,
+                                    /* at most once per day */
+                                    (rd_ts_t)86400 * 1000 * 1000, 0) > 0))
+                        rd_rkb_log(
+                            rkb, LOG_NOTICE, "COMPRESSION",
+                            "%.*s [%" PRId32
+                            "]: "
+                            "Broker does not support compression "
+                            "type %s: not compressing batch",
+                            RD_KAFKAP_STR_PR(rktp->rktp_rkt->rkt_topic),
+                            rktp->rktp_partition,
+                            rd_kafka_compression2str(msetw->msetw_compression));
+                else
+                        rd_rkb_dbg(
+                            rkb, MSG, "PRODUCE",
+                            "%.*s [%" PRId32
+                            "]: "
+                            "Broker does not support compression "
+                            "type %s: not compressing batch",
+                            RD_KAFKAP_STR_PR(rktp->rktp_rkt->rkt_topic),
+                            rktp->rktp_partition,
+                            rd_kafka_compression2str(msetw->msetw_compression));
+
+                msetw->msetw_compression = RD_KAFKA_COMPRESSION_NONE;
+        } else {
+                /* Broker supports this compression type. */
+                msetw->msetw_features |=
+                    compr_req[msetw->msetw_compression].feature;
+
+                if (min_ApiVersion <
+                    compr_req[msetw->msetw_compression].ApiVersion)
+                        min_ApiVersion =
+                            compr_req[msetw->msetw_compression].ApiVersion;
+        }
+
+        /* MsgVersion specific setup. */
+        switch (msetw->msetw_MsgVersion) {
+        case 2:
+                msetw->msetw_relative_offsets = 1; /* OffsetDelta */
+                break;
+        case 1:
+                if (msetw->msetw_compression != RD_KAFKA_COMPRESSION_NONE)
+                        msetw->msetw_relative_offsets = 1;
+                break;
+        }
+
+        /* Set the highest ApiVersion supported by us and broker */
+        msetw->msetw_ApiVersion = rd_kafka_broker_ApiVersion_supported(
+            rkb, RD_KAFKAP_Produce, min_ApiVersion, max_ApiVersion, NULL);
+
+        if (msetw->msetw_ApiVersion == -1) {
+                rd_kafka_msg_t *rkm;
+                /* This will only happen if the broker reports none, or
+                 * no matching ProduceRequest versions, which should never
+                 * happen. */
+                rd_rkb_log(rkb, LOG_ERR, "PRODUCE",
+                           "%.*s [%" PRId32
+                           "]: "
+                           "No viable ProduceRequest ApiVersions (v%d..%d) "
+                           "supported by broker: unable to produce",
+                           RD_KAFKAP_STR_PR(rktp->rktp_rkt->rkt_topic),
+                           rktp->rktp_partition, min_ApiVersion,
+                           max_ApiVersion);
+
+                /* Back off and retry in 5s */
+                rkm = rd_kafka_msgq_first(msetw->msetw_msgq);
+                rd_assert(rkm);
+                rkm->rkm_u.producer.ts_backoff = rd_clock() + (5 * 1000 * 1000);
+                return -1;
+        }
+
+        /* It should not be possible to get a lower version than requested,
+         * otherwise the logic in this function is buggy. */
+        rd_assert(msetw->msetw_ApiVersion >= min_ApiVersion);
+
+        return 0;
 }
 
 /**
@@ -269,7 +468,7 @@ static int rd_kafka_msgset_writer_init_mbv1(rd_kafka_msgset_writer_t *msetw,
         rd_dassert(msetw->msetw_msgcntmax > 0);
 
         /* Select MsgVersion to use */
-        if (rd_kafka_msgset_writer_select_MsgVersion(msetw) == -1)
+        if (rd_kafka_msgset_writer_select_MsgVersion_mbv1(msetw) == -1)
                 return -1;
 
         /* Allocate backing buffer */
@@ -327,42 +526,7 @@ rd_kafka_buf_t *rd_kafka_msgset_create_ProduceRequest_mbv1(rd_kafka_broker_t *rk
                     rktp->rktp_rkt->rkt_conf.msg_order_cmp);
         }
 
-        return rd_kafka_msgset_writer_finalize(&msetw, MessageSetSizep);
-}
-
-/**
- * @brief Write message to messageset buffer.
- * @returns the number of bytes written.
- */
-static size_t rd_kafka_msgset_writer_write_msg_mbv1(rd_kafka_msgset_writer_t *msetw,
-                                               rd_kafka_msg_t *rkm,
-                                               int64_t Offset,
-                                               int8_t MsgAttributes,
-                                               void (*free_cb)(void *)) {
-        size_t outlen;
-        size_t (*writer[])(rd_kafka_msgset_writer_t *, rd_kafka_msg_t *,
-                           int64_t, int8_t, void (*)(void *)) = {
-            [0] = rd_kafka_msgset_writer_write_msg_v0_1,
-            [1] = rd_kafka_msgset_writer_write_msg_v0_1,
-            [2] = rd_kafka_msgset_writer_write_msg_v2};
-        size_t actual_written;
-        size_t pre_pos;
-
-        if (likely(rkm->rkm_timestamp))
-                MsgAttributes |= RD_KAFKA_MSG_ATTR_CREATE_TIME;
-
-        pre_pos = rd_buf_write_pos(&msetw->msetw_rkbuf->rkbuf_buf);
-
-        outlen = writer[msetw->msetw_MsgVersion](msetw, rkm, Offset,
-                                                 MsgAttributes, free_cb);
-
-        actual_written =
-            rd_buf_write_pos(&msetw->msetw_rkbuf->rkbuf_buf) - pre_pos;
-        rd_assert(outlen <=
-                  rd_kafka_msg_wire_size(rkm, msetw->msetw_MsgVersion));
-        rd_assert(outlen == actual_written);
-
-        return outlen;
+        return rd_kafka_msgset_writer_finalize_mbv1(&msetw, MessageSetSizep);
 }
 
 /**
@@ -522,9 +686,9 @@ static int rd_kafka_msgset_writer_write_msgq_mbv1(rd_kafka_msgset_writer_t *mset
  * @returns the buffer to transmit or NULL if there were no messages
  *          in messageset.
  */
-static rd_kafka_buf_t *
+rd_kafka_buf_t *
 rd_kafka_msgset_writer_finalize_mbv1(rd_kafka_msgset_writer_t *msetw,
-                                size_t *MessageSetSizep) {
+                                     size_t *MessageSetSizep) {
         rd_kafka_buf_t *rkbuf   = msetw->msetw_rkbuf;
         rd_kafka_toppar_t *rktp = msetw->msetw_rktp;
         size_t len;
@@ -568,7 +732,8 @@ rd_kafka_msgset_writer_finalize_mbv1(rd_kafka_msgset_writer_t *msetw,
         rd_kafka_buf_write_tags_empty(rkbuf);
 
         /* Save the position of end of batch + partition tags for multi-batch req */
-        rkbuf->rkbuf_u.Produce.batch_end_pos = rd_buf_write_pos(&rkbuf->rkbuf_buf);
+        rkbuf->rkbuf_u.Produce.v1.batch_end_pos =
+            rd_buf_write_pos(&rkbuf->rkbuf_buf);
 
         /* Topics tags */
         rd_kafka_buf_write_tags_empty(rkbuf);

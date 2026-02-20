@@ -90,7 +90,7 @@ struct rd_kafka_produce_calculator_s {
 
 /* Context used to store data while constructing a produce batch.
  * The resulting batch will be written into a buffer created in
- * rd_kafka_produce_ctx_init_mbv2, and returned in rd_kafka_produce_ctx_finalize.
+ * rd_kafka_produce_ctx_init_mbv2, and returned in rd_kafka_produce_ctx_finalize_mbv2.
  * Toppars are added using rd_kafka_produce_ctx_append_toppar_mbv2 and must
  * conform to the settings passed into the init method or appending will fail.
  */

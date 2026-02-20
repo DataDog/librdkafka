@@ -4123,7 +4123,7 @@ const char *rd_kafka_conf_finalize(rd_kafka_type_t cltype,
                         conf->sticky_partition_linger_ms = (int)RD_MIN(
                             900000, (rd_ts_t)(2 * conf->buffering_max_ms_dbl));
 
-                if (conf->multibaych && conf->multibatch_v2)
+                if (conf->multibatch && conf->multibatch_v2)
                     return "`multibatch` and `multibatch_v2 are mutually exclusive";
 
                 if (rd_kafka_conf_is_modified(conf, "produce.request.max.partitions") &&

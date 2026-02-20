@@ -1004,7 +1004,7 @@ size_t rd_slice_read(rd_slice_t *slice, void *dst, size_t size) {
  *
  * @remark This performs a complete read, no partitial reads.
  */
-size_t rd_slice_read_into_buf_v1(rd_slice_t *slice, rd_buf_t *rbuf, size_t size) {
+size_t rd_slice_read_into_buf_mbv1(rd_slice_t *slice, rd_buf_t *rbuf, size_t size) {
         size_t remains = size;
         size_t rlen;
         const void *p;

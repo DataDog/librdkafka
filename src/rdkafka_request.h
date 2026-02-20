@@ -456,23 +456,23 @@ void rd_kafka_SaslAuthenticateRequest(rd_kafka_broker_t *rkb,
                                       rd_kafka_replyq_t replyq,
                                       rd_kafka_resp_cb_t *resp_cb,
                                       void *opaque);
-int rd_kafka_ProduceRequest_v1(rd_kafka_broker_t *rkb,
+int rd_kafka_ProduceRequest_mbv1(rd_kafka_broker_t *rkb,
                             rd_kafka_toppar_t *rktp,
                             const rd_kafka_pid_t pid,
                             uint64_t epoch_base_msgid,
                             rd_bool_t skip_sending,
                             rd_list_t *batch_bufq);
 
-int rd_kafka_ProduceRequest_v2(rd_kafka_broker_t *rkb,
+int rd_kafka_ProduceRequest_mbv2(rd_kafka_broker_t *rkb,
                             rd_kafka_toppar_t *rktp,
                             const rd_kafka_pid_t pid,
                             uint64_t epoch_base_msgid);
 
-int rd_kafka_MultiBatchProduceRequest_v1(rd_kafka_broker_t *rkb,
+int rd_kafka_MultiBatchProduceRequest_mbv1(rd_kafka_broker_t *rkb,
                             const rd_kafka_pid_t pid,
                             rd_list_t *batch_bufq);
 
-int rd_kafka_ProduceRequest_init_v2(rd_kafka_produce_ctx_t *rkpc,
+int rd_kafka_ProduceRequest_init_mbv2(rd_kafka_produce_ctx_t *rkpc,
                                 rd_kafka_broker_t *rkb,
                                 const rd_kafka_pid_t pid,
                                 int topic_max,
@@ -482,10 +482,10 @@ int rd_kafka_ProduceRequest_init_v2(rd_kafka_produce_ctx_t *rkpc,
                                 int request_required_acks,
                                 int request_timeout_ms);
 
-int rd_kafka_ProduceRequest_append(rd_kafka_produce_ctx_t *rkpc,
+int rd_kafka_ProduceRequest_append_mbv2(rd_kafka_produce_ctx_t *rkpc,
                                    rd_kafka_toppar_t *rktp);
 
-int rd_kafka_ProduceRequest_finalize(rd_kafka_produce_ctx_t *rkpc);
+int rd_kafka_ProduceRequest_finalize_mbv2(rd_kafka_produce_ctx_t *rkpc);
 
 rd_kafka_resp_err_t
 rd_kafka_CreateTopicsRequest(rd_kafka_broker_t *rkb,

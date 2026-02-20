@@ -416,9 +416,15 @@ rd_kafka_msgq_first_msgid(const rd_kafka_msgq_t *rkmq) {
                 return 0;
 }
 
+rd_bool_t rd_kafka_msgq_allow_wakeup_at_mbv1(rd_kafka_msgq_t *rkmq,
+                                        const rd_kafka_msgq_t *dest_rkmq,
+                                        rd_ts_t *next_wakeup,
+                                        rd_ts_t now,
+                                        rd_ts_t linger_us,
+                                        int32_t batch_msg_cnt,
+                                        int64_t batch_msg_bytes);
 
-
-rd_bool_t rd_kafka_msgq_allow_wakeup_at(rd_kafka_msgq_t *rkmq,
+rd_bool_t rd_kafka_msgq_allow_wakeup_at_mbv2(rd_kafka_msgq_t *rkmq,
                                         const rd_kafka_msgq_t *dest_rkmq,
                                         rd_ts_t *next_wakeup,
                                         rd_ts_t now,
