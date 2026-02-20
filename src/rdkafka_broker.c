@@ -167,7 +167,7 @@ rd_kafka_produce_topic_buckets_build(rd_list_t *buckets,
 static void
 rd_kafka_broker_produce_batch_init(produce_batch_t *batch, rd_kafka_broker_t *rkb) {
         TAILQ_INIT(&batch->batch_toppars);
-        rd_kafka_produce_calculator_init(&batch->batch_calculator, rkb);
+        rd_kafka_produce_calculator_init_mbv2(&batch->batch_calculator, rkb);
 
         if (rd_kafka_broker_outbufs_space(rkb) > 0)
                 batch->batch_initialized = 1;
@@ -1432,7 +1432,7 @@ void rd_kafka_broker_conn_closed(rd_kafka_broker_t *rkb,
  */
 rd_bool_t buf_contains_toppar_v1(rd_kafka_buf_t *rkbuf, rd_kafka_toppar_t *rktp) {
 
-        if (rd_list_cnt(&rkbuf->rkbuf_u.Produce.batch_list) > 0) {
+        if (rd_list_cnt(&rkbuf->rkbuf_u.Produce.v1.batch_list) > 0) {
                 /* this is multi-batch request, loop through all batches.
                    The size of this list is bounded by number of topic+partition
                    this broker thread manages. In reality it's likely to be
@@ -1441,7 +1441,7 @@ rd_bool_t buf_contains_toppar_v1(rd_kafka_buf_t *rkbuf, rd_kafka_toppar_t *rktp)
                    of processing */
                 rd_kafka_msgbatch_t *msgbatch;
                 int i;
-                RD_LIST_FOREACH(msgbatch, &rkbuf->rkbuf_u.Produce.batch_list, i) {
+                RD_LIST_FOREACH(msgbatch, &rkbuf->rkbuf_u.Produce.v1.batch_list, i) {
                         if (msgbatch->rktp == rktp)
                                 return rd_true;
                 }

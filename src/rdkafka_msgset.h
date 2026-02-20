@@ -90,8 +90,8 @@ struct rd_kafka_produce_calculator_s {
 
 /* Context used to store data while constructing a produce batch.
  * The resulting batch will be written into a buffer created in
- * rd_kafka_produce_ctx_init, and returned in rd_kafka_produce_ctx_finalize.
- * Toppars are added using rd_kafka_produce_ctx_append_toppar and must
+ * rd_kafka_produce_ctx_init_mbv2, and returned in rd_kafka_produce_ctx_finalize.
+ * Toppars are added using rd_kafka_produce_ctx_append_toppar_mbv2 and must
  * conform to the settings passed into the init method or appending will fail.
  */
 struct rd_kafka_produce_ctx_s {
@@ -112,7 +112,7 @@ struct rd_kafka_produce_ctx_s {
         int rkpc_request_timeout_ms;
 
         /* Options set by rd_kafka_produce_request_select_caps in
-         * rd_kafka_produce_ctx_init. */
+         * rd_kafka_produce_ctx_init_mbv2. */
         int rkpc_api_version;
         int rkpc_msg_version;
         int rkpc_features;
@@ -175,12 +175,12 @@ struct rd_kafka_produce_ctx_s {
  * request.
  */
 
-void rd_kafka_produce_calculator_init(rd_kafka_produce_calculator_t *rkpca,
-                                      rd_kafka_broker_t *rkb);
+void rd_kafka_produce_calculator_init_mbv2(rd_kafka_produce_calculator_t *rkpca,
+                                         rd_kafka_broker_t *rkb);
 
 int rd_kafka_produce_calculator_add(rd_kafka_produce_calculator_t *rkpca,
                                     rd_kafka_toppar_t *rktp);
-int rd_kafka_produce_ctx_init(rd_kafka_produce_ctx_t *rkpc,
+int rd_kafka_produce_ctx_init_mbv2(rd_kafka_produce_ctx_t *rkpc,
                               rd_kafka_broker_t *rkb,
                               int topic_max,
                               int partition_max,
@@ -190,16 +190,23 @@ int rd_kafka_produce_ctx_init(rd_kafka_produce_ctx_t *rkpc,
                               int request_timeout_ms,
                               rd_kafka_pid_t pid,
                               void *opaque);
-int rd_kafka_produce_ctx_append_toppar(rd_kafka_produce_ctx_t *rkpc,
+int rd_kafka_produce_ctx_append_toppar_mbv2(rd_kafka_produce_ctx_t *rkpc,
                                        rd_kafka_toppar_t *rktp,
                                        int *appended_msg_cnt,
                                        size_t *appended_msg_bytes);
-rd_kafka_buf_t *rd_kafka_produce_ctx_finalize(rd_kafka_produce_ctx_t *rkpc);
+rd_kafka_buf_t *rd_kafka_produce_ctx_finalize_mbv2(rd_kafka_produce_ctx_t *rkpc);
 
 /**
  * @name MessageSet writers
  */
-rd_kafka_buf_t *rd_kafka_msgset_create_ProduceRequest(rd_kafka_broker_t *rkb,
+rd_kafka_buf_t *rd_kafka_msgset_create_ProduceRequest_mbv1(
+    rd_kafka_broker_t *rkb,
+    rd_kafka_toppar_t *rktp,
+    rd_kafka_msgq_t *rkmq,
+    const rd_kafka_pid_t pid,
+    uint64_t epoch_base_msgid,
+    size_t *MessageSetSizep);
+rd_kafka_buf_t *rd_kafka_msgset_create_ProduceRequest_mbv2(rd_kafka_broker_t *rkb,
                                                       rd_kafka_toppar_t *rktp,
                                                       rd_kafka_msgq_t *rkmq,
                                                       const rd_kafka_pid_t pid,

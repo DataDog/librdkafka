@@ -112,7 +112,7 @@ typedef struct rd_kafka_msgset_writer_s {
  * @locality broker thread
  */
 static RD_INLINE void
-rd_kafka_produce_request_select_caps(rd_kafka_broker_t *rkb,
+rd_kafka_produce_request_select_caps_mbv2(rd_kafka_broker_t *rkb,
                                      int *api_version,
                                      int *msg_version,
                                      int *features) {
@@ -210,7 +210,7 @@ rd_kafka_msgq_bytes_prefix(const rd_kafka_msgq_t *rkmq, int cnt) {
  * @locality broker thread
  */
 static RD_INLINE int
-rd_kafka_msgset_writer_select_caps(rd_kafka_msgset_writer_t *msetw) {
+rd_kafka_msgset_writer_select_caps_mbv2(rd_kafka_msgset_writer_t *msetw) {
         rd_kafka_broker_t *rkb       = msetw->msetw_rkb;
         rd_kafka_toppar_t *rktp      = msetw->msetw_rktp;
         const int16_t max_ApiVersion = rd_kafka_ProduceRequest_max_version;
@@ -315,7 +315,7 @@ rd_kafka_msgset_writer_select_caps(rd_kafka_msgset_writer_t *msetw) {
 
 
 static void
-rd_kafka_produce_request_get_header_sizes(rd_kafka_t *rk,
+rd_kafka_produce_request_get_header_sizes_mbv2(rd_kafka_t *rk,
                                           int api_version,
                                           int msg_version,
                                           size_t *produce_hdr_size,
@@ -418,7 +418,7 @@ rd_kafka_produce_request_get_header_sizes(rd_kafka_t *rk,
  * The allocated size is the minimum of message.max.bytes
  * or queued_bytes ormsgcntmax * msg_overhead
  */
-static void rd_kafka_produce_request_alloc_buf(rd_kafka_produce_ctx_t *rkpc) {
+static void rd_kafka_produce_request_alloc_buf_mbv2(rd_kafka_produce_ctx_t *rkpc) {
         rd_kafka_t *rk      = rkpc->rkpc_rkb->rkb_rk;
         size_t msg_overhead = 0;
 
@@ -430,7 +430,7 @@ static void rd_kafka_produce_request_alloc_buf(rd_kafka_produce_ctx_t *rkpc) {
 
         rd_kafka_assert(NULL, !rkpc->rkpc_buf);
 
-        rd_kafka_produce_request_get_header_sizes(
+        rd_kafka_produce_request_get_header_sizes_mbv2(
             rkpc->rkpc_rkb->rkb_rk, rkpc->rkpc_api_version,
             rkpc->rkpc_msg_version, &produce_hdr_size, &topic_hdr_size,
             &partition_hdr_size, &msgset_hdr_size, &msg_overhead);
@@ -618,7 +618,7 @@ rd_kafka_produce_finalize_produce_header(rd_kafka_produce_ctx_t *rkpc) {
         rd_kafka_buf_write_tags_empty(rkbuf);
 }
 
-static void rd_kafka_produce_write_topic_header(rd_kafka_produce_ctx_t *rkpc) {
+static void rd_kafka_produce_write_topic_header_mbv2(rd_kafka_produce_ctx_t *rkpc) {
         rd_kafka_buf_t *rkbuf = rkpc->rkpc_buf;
 
         /* Insert topic */
@@ -632,7 +632,7 @@ static void rd_kafka_produce_write_topic_header(rd_kafka_produce_ctx_t *rkpc) {
 }
 
 static void
-rd_kafka_produce_finalize_topic_header(rd_kafka_produce_ctx_t *rkpc) {
+rd_kafka_produce_finalize_topic_header_mbv2(rd_kafka_produce_ctx_t *rkpc) {
         rd_kafka_buf_t *rkbuf = rkpc->rkpc_buf;
 
         /* Update PartitionArrayCnt (handles both regular and compact arrays) */
@@ -652,7 +652,7 @@ rd_kafka_produce_ctx_clear_active_topic(rd_kafka_produce_ctx_t *rkpc) {
 }
 
 static RD_INLINE void
-rd_kafka_produce_ctx_rollback_new_topic_header(rd_kafka_produce_ctx_t *rkpc,
+rd_kafka_produce_ctx_rollback_new_topic_header_mbv2(rd_kafka_produce_ctx_t *rkpc,
                                                size_t new_topic_header_offset) {
         rd_buf_write_seek(&rkpc->rkpc_buf->rkbuf_buf, new_topic_header_offset);
         if (rkpc->rkpc_appended_topic_cnt > 0)
@@ -718,7 +718,7 @@ rd_kafka_produce_write_partition_header(rd_kafka_msgset_writer_t *msetw) {
  *
  * @locality broker thread
  */
-static int rd_kafka_msgset_writer_init(rd_kafka_msgset_writer_t *msetw,
+static int rd_kafka_msgset_writer_init_mbv2(rd_kafka_msgset_writer_t *msetw,
                                        rd_kafka_broker_t *rkb,
                                        rd_kafka_toppar_t *rktp,
                                        rd_kafka_msgq_t *rkmq,
@@ -755,7 +755,7 @@ static int rd_kafka_msgset_writer_init(rd_kafka_msgset_writer_t *msetw,
         rd_dassert(msetw->msetw_msgcntmax > 0);
 
         /* Select topic level message set configuration to use */
-        rd_kafka_msgset_writer_select_caps(msetw);
+        rd_kafka_msgset_writer_select_caps_mbv2(msetw);
 
         rd_rkb_dbg(rkb, MSG, "MSETW",
                    "%s [%" PRId32 "]: msetw_init before partition_header",
@@ -1059,7 +1059,7 @@ static size_t rd_kafka_msgset_writer_write_msg(rd_kafka_msgset_writer_t *msetw,
  *
  * @returns 1 on success or 0 on error.
  */
-static int rd_kafka_msgset_writer_write_msgq(rd_kafka_msgset_writer_t *msetw,
+static int rd_kafka_msgset_writer_write_msgq_mbv2(rd_kafka_msgset_writer_t *msetw,
                                              rd_kafka_msgq_t *rkmq) {
         rd_kafka_toppar_t *rktp = msetw->msetw_rktp;
         rd_kafka_broker_t *rkb  = msetw->msetw_rkb;
@@ -1223,332 +1223,10 @@ static int rd_kafka_msgset_writer_write_msgq(rd_kafka_msgset_writer_t *msetw,
         return 1;
 }
 
-
-#if WITH_ZLIB
-/**
- * @brief Compress slice using gzip/zlib
- */
-rd_kafka_resp_err_t rd_kafka_gzip_compress(rd_kafka_broker_t *rkb,
-                                           int comp_level,
-                                           rd_slice_t *slice,
-                                           void **outbuf,
-                                           size_t *outlenp) {
-        z_stream strm;
-        size_t len = rd_slice_remains(slice);
-        const void *p;
-        size_t rlen;
-        int r;
-
-        memset(&strm, 0, sizeof(strm));
-        r = deflateInit2(&strm, comp_level, Z_DEFLATED, 15 + 16, 8,
-                         Z_DEFAULT_STRATEGY);
-        if (r != Z_OK) {
-                rd_rkb_log(rkb, LOG_ERR, "GZIP",
-                           "Failed to initialize gzip for "
-                           "compressing %" PRIusz
-                           " bytes: "
-                           "%s (%i): "
-                           "sending uncompressed",
-                           len, strm.msg ? strm.msg : "", r);
-                return RD_KAFKA_RESP_ERR__BAD_COMPRESSION;
-        }
-
-        /* Calculate maximum compressed size and
-         * allocate an output buffer accordingly, being
-         * prefixed with the Message header. */
-        *outlenp = deflateBound(&strm, (uLong)rd_slice_remains(slice));
-        *outbuf  = rd_malloc(*outlenp);
-
-        strm.next_out  = *outbuf;
-        strm.avail_out = (uInt)*outlenp;
-
-        /* Iterate through each segment and compress it. */
-        while ((rlen = rd_slice_reader(slice, &p))) {
-
-                strm.next_in  = (void *)p;
-                strm.avail_in = (uInt)rlen;
-
-                /* Compress message */
-                if ((r = deflate(&strm, Z_NO_FLUSH)) != Z_OK) {
-                        rd_rkb_log(rkb, LOG_ERR, "GZIP",
-                                   "Failed to gzip-compress "
-                                   "%" PRIusz " bytes (%" PRIusz
-                                   " total): "
-                                   "%s (%i): "
-                                   "sending uncompressed",
-                                   rlen, len, strm.msg ? strm.msg : "", r);
-                        deflateEnd(&strm);
-                        rd_free(*outbuf);
-                        *outbuf = NULL;
-                        return RD_KAFKA_RESP_ERR__BAD_COMPRESSION;
-                }
-
-                rd_kafka_assert(rkb->rkb_rk, strm.avail_in == 0);
-        }
-
-        /* Finish the compression */
-        if ((r = deflate(&strm, Z_FINISH)) != Z_STREAM_END) {
-                rd_rkb_log(rkb, LOG_ERR, "GZIP",
-                           "Failed to finish gzip compression "
-                           " of %" PRIusz
-                           " bytes: "
-                           "%s (%i): "
-                           "sending uncompressed",
-                           len, strm.msg ? strm.msg : "", r);
-                deflateEnd(&strm);
-                rd_free(*outbuf);
-                *outbuf = NULL;
-                return RD_KAFKA_RESP_ERR__BAD_COMPRESSION;
-        }
-
-        *outlenp = strm.total_out;
-
-        /* Deinitialize compression */
-        deflateEnd(&strm);
-
-        return RD_KAFKA_RESP_ERR_NO_ERROR;
-}
-
-/**
- * @brief Compress messageset using gzip/zlib
- */
-static int rd_kafka_msgset_writer_compress_gzip(rd_kafka_msgset_writer_t *msetw,
-                                                rd_slice_t *slice,
-                                                struct iovec *ciov) {
-        rd_kafka_resp_err_t err;
-        int comp_level =
-            msetw->msetw_rktp->rktp_rkt->rkt_conf.compression_level;
-        err = rd_kafka_gzip_compress(msetw->msetw_rkb, comp_level, slice,
-                                     &ciov->iov_base, &ciov->iov_len);
-        return (err ? -1 : 0);
-}
-#endif
-
-
-#if WITH_SNAPPY
-/**
- * @brief Compress slice using Snappy
- */
-rd_kafka_resp_err_t rd_kafka_snappy_compress_slice(rd_kafka_broker_t *rkb,
-                                                   rd_slice_t *slice,
-                                                   void **outbuf,
-                                                   size_t *outlenp) {
-        struct iovec *iov;
-        size_t iov_max, iov_cnt;
-        struct snappy_env senv;
-        size_t len = rd_slice_remains(slice);
-        int r;
-        struct iovec ciov;
-
-        /* Initialize snappy compression environment */
-        rd_kafka_snappy_init_env_sg(&senv, 1 /*iov enable*/);
-
-        /* Calculate maximum compressed size and
-         * allocate an output buffer accordingly. */
-        ciov.iov_len  = rd_kafka_snappy_max_compressed_length(len);
-        ciov.iov_base = rd_malloc(ciov.iov_len);
-
-        iov_max = slice->buf->rbuf_segment_cnt;
-        iov     = rd_alloca(sizeof(*iov) * iov_max);
-
-        rd_slice_get_iov(slice, iov, &iov_cnt, iov_max, len);
-
-        /* Compress each message */
-        if ((r = rd_kafka_snappy_compress_iov(&senv, iov, iov_cnt, len,
-                                              &ciov)) != 0) {
-                rd_rkb_log(rkb, LOG_ERR, "SNAPPY",
-                           "Failed to snappy-compress "
-                           "%" PRIusz
-                           " bytes: %s:"
-                           "sending uncompressed",
-                           len, rd_strerror(-r));
-                rd_free(ciov.iov_base);
-                return RD_KAFKA_RESP_ERR__BAD_COMPRESSION;
-        }
-
-        /* rd_free snappy environment */
-        rd_kafka_snappy_free_env(&senv);
-
-        *outbuf  = ciov.iov_base;
-        *outlenp = ciov.iov_len;
-
-        return RD_KAFKA_RESP_ERR_NO_ERROR;
-}
-
-/**
- * @brief Compress messageset using Snappy
- */
-static int
-rd_kafka_msgset_writer_compress_snappy(rd_kafka_msgset_writer_t *msetw,
-                                       rd_slice_t *slice,
-                                       struct iovec *ciov) {
-        rd_kafka_resp_err_t err;
-        err = rd_kafka_snappy_compress_slice(msetw->msetw_rkb, slice,
-                                             &ciov->iov_base, &ciov->iov_len);
-        return (err ? -1 : 0);
-}
-#endif
-
-/**
- * @brief Compress messageset using LZ4F
- */
-static int rd_kafka_msgset_writer_compress_lz4(rd_kafka_msgset_writer_t *msetw,
-                                               rd_slice_t *slice,
-                                               struct iovec *ciov) {
-        rd_kafka_resp_err_t err;
-        int comp_level =
-            msetw->msetw_rktp->rktp_rkt->rkt_conf.compression_level;
-        err = rd_kafka_lz4_compress(msetw->msetw_rkb,
-                                    /* Correct or incorrect HC */
-                                    msetw->msetw_MsgVersion >= 1 ? 1 : 0,
-                                    comp_level, slice, &ciov->iov_base,
-                                    &ciov->iov_len);
-        return (err ? -1 : 0);
-}
-
-#if WITH_ZSTD
-/**
- * @brief Compress messageset using ZSTD
- */
-static int rd_kafka_msgset_writer_compress_zstd(rd_kafka_msgset_writer_t *msetw,
-                                                rd_slice_t *slice,
-                                                struct iovec *ciov) {
-        rd_kafka_resp_err_t err;
-        int comp_level =
-            msetw->msetw_rktp->rktp_rkt->rkt_conf.compression_level;
-        err = rd_kafka_zstd_compress(msetw->msetw_rkb, comp_level, slice,
-                                     &ciov->iov_base, &ciov->iov_len);
-        return (err ? -1 : 0);
-}
-#endif
-
-/**
- * @brief Compress the message set.
- * @param outlenp in: total uncompressed messages size,
- *                out (on success): returns the compressed buffer size.
- * @returns 0 on success or if -1 if compression failed.
- * @remark Compression failures are not critical, we'll just send the
- *         the messageset uncompressed.
- */
-static int rd_kafka_msgset_writer_compress(rd_kafka_msgset_writer_t *msetw,
-                                           size_t *outlenp) {
-        rd_buf_t *rbuf = &msetw->msetw_rkbuf->rkbuf_buf;
-        rd_slice_t slice;
-        size_t len        = *outlenp;
-        struct iovec ciov = RD_ZERO_INIT; /* Compressed output buffer */
-        int r             = -1;
-        size_t outlen;
-
-        rd_assert(rd_buf_len(rbuf) >= msetw->msetw_firstmsg.of + len);
-
-        /* Create buffer slice from firstmsg and onwards */
-        r = rd_slice_init(&slice, rbuf, msetw->msetw_firstmsg.of, len);
-        rd_assert(r == 0 || !*"invalid firstmsg position");
-
-        switch (msetw->msetw_compression) {
-#if WITH_ZLIB
-        case RD_KAFKA_COMPRESSION_GZIP:
-                r = rd_kafka_msgset_writer_compress_gzip(msetw, &slice, &ciov);
-                break;
-#endif
-
-#if WITH_SNAPPY
-        case RD_KAFKA_COMPRESSION_SNAPPY:
-                r = rd_kafka_msgset_writer_compress_snappy(msetw, &slice,
-                                                           &ciov);
-                break;
-#endif
-
-        case RD_KAFKA_COMPRESSION_LZ4:
-                r = rd_kafka_msgset_writer_compress_lz4(msetw, &slice, &ciov);
-                break;
-
-#if WITH_ZSTD
-        case RD_KAFKA_COMPRESSION_ZSTD:
-                r = rd_kafka_msgset_writer_compress_zstd(msetw, &slice, &ciov);
-                break;
-#endif
-
-        default:
-                rd_kafka_assert(NULL,
-                                !*"notreached: unsupported compression.codec");
-                break;
-        }
-
-        if (r == -1) /* Compression failed, send uncompressed */
-                return -1;
-
-
-        if (unlikely(ciov.iov_len > len)) {
-                /* If the compressed data is larger than the uncompressed size
-                 * then throw it away and send as uncompressed. */
-                rd_free(ciov.iov_base);
-                return -1;
-        }
-
-        /* Set compression codec in MessageSet.Attributes */
-        msetw->msetw_Attributes |= msetw->msetw_compression;
-
-        /* Rewind rkbuf to the pre-message checkpoint (firstmsg)
-         * and replace the original message(s) with the compressed payload,
-         * possibly with version dependent enveloping. */
-        rd_buf_write_seek(rbuf, msetw->msetw_firstmsg.of);
-
-        rd_kafka_assert(msetw->msetw_rkb->rkb_rk, ciov.iov_len < INT32_MAX);
-
-        if (msetw->msetw_MsgVersion == 2) {
-                /* MsgVersion 2 has no inner MessageSet header or wrapping
-                 * for compressed messages, just the messages back-to-back,
-                 * so we can push the compressed memory directly to the
-                 * buffer without wrapping it. */
-                rd_buf_push(rbuf, ciov.iov_base, ciov.iov_len, rd_free);
-                outlen = ciov.iov_len;
-
-        } else {
-                /* Older MessageSets envelope/wrap the compressed MessageSet
-                 * in an outer Message. */
-                rd_kafka_msg_t rkm = {.rkm_len     = ciov.iov_len,
-                                      .rkm_payload = ciov.iov_base,
-                                      .rkm_timestamp =
-                                          msetw->msetw_firstmsg.timestamp};
-                outlen             = rd_kafka_msgset_writer_write_msg(
-                    msetw, &rkm, 0, msetw->msetw_compression,
-                    rd_free /*free for ciov.iov_base*/);
-        }
-
-        *outlenp = outlen;
-
-        return 0;
-}
-
-
-
-/**
- * @brief Calculate MessageSet v2 CRC (CRC32C) when messageset is complete.
- */
-static void
-rd_kafka_msgset_writer_calc_crc_v2(rd_kafka_msgset_writer_t *msetw) {
-        int32_t crc;
-        rd_slice_t slice;
-        int r;
-
-        r = rd_slice_init(&slice, &msetw->msetw_rkbuf->rkbuf_buf,
-                          msetw->msetw_of_CRC + 4,
-                          rd_buf_write_pos(&msetw->msetw_rkbuf->rkbuf_buf) -
-                              msetw->msetw_of_CRC - 4);
-        rd_assert(!r && *"slice_init failed");
-
-        /* CRC32C calculation */
-        crc = rd_slice_crc32c(&slice);
-
-        /* Update CRC at MessageSet v2 CRC offset */
-        rd_kafka_buf_update_i32(msetw->msetw_rkbuf, msetw->msetw_of_CRC, crc);
-}
-
 /**
  * @brief Finalize MessageSet v2 header fields.
  */
-static void rd_kafka_msgset_writer_finalize_MessageSet_v2_header(
+static void rd_kafka_msgset_writer_finalize_MessageSet_v2_header_mbv2(
     rd_kafka_msgset_writer_t *msetw) {
         rd_kafka_buf_t *rkbuf = msetw->msetw_rkbuf;
         int msgcnt            = rd_kafka_msgq_len(&rkbuf->rkbuf_batch.msgq);
@@ -1621,11 +1299,11 @@ static void rd_kafka_msgset_writer_finalize_MessageSet_v2_header(
  * @brief Finalize the MessageSet header, if applicable.
  */
 static void
-rd_kafka_msgset_writer_finalize_MessageSet(rd_kafka_msgset_writer_t *msetw) {
+rd_kafka_msgset_writer_finalize_MessageSet_mbv2(rd_kafka_msgset_writer_t *msetw) {
         rd_dassert(msetw->msetw_messages_len > 0);
 
         if (msetw->msetw_MsgVersion == 2)
-                rd_kafka_msgset_writer_finalize_MessageSet_v2_header(msetw);
+                rd_kafka_msgset_writer_finalize_MessageSet_v2_header_mbv2(msetw);
         else
                 msetw->msetw_MessageSetSize =
                     RD_KAFKAP_MSGSET_V0_SIZE + msetw->msetw_messages_len;
@@ -1652,7 +1330,7 @@ rd_kafka_msgset_writer_finalize_MessageSet(rd_kafka_msgset_writer_t *msetw) {
  *          in messageset.
  */
 static rd_kafka_buf_t *
-rd_kafka_msgset_writer_finalize(rd_kafka_msgset_writer_t *msetw,
+rd_kafka_msgset_writer_finalize_mbv2(rd_kafka_msgset_writer_t *msetw,
                                 size_t *MessageSetSizep) {
         rd_kafka_buf_t *rkbuf   = msetw->msetw_rkbuf;
         rd_kafka_toppar_t *rktp = msetw->msetw_rktp;
@@ -1697,7 +1375,7 @@ rd_kafka_msgset_writer_finalize(rd_kafka_msgset_writer_t *msetw,
         msetw->msetw_messages_len = len;
 
         /* Finalize MessageSet header fields */
-        rd_kafka_msgset_writer_finalize_MessageSet(msetw);
+        rd_kafka_msgset_writer_finalize_MessageSet_mbv2(msetw);
 
         /* Partition tags */
         rd_kafka_buf_write_tags_empty(rkbuf);
@@ -1746,8 +1424,8 @@ rd_kafka_msgset_writer_finalize(rd_kafka_msgset_writer_t *msetw,
 
 /* Initialize a produce batch calculator to determine upfront limits
  * for a produce batch */
-void rd_kafka_produce_calculator_init(rd_kafka_produce_calculator_t *rkpca,
-                                      rd_kafka_broker_t *rkb) {
+void rd_kafka_produce_calculator_init_mbv2(rd_kafka_produce_calculator_t *rkpca,
+                                         rd_kafka_broker_t *rkb) {
         memset(rkpca, 0, sizeof(*rkpca));
 
         int api_version = 0;
@@ -1755,10 +1433,10 @@ void rd_kafka_produce_calculator_init(rd_kafka_produce_calculator_t *rkpca,
         int features    = 0;
 
         /* Retrieve the capabilities to be used to calculate hdr sizes */
-        rd_kafka_produce_request_select_caps(rkb, &api_version, &msg_version,
+        rd_kafka_produce_request_select_caps_mbv2(rkb, &api_version, &msg_version,
                                              &features);
 
-        rd_kafka_produce_request_get_header_sizes(
+        rd_kafka_produce_request_get_header_sizes_mbv2(
             rkb->rkb_rk, api_version, msg_version,
             &rkpca->rkpca_produce_header_size, &rkpca->rkpca_topic_header_size,
             &rkpca->rkpca_partition_header_size,
@@ -1778,7 +1456,7 @@ void rd_kafka_produce_calculator_init(rd_kafka_produce_calculator_t *rkpca,
  *
  * Expectations (idealised flow):
  *   1) Calculator is seeded once per candidate batch via
- *      rd_kafka_produce_calculator_init() to pick Api/Msg versions and header
+ *      rd_kafka_produce_calculator_init_mbv2() to pick Api/Msg versions and header
  *      sizes.
  *   2) Call rd_kafka_produce_calculator_add() for each toppar in tentative
  *      order; if it returns 1 the caller may enqueue that toppar in the batch,
@@ -1969,7 +1647,7 @@ int rd_kafka_produce_calculator_add(rd_kafka_produce_calculator_t *rkpca,
  *
  * @locality broker thread
  */
-int rd_kafka_produce_ctx_init(rd_kafka_produce_ctx_t *rkpc,
+int rd_kafka_produce_ctx_init_mbv2(rd_kafka_produce_ctx_t *rkpc,
                               rd_kafka_broker_t *rkb,
                               int topic_max,
                               int partition_max,
@@ -2008,12 +1686,12 @@ int rd_kafka_produce_ctx_init(rd_kafka_produce_ctx_t *rkpc,
         rkpc->rkpc_message_bytes_size = message_bytes_size;
 
         /* Retruitve the capabilities to be used for the produce request */
-        rd_kafka_produce_request_select_caps(
+        rd_kafka_produce_request_select_caps_mbv2(
             rkpc->rkpc_rkb, &rkpc->rkpc_api_version, &rkpc->rkpc_msg_version,
             &rkpc->rkpc_features);
 
         /* Allocate backing buffer */
-        rd_kafka_produce_request_alloc_buf(rkpc);
+        rd_kafka_produce_request_alloc_buf_mbv2(rkpc);
 
         /* ProduceRequest uses FlexibleVersions starting from v9 */
         if (rkpc->rkpc_api_version >= 9) {
@@ -2037,7 +1715,7 @@ int rd_kafka_produce_ctx_init(rd_kafka_produce_ctx_t *rkpc,
  *
  * @locality broker thread
  */
-int rd_kafka_produce_ctx_append_toppar(rd_kafka_produce_ctx_t *rkpc,
+int rd_kafka_produce_ctx_append_toppar_mbv2(rd_kafka_produce_ctx_t *rkpc,
                                        rd_kafka_toppar_t *rktp,
                                        int *appended_msg_cnt,
                                        size_t *appended_msg_bytes) {
@@ -2058,7 +1736,7 @@ int rd_kafka_produce_ctx_append_toppar(rd_kafka_produce_ctx_t *rkpc,
         if (rktp->rktp_rkt != rkpc->rkpc_active_topic) {
                 /* If there's an active topic, finalize it */
                 if (rkpc->rkpc_active_topic) {
-                        rd_kafka_produce_finalize_topic_header(rkpc);
+                        rd_kafka_produce_finalize_topic_header_mbv2(rkpc);
                 }
 
                 wrote_new_topic_header =
@@ -2071,7 +1749,7 @@ int rd_kafka_produce_ctx_append_toppar(rd_kafka_produce_ctx_t *rkpc,
                 rkpc->rkpc_active_topic_partition_cnt = 0;
                 ++rkpc->rkpc_appended_topic_cnt;  // TODO(xvandish). Is
                                                   // pre-increment correct?
-                rd_kafka_produce_write_topic_header(rkpc);
+                rd_kafka_produce_write_topic_header_mbv2(rkpc);
         }
 
         /* move msg q before write */
@@ -2099,13 +1777,13 @@ int rd_kafka_produce_ctx_append_toppar(rd_kafka_produce_ctx_t *rkpc,
                    rktp->rktp_rkt->rkt_topic->str,
                    rktp->rktp_partition);
 
-        if (unlikely(!rd_kafka_msgset_writer_init(
+        if (unlikely(!rd_kafka_msgset_writer_init_mbv2(
                 &msetw, rkpc->rkpc_rkb, rktp, &rktp->rktp_xmit_msgq, rkpc->rkpc_pid,
                 epoch_base_msgid,
                 rkpc))) {
                 if (wrote_new_topic_header &&
                     rkpc->rkpc_active_topic_partition_cnt == 0) {
-                        rd_kafka_produce_ctx_rollback_new_topic_header(
+                        rd_kafka_produce_ctx_rollback_new_topic_header_mbv2(
                             rkpc, new_topic_header_offset);
                 }
                 return 0;
@@ -2116,14 +1794,14 @@ int rd_kafka_produce_ctx_append_toppar(rd_kafka_produce_ctx_t *rkpc,
         if (unlikely(!first_msg)) {
                 if (wrote_new_topic_header &&
                     rkpc->rkpc_active_topic_partition_cnt == 0) {
-                        rd_kafka_produce_ctx_rollback_new_topic_header(
+                        rd_kafka_produce_ctx_rollback_new_topic_header_mbv2(
                             rkpc, new_topic_header_offset);
                 }
                 return 0;
         }
         first_msg_timeout = first_msg->rkm_ts_timeout;
 
-        if (!rd_kafka_msgset_writer_write_msgq(&msetw, &rktp->rktp_xmit_msgq)) {
+        if (!rd_kafka_msgset_writer_write_msgq_mbv2(&msetw, &rktp->rktp_xmit_msgq)) {
                 /* Error while writing messages to MessageSet,
                  * move all messages back on the xmit queue. */
                 rd_kafka_msgq_insert_msgq(
@@ -2135,7 +1813,7 @@ int rd_kafka_produce_ctx_append_toppar(rd_kafka_produce_ctx_t *rkpc,
         size_t queue_msg_bytes_end = rd_kafka_msgq_size(&rktp->rktp_xmit_msgq);
 
 
-        rd_kafka_msgset_writer_finalize(&msetw, appended_msg_bytes);
+        rd_kafka_msgset_writer_finalize_mbv2(&msetw, appended_msg_bytes);
 
         /* concatenate msg queues together */
         rd_kafka_msgq_concat(&msgq, &rkpc->rkpc_buf->rkbuf_batch.msgq);
@@ -2149,7 +1827,7 @@ int rd_kafka_produce_ctx_append_toppar(rd_kafka_produce_ctx_t *rkpc,
                  * header to avoid leaving an empty topic in the request. */
                 if (wrote_new_topic_header &&
                     rkpc->rkpc_active_topic_partition_cnt == 0) {
-                        rd_kafka_produce_ctx_rollback_new_topic_header(
+                        rd_kafka_produce_ctx_rollback_new_topic_header_mbv2(
                             rkpc, new_topic_header_offset);
                 } else {
                         rd_buf_write_seek(&rkpc->rkpc_buf->rkbuf_buf,
@@ -2220,7 +1898,7 @@ int rd_kafka_produce_ctx_append_toppar(rd_kafka_produce_ctx_t *rkpc,
  *
  * @locality broker thread
  */
-rd_kafka_buf_t *rd_kafka_produce_ctx_finalize(rd_kafka_produce_ctx_t *rkpc) {
+rd_kafka_buf_t *rd_kafka_produce_ctx_finalize_mbv2(rd_kafka_produce_ctx_t *rkpc) {
         /* if nothing was generated, free the buffer and return NULL */
         /* the topic header can be written, but if messages are in backoff
          * for all partitions, there might not be any messages written
@@ -2258,7 +1936,7 @@ rd_kafka_buf_t *rd_kafka_produce_ctx_finalize(rd_kafka_produce_ctx_t *rkpc) {
  *
  * @returns buffer on success, or NULL on error.
  */
-rd_kafka_buf_t *rd_kafka_msgset_create_ProduceRequest(rd_kafka_broker_t *rkb,
+rd_kafka_buf_t *rd_kafka_msgset_create_ProduceRequest_mbv2(rd_kafka_broker_t *rkb,
                                                       rd_kafka_toppar_t *rktp,
                                                       rd_kafka_msgq_t *rkmq,
                                                       const rd_kafka_pid_t pid,
@@ -2271,7 +1949,7 @@ rd_kafka_buf_t *rd_kafka_msgset_create_ProduceRequest(rd_kafka_broker_t *rkb,
 
         /* Use the standard ProduceRequest helpers so we get a proper req_ctx
          * with per-toppar bookkeeping for idempotent/error handling. */
-        if (!rd_kafka_produce_ctx_init(
+        if (!rd_kafka_produce_ctx_init_mbv2(
                 &ctx, rkb, 1, 1, rd_kafka_msgq_len(rkmq),
                 rd_kafka_msgq_size(rkmq),
                 rktp->rktp_rkt->rkt_conf.required_acks,
@@ -2288,8 +1966,8 @@ rd_kafka_buf_t *rd_kafka_msgset_create_ProduceRequest(rd_kafka_broker_t *rkb,
         rd_kafka_msgq_move(&rktp->rktp_xmit_msgq, rkmq);
         rd_kafka_toppar_unlock(rktp);
 
-        if (!rd_kafka_produce_ctx_append_toppar(&ctx, rktp, &appended_msg_cnt,
-                                                &appended_msg_bytes)) {
+        if (!rd_kafka_produce_ctx_append_toppar_mbv2(
+                &ctx, rktp, &appended_msg_cnt, &appended_msg_bytes)) {
                 rd_kafka_msgq_move(rkmq, &rktp->rktp_xmit_msgq);
                 return NULL;
         }
@@ -2876,13 +2554,13 @@ static int unittest_msgset_writer_rollback_empty_topic(void) {
 
         // build a produce context and append the 1st (good topic)
         RD_UT_ASSERT(
-            rd_kafka_produce_ctx_init(
+            rd_kafka_produce_ctx_init_mbv2(
                 &ctx, rkb, 2, 2, 10, 1024,
                 rktp1->rktp_rkt->rkt_conf.required_acks,
                 rktp1->rktp_rkt->rkt_conf.request_timeout_ms, pid, NULL),
             "produce_ctx_init failed");
-        if (!rd_kafka_produce_ctx_append_toppar(&ctx, rktp1, &appended_msg_cnt,
-                                                &appended_msg_bytes)) {
+        if (!rd_kafka_produce_ctx_append_toppar_mbv2(
+                &ctx, rktp1, &appended_msg_cnt, &appended_msg_bytes)) {
                 rd_kafka_msg_t *msg =
                     TAILQ_FIRST(&rktp1->rktp_xmit_msgq.rkmq_msgs);
                 RD_UT_FAIL(
@@ -2904,7 +2582,7 @@ static int unittest_msgset_writer_rollback_empty_topic(void) {
         // write should be rolled back as well
         appended_msg_cnt   = 0;
         appended_msg_bytes = 0;
-        RD_UT_ASSERT(rd_kafka_produce_ctx_append_toppar(
+        RD_UT_ASSERT(rd_kafka_produce_ctx_append_toppar_mbv2(
                          &ctx, rktp2, &appended_msg_cnt, &appended_msg_bytes) ==
                          0,
                      "expected 2nd topic to append 0 messages (backoff)");

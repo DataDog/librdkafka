@@ -399,7 +399,17 @@ struct rd_kafka_buf_s { /* rd_kafka_buf_t */
 
                 } Metadata;
                 struct {
+                        // used by both v1 and v2 multibatch
                         rd_kafka_msgbatch_t batch; /**< MessageSet/batch */
+                        
+                        // Used for Joy's initial V1 multibatch
+                        struct {
+                            rd_list_t batch_list;      /* MessageSet/batch list*/
+                            size_t batch_start_pos;    /* Pos where Record batch
+                                                        * starts in the buf */
+                            size_t batch_end_pos;      /* Pos after Record batch +
+                                                        * Partition tags in the buf */
+                        } v1;
                 } Produce;
                 struct {
                         rd_bool_t commit; /**< true = txn commit,

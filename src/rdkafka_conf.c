@@ -1532,9 +1532,15 @@ static const struct rd_kafka_property rd_kafka_properties[] = {
      "Whether to enable pushing of client metrics to the cluster, if the "
      "cluster has a client metrics subscription which matches this client",
      0, 1, 1},
+    {_RK_GLOBAL | _RK_PRODUCER, "multibatch", _RK_C_BOOL,
+     _RK(multibatch), "Batch produce requests across multiple partitions. V1", 0,
+     1, 0},
+    {_RK_GLOBAL | _RK_PRODUCER, "multibatch_v2", _RK_C_BOOL,
+     _RK(multibatch_v2), "Batch produce requests across multiple partitions. V1", 0,
+     1, 0},
     {_RK_GLOBAL | _RK_PRODUCER, "produce.request.max.partitions", _RK_C_INT,
      _RK(produce_request_max_partitions),
-     "The maximum number of partitions to include in a single produce "
+     "V2 multibatch. The maximum number of partitions to include in a single produce "
      "request. "
      "A higher value allows for fewer produce requests when producing "
      "to many partitions, at the expense of higher memory usage during "
@@ -4116,6 +4122,14 @@ const char *rd_kafka_conf_finalize(rd_kafka_type_t cltype,
                                                "sticky.partitioning.linger.ms"))
                         conf->sticky_partition_linger_ms = (int)RD_MIN(
                             900000, (rd_ts_t)(2 * conf->buffering_max_ms_dbl));
+
+                if (conf->multibaych && conf->multibatch_v2)
+                    return "`multibatch` and `multibatch_v2 are mutually exclusive";
+
+                if (rd_kafka_conf_is_modified(conf, "produce.request.max.partitions") &&
+                        !conf->multibatch_v2)
+                    return  "`produce.request.max.partitions` requires "
+                        "`multibatch.v2=true`";
         }
 
 

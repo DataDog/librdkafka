@@ -4026,7 +4026,7 @@ rd_kafka_handle_Produce_parse_v1(rd_kafka_broker_t *rkb,
         rd_kafka_Produce_result_t *result;
 
         int num_batch = multi_batch_request ?
-                rd_list_cnt(&request->rkbuf_u.Produce.batch_list) : 1;
+                rd_list_cnt(&request->rkbuf_u.Produce.v1.batch_list) : 1;
         ProduceTags = rd_calloc(num_batch, sizeof(rd_kafkap_Produce_reply_tags_t));
 
         rd_kafka_buf_read_arraycnt(rkbuf, &TopicArrayCnt, RD_KAFKAP_TOPICS_MAX);
@@ -4050,7 +4050,7 @@ rd_kafka_handle_Produce_parse_v1(rd_kafka_broker_t *rkb,
                         rd_kafka_buf_read_i64(rkbuf, &hdr.Offset);
 
                         if (multi_batch_request && ((pos=rd_kafka_find_msgbatch_v1(
-                                                        &request->rkbuf_u.Produce.batch_list,
+                                                        &request->rkbuf_u.Produce.v1.batch_list,
                                                         &TopicName, hdr.Partition)) == -1)) {
                                 /* Got a msgbatch in response that does not exist in the
                                 request's msgbatch list */
@@ -4060,7 +4060,7 @@ rd_kafka_handle_Produce_parse_v1(rd_kafka_broker_t *rkb,
                         }
                         result = results[pos];
 
-                        result->errorcode = hdr.ErrorCode;
+                        result->errorcode_v1 = hdr.ErrorCode;
                         result->offset = hdr.Offset;
 
                         result->timestamp = -1;
@@ -4153,7 +4153,7 @@ rd_kafka_handle_Produce_parse_v1(rd_kafka_broker_t *rkb,
         if (multi_batch_request) {
                 return RD_KAFKA_RESP_ERR_NO_ERROR;
         } else {
-                return result->errorcode;
+                return result->errorcode_v1;
         }
 err_parse:
         produce_reply_tags_cleaup_v1(&reply_level_tags, ProduceTags, num_batch);
@@ -6609,7 +6609,7 @@ static void rd_kafka_handle_MultiBatchProduce_v1(rd_kafka_t *rk,
 
         rd_kafka_Produce_result_t **results;
         rd_kafka_msgbatch_t *batch;
-        rd_list_t *msgbatches = &request->rkbuf_u.Produce.batch_list;
+        rd_list_t *msgbatches = &request->rkbuf_u.Produce.v1.batch_list;
         int i, num_batches = rd_list_cnt(msgbatches);
 
         results = rd_calloc(num_batches, sizeof(rd_kafka_Produce_result_t*));
@@ -6624,7 +6624,7 @@ static void rd_kafka_handle_MultiBatchProduce_v1(rd_kafka_t *rk,
 
         RD_LIST_FOREACH(batch, msgbatches, i) {
                 rd_kafka_resp_err_t final_err = err == RD_KAFKA_RESP_ERR_NO_ERROR ?
-                                results[i]->errorcode : err;
+                                results[i]->errorcode_v1 : err;
                 rd_kafka_msgbatch_handle_Produce_result_v1(rkb, batch, final_err,
                                                         results[i], request);
                 rd_kafka_Produce_result_destroy(results[i]);
@@ -6697,7 +6697,7 @@ int rd_kafka_ProduceRequest_v1(rd_kafka_broker_t *rkb,
                 rd_list_add(batch_bufq, rkbuf);
         } else {
                 rd_kafka_broker_buf_enq_replyq(rkb, rkbuf, RD_KAFKA_NO_REPLYQ,
-                                               rd_kafka_handle_Produce, NULL);
+                                               rd_kafka_handle_Produce_v1, NULL);
         }
 
         return cnt;
@@ -6753,12 +6753,12 @@ static void rd_kafka_copy_batch_buf_v1(rd_kafka_buf_t *batch_rkbuf,
                                     rd_kafka_buf_t *request_rkbuf) {
         rd_slice_t *rkbuf_reader = &batch_rkbuf->rkbuf_reader;
         rd_buf_t *rkbuf_buf = &batch_rkbuf->rkbuf_buf;
-        size_t first_pos = batch_rkbuf->rkbuf_u.Produce.batch_start_pos;
-        size_t last_pos = batch_rkbuf->rkbuf_u.Produce.batch_end_pos;
+        size_t first_pos = batch_rkbuf->rkbuf_u.Produce.v1.batch_start_pos;
+        size_t last_pos = batch_rkbuf->rkbuf_u.Produce.v1.batch_end_pos;
         size_t length =  last_pos - first_pos;
         rd_slice_init_full(rkbuf_reader, rkbuf_buf);
         rd_slice_seek(rkbuf_reader, first_pos);
-        rd_slice_read_into_buf(rkbuf_reader, &request_rkbuf->rkbuf_buf, length);
+        rd_slice_read_into_buf_v1(rkbuf_reader, &request_rkbuf->rkbuf_buf, length);
 }
 
 
@@ -6840,7 +6840,7 @@ static void finalize_topic_encoding_v1(rd_kafka_buf_t *request_rkbuf,
            batched request */
         rd_slice_t *rkbuf_reader = &batch_rkbuf->rkbuf_reader;
         rd_buf_t *rkbuf_buf = &batch_rkbuf->rkbuf_buf;
-        size_t first_pos = batch_rkbuf->rkbuf_u.Produce.batch_end_pos;
+        size_t first_pos = batch_rkbuf->rkbuf_u.Produce.v1.batch_end_pos;
         size_t last_pos = rd_buf_write_pos(rkbuf_buf);
         size_t length =  last_pos - first_pos;
         if (length > 0)
@@ -6904,7 +6904,7 @@ int rd_kafka_MultiBatchProduceRequest_v1(rd_kafka_broker_t *rkb,
                 rd_kafka_buf_ApiVersion_set(request_rkbuf, api_version, features);
 
                 /* init the list to hold rd_kafka_msgbatch_t for each batch*/
-                rd_list_init(&request_rkbuf->rkbuf_u.Produce.batch_list, next_ind-cur_ind, NULL);
+                rd_list_init(&request_rkbuf->rkbuf_u.Produce.v1.batch_list, next_ind-cur_ind, NULL);
 
                 prev_topic = first_rkbuf->rkbuf_batch.rktp->rktp_rkt;
                 prev_rkbuf = first_rkbuf;
@@ -6959,7 +6959,7 @@ int rd_kafka_MultiBatchProduceRequest_v1(rd_kafka_broker_t *rkb,
                         rd_kafka_msgbatch_t *dst = rd_malloc(sizeof(rd_kafka_msgbatch_t));
                         rd_kafka_msgbatch_init(dst, src->rktp, src->pid, src->epoch_base_msgid);
                         rd_kafka_msgq_move(&dst->msgq, &src->msgq);
-                        rd_list_add(&request_rkbuf->rkbuf_u.Produce.batch_list, dst);
+                        rd_list_add(&request_rkbuf->rkbuf_u.Produce.v1.batch_list, dst);
 
                         part_cnt++;
                         prev_topic = cur_topic;
@@ -6977,7 +6977,7 @@ int rd_kafka_MultiBatchProduceRequest_v1(rd_kafka_broker_t *rkb,
                    msg from each batch, and choose the closest one. */
                 now = rd_clock();
                 first_msg_timeout =
-                        get_first_msg_timeout_v1(&request_rkbuf->rkbuf_u.Produce.batch_list);
+                        get_first_msg_timeout_v1(&request_rkbuf->rkbuf_u.Produce.v1.batch_list);
                 if (unlikely(first_msg_timeout <= 0)) {
                         /* Message has already timed out, allow 100 ms
                         * to produce anyway */
@@ -7020,7 +7020,7 @@ int rd_kafka_ProduceRequest_v2(rd_kafka_broker_t *rkb,
         rd_kafka_buf_t *rkbuf;
         rd_kafka_produce_ctx_t ctx;
 
-        if (unlikely(!rd_kafka_ProduceRequest_init(
+        if (unlikely(!rd_kafka_ProduceRequest_init_v2(
                 &ctx, rkb, pid, 1, 1, rd_kafka_msgq_len(&rktp->rktp_xmit_msgq),
                 rd_kafka_msgq_size(&rktp->rktp_xmit_msgq),
                 rktp->rktp_rkt->rkt_conf.required_acks,
@@ -7059,7 +7059,7 @@ int rd_kafka_ProduceRequest_v2(rd_kafka_broker_t *rkb,
  * @return 1 on success, 0 on error
  * @locality broker thread
  */
-int rd_kafka_ProduceRequest_init(rd_kafka_produce_ctx_t *rkpc,
+int rd_kafka_ProduceRequest_init_v2(rd_kafka_produce_ctx_t *rkpc,
                                  rd_kafka_broker_t *rkb,
                                  const rd_kafka_pid_t pid,
                                  int topic_max,
@@ -7083,7 +7083,7 @@ int rd_kafka_ProduceRequest_init(rd_kafka_produce_ctx_t *rkpc,
         rkprc->rkprc_toppar_info =
             (rd_kafka_produce_req_toppar_t *)(((char *)rkprc) + sizeof(*rkprc));
 
-        if (!rd_kafka_produce_ctx_init(rkpc, rkb, topic_max, partition_max,
+        if (!rd_kafka_produce_ctx_init_mbv2(rkpc, rkb, topic_max, partition_max,
                                        message_max, message_bytes_size,
                                        request_required_acks,
                                        request_timeout_ms, pid, rkprc)) {
@@ -7123,8 +7123,8 @@ int rd_kafka_ProduceRequest_append(rd_kafka_produce_ctx_t *rkpc,
                 last_msg = NULL;
 
 
-        if (!rd_kafka_produce_ctx_append_toppar(rkpc, rktp, &appended_msg_cnt,
-                                                &appended_msg_bytes)) {
+        if (!rd_kafka_produce_ctx_append_toppar_mbv2(
+                rkpc, rktp, &appended_msg_cnt, &appended_msg_bytes)) {
                 return 0;
         }
 
@@ -7287,7 +7287,7 @@ int rd_kafka_ProduceRequest_finalize(rd_kafka_produce_ctx_t *rkpc) {
         }
 
         rd_kafka_broker_buf_enq_replyq(
-            rkpc->rkpc_rkb, rkbuf, RD_KAFKA_NO_REPLYQ, rd_kafka_handle_Produce,
+            rkpc->rkpc_rkb, rkbuf, RD_KAFKA_NO_REPLYQ, rd_kafka_handle_Produce_v2,
             rkpc->rkpc_opaque);
 
         return message_cnt;
@@ -9505,7 +9505,7 @@ static int unittest_handle_Produce_orphaned_msg_drain(void) {
         }
 
         RD_UT_ASSERT(
-                rd_kafka_ProduceRequest_init(
+                rd_kafka_ProduceRequest_init_v2(
                     &ctx, rkb, pid, 1, 1, rd_kafka_msgq_len(&rkmq),
                     rd_kafka_msgq_size(&rkmq),
                     rktp->rktp_rkt->rkt_conf.required_acks,
@@ -9551,7 +9551,7 @@ static int unittest_handle_Produce_orphaned_msg_drain(void) {
                      orphaned_cnt + 1, orphaned_cnt);
         req_toppar->rkprt_msg_cnt = actual_cnt - orphaned_cnt;
 
-        rd_kafka_handle_Produce(rk, rkb, RD_KAFKA_RESP_ERR__FAIL, NULL, rkbuf, rkprc);
+        rd_kafka_handle_Produce_v2(rk, rkb, RD_KAFKA_RESP_ERR__FAIL, NULL, rkbuf, rkprc);
 
         RD_UT_ASSERT(RD_KAFKA_MSGQ_EMPTY(&rkbuf->rkbuf_batch.msgq),
                 "expected request msgq to be empty after orphan drain");
