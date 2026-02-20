@@ -120,7 +120,6 @@ int main_0203_producer_reconnect_mock(int argc, char **argv) {
         rd_bool_t tracking = rd_false;
 
         TEST_SKIP_MOCK_CLUSTER(0);
-        SUB_TEST_QUICK();
 
         mcluster = test_mock_cluster_new(broker_cnt, &bootstraps);
         if (rd_kafka_mock_topic_create(mcluster, topic, 1, 1) != 0) {

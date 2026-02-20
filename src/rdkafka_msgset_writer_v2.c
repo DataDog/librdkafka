@@ -368,7 +368,7 @@ static void rd_kafka_produce_request_alloc_buf_mbv2(rd_kafka_produce_ctx_t *rkpc
          * to work, but per-partition metadata (sequences, etc.) is tracked separately
          * in the hash map (rd_kafka_produce_req_toppar_t structures).
          * The epoch_base_msgid will be set per-partition when calling msgbatch_set_first_msg(). */
-        rkpc->rkpc_buf->rkbuf_u.rkbuf_produce_engine = RD_KAFKA_PRODUCE_MBV2;
+        rkpc->rkpc_buf->rkbuf_produce_engine = RD_KAFKA_PRODUCE_MBV2;
         rd_kafka_msgbatch_t *batch =
             &rkpc->rkpc_buf->rkbuf_u.rkbuf_produce.mbv2.batch;
         memset(batch, 0, sizeof(*batch));
@@ -667,7 +667,7 @@ static int rd_kafka_msgset_writer_init_mbv2(rd_kafka_msgset_writer_t *msetw,
          * The msgbatch structure is designed for single-partition batches only.
          * For multi-partition requests, per-partition metadata is tracked in the
          * hash map (rd_kafka_produce_req_toppar_t structures). */
-        msetw->msetw_rkbuf->rkbuf_u.rkbuf_produce_engine = RD_KAFKA_PRODUCE_MBV2;
+        msetw->msetw_rkbuf->rkbuf_produce_engine = RD_KAFKA_PRODUCE_MBV2;
         msetw->msetw_batch =
             &msetw->msetw_rkbuf->rkbuf_u.rkbuf_produce.mbv2.batch;
 
@@ -1042,7 +1042,6 @@ rd_kafka_msgset_writer_finalize_mbv2(rd_kafka_msgset_writer_t *msetw,
          * batch has a valid rktp and this would be called. */
         if (msetw->msetw_batch->rktp) {
                 rd_kafka_msgbatch_ready_produce(msetw->msetw_batch);
-        } else {
         }
 
         return rkbuf;
@@ -1349,7 +1348,6 @@ int rd_kafka_produce_ctx_append_toppar_mbv2(rd_kafka_produce_ctx_t *rkpc,
         rd_kafka_msgq_init(&msgq);
         rd_bool_t wrote_new_topic_header = rd_false;
         size_t new_topic_header_offset  = 0;
-
 
         /* early out if there are no messages to append */
         int queue_msg_cnt_start      = rd_kafka_msgq_len(&rktp->rktp_xmit_msgq);

@@ -53,15 +53,15 @@ void rd_kafka_buf_destroy_final(rd_kafka_buf_t *rkbuf) {
                 break;
 
         case RD_KAFKAP_Produce:
-                if (rkbuf->rkbuf_u.rkbuf_produce_engine == RD_KAFKA_PRODUCE_MBV1) {
+                if (rkbuf->rkbuf_produce_engine == RD_KAFKA_PRODUCE_MBV1) {
                         rd_kafka_msgbatch_destroy(
                             &rkbuf->rkbuf_u.rkbuf_produce.v1.batch);
-                        if (rd_list_is_initialized(
-                                &rkbuf->rkbuf_u.rkbuf_produce.v1.batch_list))
+                        /* batch_list may not have been initialized in all paths */
+                        if (rkbuf->rkbuf_u.rkbuf_produce.v1.batch_list.rl_elems)
                                 rd_list_destroy(
                                     &rkbuf->rkbuf_u.rkbuf_produce.v1
                                          .batch_list);
-                } else if (rkbuf->rkbuf_u.rkbuf_produce_engine ==
+                } else if (rkbuf->rkbuf_produce_engine ==
                            RD_KAFKA_PRODUCE_MBV2) {
                         rd_kafka_msgbatch_destroy(
                             &rkbuf->rkbuf_u.rkbuf_produce.mbv2.batch);

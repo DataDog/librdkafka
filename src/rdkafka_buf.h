@@ -373,6 +373,13 @@ struct rd_kafka_buf_s { /* rd_kafka_buf_t */
 
         rd_kafka_resp_err_t rkbuf_err; /* Buffer parsing error code */
 
+        /* Produce engine selector is separate to avoid union overwrite issues. */
+        enum {
+                RD_KAFKA_PRODUCE_NONE = 0,
+                RD_KAFKA_PRODUCE_MBV1,
+                RD_KAFKA_PRODUCE_MBV2,
+        } rkbuf_produce_engine;
+
         union {
                 struct {
                         rd_list_t *topics; /* Requested topics (char *) */
@@ -397,30 +404,25 @@ struct rd_kafka_buf_s { /* rd_kafka_buf_t */
                                     * decr_lock held. */
                         mtx_t *decr_lock;
 
-        } Metadata;
-        enum {
-                RD_KAFKA_PRODUCE_NONE = 0,
-                RD_KAFKA_PRODUCE_MBV1,
-                RD_KAFKA_PRODUCE_MBV2,
-        } rkbuf_produce_engine;
-        union {
+                } Metadata;
+                union {
+                        struct {
+                                rd_kafka_msgbatch_t batch; /**< MessageSet/batch */
+                                rd_list_t batch_list;      /* MessageSet/batch list*/
+                                size_t batch_start_pos;    /* Pos where Record batch
+                                                            * starts in the buf */
+                                size_t batch_end_pos;      /* Pos after Record batch +
+                                                            * Partition tags in the buf */
+                        } v1;
+                        struct {
+                                rd_kafka_msgbatch_t batch; /**< MessageSet/batch */
+                        } mbv2;
+                        rd_kafka_msgbatch_t batch_any; /**< Common overlay for batch */
+                } rkbuf_produce;
                 struct {
-                        rd_kafka_msgbatch_t batch; /**< MessageSet/batch */
-                        rd_list_t batch_list;      /* MessageSet/batch list*/
-                        size_t batch_start_pos;    /* Pos where Record batch
-                                                    * starts in the buf */
-                        size_t batch_end_pos;      /* Pos after Record batch +
-                                                    * Partition tags in the buf */
-                } v1;
-                struct {
-                        rd_kafka_msgbatch_t batch; /**< MessageSet/batch */
-                } mbv2;
-                rd_kafka_msgbatch_t batch_any; /**< Common overlay for batch */
-        } rkbuf_produce;
-        struct {
-                rd_bool_t commit; /**< true = txn commit,
-                                   *   false = txn abort */
-                } EndTxn;
+                        rd_bool_t commit; /**< true = txn commit,
+                                           *   false = txn abort */
+                        } EndTxn;
         } rkbuf_u;
 
 #define rkbuf_batch rkbuf_u.rkbuf_produce.batch_any

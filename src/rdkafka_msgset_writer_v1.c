@@ -282,7 +282,7 @@ rd_kafka_msgset_writer_write_Produce_header(rd_kafka_msgset_writer_t *msetw) {
         msetw->msetw_of_MessageSetSize = rd_kafka_buf_write_arraycnt_pos(rkbuf);
 
         // For multi-batch requests, here where we start copying the batch
-        rkbuf->rkbuf_u.rkbuf_produce_engine       = RD_KAFKA_PRODUCE_MBV1;
+        rkbuf->rkbuf_produce_engine       = RD_KAFKA_PRODUCE_MBV1;
         rkbuf->rkbuf_u.rkbuf_produce.v1.batch_start_pos =
             msetw->msetw_of_MessageSetSize;
 
