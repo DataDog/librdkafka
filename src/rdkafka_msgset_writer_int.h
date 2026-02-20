@@ -47,7 +47,7 @@ typedef struct rd_kafka_msgset_writer_s {
         size_t msetw_of_CRC;        /* offset of MessageSet.CRC */
 
         rd_kafka_msgbatch_t *msetw_batch; /**< Convenience pointer to
-                                           *   rkbuf_u.Produce.batch */
+                                           *   rkbuf_u.rkbuf_produce.*.batch */
 
         /* First message information */
         struct {

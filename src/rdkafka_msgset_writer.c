@@ -1470,13 +1470,16 @@ static int unittest_msgset_writer_rollback_empty_topic(void) {
                              " bytes remain",
                              rd_slice_remains(&slice));
         }
-        RD_UT_ASSERT(rkbuf->rkbuf_u.Produce.batch.msgq.rkmq_msg_cnt == 1,
+        RD_UT_ASSERT(rkbuf->rkbuf_u.rkbuf_produce.v1.batch.msgq.rkmq_msg_cnt ==
+                         1,
                      "expected 1 message in batch, got %d",
-                     rkbuf->rkbuf_u.Produce.batch.msgq.rkmq_msg_cnt);
-        RD_UT_ASSERT(rkbuf->rkbuf_u.Produce.batch.msgq.rkmq_msg_bytes == msg_size,
+                     rkbuf->rkbuf_u.rkbuf_produce.v1.batch.msgq.rkmq_msg_cnt);
+        RD_UT_ASSERT(
+            rkbuf->rkbuf_u.rkbuf_produce.v1.batch.msgq.rkmq_msg_bytes ==
+                msg_size,
                      "expected %zu message bytes in batch, got %zu",
                      msg_size,
-                     rkbuf->rkbuf_u.Produce.batch.msgq.rkmq_msg_bytes);
+                     rkbuf->rkbuf_u.rkbuf_produce.v1.batch.msgq.rkmq_msg_bytes);
 
         /* The request buffer owns the messages in its batch msgq, mimic the
          * normal request lifecycle by draining them before destroying the

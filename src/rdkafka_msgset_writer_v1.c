@@ -282,7 +282,9 @@ rd_kafka_msgset_writer_write_Produce_header(rd_kafka_msgset_writer_t *msetw) {
         msetw->msetw_of_MessageSetSize = rd_kafka_buf_write_arraycnt_pos(rkbuf);
 
         // For multi-batch requests, here where we start copying the batch
-        rkbuf->rkbuf_u.Produce.v1.batch_start_pos = msetw->msetw_of_MessageSetSize;
+        rkbuf->rkbuf_u.rkbuf_produce_engine       = RD_KAFKA_PRODUCE_MBV1;
+        rkbuf->rkbuf_u.rkbuf_produce.v1.batch_start_pos =
+            msetw->msetw_of_MessageSetSize;
 
         if (msetw->msetw_MsgVersion == 2) {
                 /* MessageSet v2 header */
@@ -484,9 +486,10 @@ static int rd_kafka_msgset_writer_init_mbv1(rd_kafka_msgset_writer_t *msetw,
         msetw->msetw_firstmsg.of =
             rd_buf_write_pos(&msetw->msetw_rkbuf->rkbuf_buf);
 
-        rd_kafka_msgbatch_init(&msetw->msetw_rkbuf->rkbuf_u.Produce.batch, rktp,
+        rd_kafka_msgbatch_init(&msetw->msetw_rkbuf->rkbuf_u.rkbuf_produce.v1.batch, rktp,
                                pid, epoch_base_msgid);
-        msetw->msetw_batch = &msetw->msetw_rkbuf->rkbuf_u.Produce.batch;
+        msetw->msetw_batch =
+            &msetw->msetw_rkbuf->rkbuf_u.rkbuf_produce.v1.batch;
 
         return msetw->msetw_msgcntmax;
 }
@@ -715,7 +718,8 @@ rd_kafka_msgset_writer_finalize_mbv1(rd_kafka_msgset_writer_t *msetw,
          * Store request's PID for matching on response
          * if the instance PID has changed and thus made
          * the request obsolete. */
-        msetw->msetw_rkbuf->rkbuf_u.Produce.batch.pid = msetw->msetw_pid;
+        msetw->msetw_rkbuf->rkbuf_u.rkbuf_produce.v1.batch.pid =
+            msetw->msetw_pid;
 
         /* Compress the message set */
         if (msetw->msetw_compression) {
@@ -732,7 +736,7 @@ rd_kafka_msgset_writer_finalize_mbv1(rd_kafka_msgset_writer_t *msetw,
         rd_kafka_buf_write_tags_empty(rkbuf);
 
         /* Save the position of end of batch + partition tags for multi-batch req */
-        rkbuf->rkbuf_u.Produce.v1.batch_end_pos =
+        rkbuf->rkbuf_u.rkbuf_produce.v1.batch_end_pos =
             rd_buf_write_pos(&rkbuf->rkbuf_buf);
 
         /* Topics tags */

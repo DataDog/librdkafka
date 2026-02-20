@@ -1404,7 +1404,7 @@ void rd_kafka_broker_conn_closed(rd_kafka_broker_t *rkb,
  */
 rd_bool_t buf_contains_toppar_mbv1(rd_kafka_buf_t *rkbuf, rd_kafka_toppar_t *rktp) {
 
-        if (rd_list_cnt(&rkbuf->rkbuf_u.Produce.v1.batch_list) > 0) {
+        if (rd_list_cnt(&rkbuf->rkbuf_u.rkbuf_produce.v1.batch_list) > 0) {
                 /* this is multi-batch request, loop through all batches.
                    The size of this list is bounded by number of topic+partition
                    this broker thread manages. In reality it's likely to be
@@ -1413,14 +1413,15 @@ rd_bool_t buf_contains_toppar_mbv1(rd_kafka_buf_t *rkbuf, rd_kafka_toppar_t *rkt
                    of processing */
                 rd_kafka_msgbatch_t *msgbatch;
                 int i;
-                RD_LIST_FOREACH(msgbatch, &rkbuf->rkbuf_u.Produce.v1.batch_list, i) {
+                RD_LIST_FOREACH(msgbatch,
+                                &rkbuf->rkbuf_u.rkbuf_produce.v1.batch_list, i) {
                         if (msgbatch->rktp == rktp)
                                 return rd_true;
                 }
                 return rd_false;
 
         } else
-                return rkbuf->rkbuf_u.Produce.batch.rktp == rktp;
+                return rkbuf->rkbuf_u.rkbuf_produce.v1.batch.rktp == rktp;
 }
 
 /* PRODUCER_ENGINE_V1: Legacy parity path. */

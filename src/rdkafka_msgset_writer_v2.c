@@ -368,10 +368,13 @@ static void rd_kafka_produce_request_alloc_buf_mbv2(rd_kafka_produce_ctx_t *rkpc
          * to work, but per-partition metadata (sequences, etc.) is tracked separately
          * in the hash map (rd_kafka_produce_req_toppar_t structures).
          * The epoch_base_msgid will be set per-partition when calling msgbatch_set_first_msg(). */
-        memset(&rkpc->rkpc_buf->rkbuf_batch, 0, sizeof(rkpc->rkpc_buf->rkbuf_batch));
-        rd_kafka_msgq_init(&rkpc->rkpc_buf->rkbuf_batch.msgq);
-        rkpc->rkpc_buf->rkbuf_batch.pid = rkpc->rkpc_pid;
-        rkpc->rkpc_buf->rkbuf_batch.first_seq = -1;
+        rkpc->rkpc_buf->rkbuf_u.rkbuf_produce_engine = RD_KAFKA_PRODUCE_MBV2;
+        rd_kafka_msgbatch_t *batch =
+            &rkpc->rkpc_buf->rkbuf_u.rkbuf_produce.mbv2.batch;
+        memset(batch, 0, sizeof(*batch));
+        rd_kafka_msgq_init(&batch->msgq);
+        batch->pid       = rkpc->rkpc_pid;
+        batch->first_seq = -1;
 }
 
 /**
@@ -664,7 +667,9 @@ static int rd_kafka_msgset_writer_init_mbv2(rd_kafka_msgset_writer_t *msetw,
          * The msgbatch structure is designed for single-partition batches only.
          * For multi-partition requests, per-partition metadata is tracked in the
          * hash map (rd_kafka_produce_req_toppar_t structures). */
-        msetw->msetw_batch = &msetw->msetw_rkbuf->rkbuf_u.Produce.batch;
+        msetw->msetw_rkbuf->rkbuf_u.rkbuf_produce_engine = RD_KAFKA_PRODUCE_MBV2;
+        msetw->msetw_batch =
+            &msetw->msetw_rkbuf->rkbuf_u.rkbuf_produce.mbv2.batch;
 
         return 1;
 }
@@ -848,7 +853,8 @@ static int rd_kafka_msgset_writer_write_msgq_mbv2(rd_kafka_msgset_writer_t *mset
 static void rd_kafka_msgset_writer_finalize_MessageSet_v2_header_mbv2(
     rd_kafka_msgset_writer_t *msetw) {
         rd_kafka_buf_t *rkbuf = msetw->msetw_rkbuf;
-        int msgcnt            = rd_kafka_msgq_len(&rkbuf->rkbuf_batch.msgq);
+        int msgcnt =
+            rd_kafka_msgq_len(&rkbuf->rkbuf_u.rkbuf_produce.mbv2.batch.msgq);
 
         rd_kafka_assert(NULL, msgcnt > 0);
         rd_kafka_assert(NULL, msetw->msetw_ApiVersion >= 3);
@@ -961,7 +967,8 @@ rd_kafka_msgset_writer_finalize_mbv2(rd_kafka_msgset_writer_t *msetw,
                    rktp->rktp_rkt->rkt_topic->str, rktp->rktp_partition);
 
         /* No messages added, bail out early. */
-        if (unlikely((cnt = rd_kafka_msgq_len(&rkbuf->rkbuf_batch.msgq)) ==
+        if (unlikely((cnt = rd_kafka_msgq_len(
+                           &rkbuf->rkbuf_u.rkbuf_produce.mbv2.batch.msgq)) ==
                      0)) {
                 /* NOTE: In multi-partition requests, we don't destroy the buffer here
                  * because it's shared across partitions. The caller will handle cleanup. */
@@ -1373,7 +1380,8 @@ int rd_kafka_produce_ctx_append_toppar_mbv2(rd_kafka_produce_ctx_t *rkpc,
 
         /* move msg q before write */
         // rd_kafka_msgq_move(*msgq, &rkpc->rkpc_buf->rkbuf_ba);
-        rd_kafka_msgq_move(&msgq, &rkpc->rkpc_buf->rkbuf_batch.msgq);
+        rd_kafka_msgq_move(&msgq,
+                           &rkpc->rkpc_buf->rkbuf_u.rkbuf_produce.mbv2.batch.msgq);
 
         /* Store the size of the message queue and the current offset of
          * write buffer. If no data is written to the message set, then
@@ -1435,8 +1443,10 @@ int rd_kafka_produce_ctx_append_toppar_mbv2(rd_kafka_produce_ctx_t *rkpc,
         rd_kafka_msgset_writer_finalize_mbv2(&msetw, appended_msg_bytes);
 
         /* concatenate msg queues together */
-        rd_kafka_msgq_concat(&msgq, &rkpc->rkpc_buf->rkbuf_batch.msgq);
-        rd_kafka_msgq_move(&rkpc->rkpc_buf->rkbuf_batch.msgq, &msgq);
+        rd_kafka_msgq_concat(&msgq,
+                             &rkpc->rkpc_buf->rkbuf_u.rkbuf_produce.mbv2.batch.msgq);
+        rd_kafka_msgq_move(&rkpc->rkpc_buf->rkbuf_u.rkbuf_produce.mbv2.batch.msgq,
+                           &msgq);
 
         /* If no messages were written, seek to the beginning of this write
          * so that the context can be finalized */
@@ -1580,7 +1590,8 @@ rd_kafka_buf_t *rd_kafka_msgset_create_ProduceRequest_mbv2(rd_kafka_broker_t *rk
 
         /* Legacy single-partition path: tie the batch to this toppar so the
          * response handler has a valid rktp for bookkeeping. */
-        rd_kafka_msgbatch_init(&ctx.rkpc_buf->rkbuf_batch, rktp, pid,
+        rd_kafka_msgbatch_init(&ctx.rkpc_buf->rkbuf_u.rkbuf_produce.mbv2.batch,
+                               rktp, pid,
                                epoch_base_msgid);
 
         /* Move messages into the toppar xmit queue for append */
