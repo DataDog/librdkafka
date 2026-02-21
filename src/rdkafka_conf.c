@@ -1535,12 +1535,18 @@ static const struct rd_kafka_property rd_kafka_properties[] = {
     {_RK_GLOBAL | _RK_PRODUCER, "multibatch", _RK_C_BOOL,
      _RK(multibatch), "Batch produce requests across multiple partitions. V1", 0,
      1, 0},
-    {_RK_GLOBAL | _RK_PRODUCER, "multibatch_v2", _RK_C_BOOL,
-     _RK(multibatch_v2), "Batch produce requests across multiple partitions. V1", 0,
-     1, 0},
+    {_RK_GLOBAL | _RK_PRODUCER, "produce.engine", _RK_C_S2I,
+     _RK(produce_engine),
+     "Select producer implementation path. "
+     "`v1` uses the legacy producer path. "
+     "`v2` uses the new multibatch producer path.",
+     .vdef = RD_KAFKA_PRODUCE_ENGINE_V1,
+     .s2i  = {{RD_KAFKA_PRODUCE_ENGINE_V1, "v1"},
+              {RD_KAFKA_PRODUCE_ENGINE_V2, "v2"}}},
     {_RK_GLOBAL | _RK_PRODUCER, "produce.request.max.partitions", _RK_C_INT,
      _RK(produce_request_max_partitions),
-     "V2 multibatch. The maximum number of partitions to include in a single produce "
+     "V2 producer engine only. The maximum number of partitions to include in "
+     "a single produce "
      "request. "
      "A higher value allows for fewer produce requests when producing "
      "to many partitions, at the expense of higher memory usage during "
@@ -4123,13 +4129,15 @@ const char *rd_kafka_conf_finalize(rd_kafka_type_t cltype,
                         conf->sticky_partition_linger_ms = (int)RD_MIN(
                             900000, (rd_ts_t)(2 * conf->buffering_max_ms_dbl));
 
-                if (conf->multibatch && conf->multibatch_v2)
-                    return "`multibatch` and `multibatch_v2 are mutually exclusive";
+                if (conf->produce_engine == RD_KAFKA_PRODUCE_ENGINE_V2 &&
+                    rd_kafka_conf_is_modified(conf, "multibatch"))
+                        return "`multibatch` may only be configured when "
+                               "`produce.engine=v1`";
 
                 if (rd_kafka_conf_is_modified(conf, "produce.request.max.partitions") &&
-                        !conf->multibatch_v2)
-                    return  "`produce.request.max.partitions` requires "
-                        "`multibatch.v2=true`";
+                    conf->produce_engine != RD_KAFKA_PRODUCE_ENGINE_V2)
+                        return "`produce.request.max.partitions` requires "
+                               "`produce.engine=v2`";
         }
 
 

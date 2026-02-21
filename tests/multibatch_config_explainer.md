@@ -33,6 +33,9 @@ MultiBatch changes how librdkafka sends data to Kafka brokers. Understanding the
 
 ## Configuration Hierarchy
 
+**Important:** MultiBatch v2 behavior in this guide assumes
+`produce.engine=v2`.
+
 ### 1. Per-Partition Batching (MessageSet Level)
 
 **`batch.size`** (default: 1,000,000 bytes = 1MB)

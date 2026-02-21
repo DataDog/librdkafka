@@ -6118,7 +6118,8 @@ static void rd_kafka_broker_serve(rd_kafka_broker_t *rkb, int timeout_ms) {
         }
 
         if (rkb->rkb_rk->rk_type == RD_KAFKA_PRODUCER) {
-                if (rkb->rkb_rk->rk_conf.multibatch_v2)
+                if (rkb->rkb_rk->rk_conf.produce_engine ==
+                    RD_KAFKA_PRODUCE_ENGINE_V2)
                         rd_kafka_broker_producer_serve_mbv2(rkb, abs_timeout);
                 else
                         rd_kafka_broker_producer_serve_mbv1(rkb, abs_timeout);
@@ -6588,7 +6589,7 @@ rd_kafka_broker_t *rd_kafka_broker_add(rd_kafka_t *rk,
                     rk->rk_conf.stats_interval_ms);
         rd_avg_init(&rkb->rkb_avg_throttle, RD_AVG_GAUGE, 0, 5000 * 1000, 2,
                     rk->rk_conf.stats_interval_ms);
-        if (rk->rk_conf.multibatch_v2) {
+        if (rk->rk_conf.produce_engine == RD_KAFKA_PRODUCE_ENGINE_V2) {
                 rkb->rkb_producer_mbv2 = rd_calloc(1, sizeof(*rkb->rkb_producer_mbv2));
                 rd_kafka_broker_batch_collector_init_mbv2(rkb);
                 rd_avg_init(&rkb->rkb_producer_mbv2->rkbp_avg_produce_partitions,

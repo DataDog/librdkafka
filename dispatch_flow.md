@@ -5,7 +5,7 @@ Entry gate (broker thread)
 --------------------------
 ```
 rd_kafka_broker_serve()
-    -> if rk_conf.multibatch_v2 == true
+    -> if rk_conf.produce_engine == v2
            rd_kafka_broker_producer_serve_v2()
        else
            rd_kafka_broker_producer_serve_v1()
@@ -45,6 +45,6 @@ Key helpers on this path live in:
 
 Config gate summary
 -------------------
-- `multibatch_v2=true` selects v2 path above.
-- `multibatch=true` (and v2 false) keeps v1 path.
-- Both set is rejected in `rd_kafka_conf.c` at config parse time.
+- `produce.engine=v2` selects v2 path above.
+- `produce.engine=v1` keeps v1 path.
+- `multibatch` only affects the v1 path.

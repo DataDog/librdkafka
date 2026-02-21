@@ -775,7 +775,7 @@ static int unittest_msgset_writer_partition_limit(void) {
         conf = rd_kafka_conf_new();
         rd_kafka_conf_set(conf, "client.id", "unittest", NULL, 0);
         rd_kafka_conf_set(conf, "produce.request.max.partitions", "5", NULL, 0);
-        rd_kafka_conf_set(conf, "multibatch_v2", "true", NULL, 0);
+        rd_kafka_conf_set(conf, "produce.engine", "v2", NULL, 0);
         rk = rd_kafka_new(RD_KAFKA_PRODUCER, conf, NULL, 0);
         if (!rk)
                 RD_UT_FAIL("Failed to create producer");
@@ -834,7 +834,7 @@ static int unittest_msgset_writer_config_values(void) {
         rd_kafka_conf_set(conf, "message.max.bytes", "10000", NULL, 0);
         rd_kafka_conf_set(conf, "produce.request.max.partitions", "123", NULL, 0);
         rd_kafka_conf_set(conf, "batch.num.messages", "456", NULL, 0);
-        rd_kafka_conf_set(conf, "multibatch_v2", "true", NULL, 0);
+        rd_kafka_conf_set(conf, "produce.engine", "v2", NULL, 0);
         rk = rd_kafka_new(RD_KAFKA_PRODUCER, conf, NULL, 0);
         if (!rk)
                 RD_UT_FAIL("Failed to create producer");
@@ -875,7 +875,7 @@ static int unittest_msgset_writer_multiple_partitions(void) {
         rd_kafka_conf_set(conf, "client.id", "unittest", NULL, 0);
         rd_kafka_conf_set(conf, "message.max.bytes", "10000000", NULL, 0);
         rd_kafka_conf_set(conf, "produce.request.max.partitions", "1000", NULL, 0);
-        rd_kafka_conf_set(conf, "multibatch_v2", "true", NULL, 0);
+        rd_kafka_conf_set(conf, "produce.engine", "v2", NULL, 0);
         rk = rd_kafka_new(RD_KAFKA_PRODUCER, conf, NULL, 0);
         if (!rk)
                 RD_UT_FAIL("Failed to create producer");
@@ -1122,7 +1122,7 @@ static int unittest_msgset_writer_exact_limit(void) {
         conf = rd_kafka_conf_new();
         rd_kafka_conf_set(conf, "client.id", "unittest", NULL, 0);
         rd_kafka_conf_set(conf, "produce.request.max.partitions", "1", NULL, 0);
-        rd_kafka_conf_set(conf, "multibatch_v2", "true", NULL, 0);
+        rd_kafka_conf_set(conf, "produce.engine", "v2", NULL, 0);
         rk = rd_kafka_new(RD_KAFKA_PRODUCER, conf, NULL, 0);
         if (!rk)
                 RD_UT_FAIL("Failed to create producer");
@@ -1178,7 +1178,7 @@ static int unittest_msgset_writer_rollback_empty_topic(void) {
 
         conf = rd_kafka_conf_new();
         rd_kafka_conf_set(conf, "client.id", "unittest", NULL, 0);
-        rd_kafka_conf_set(conf, "multibatch_v2", "true", NULL, 0);
+        rd_kafka_conf_set(conf, "produce.engine", "v2", NULL, 0);
         rd_kafka_conf_set(conf, "debug", "msg", NULL, 0);   
         rk = rd_kafka_new(RD_KAFKA_PRODUCER, conf, NULL, 0);
         if (!rk)

@@ -4,7 +4,7 @@ Producer Engine Test Plan (v1 vs mbv2)
 Goals
 -----
 - Exercise the producer stack under both engines (legacy mbv1 and mbv2).
-- Catch regressions in routing/selection (`multibatch` vs `multibatch_v2`).
+- Catch regressions in routing/selection (`produce.engine`).
 - Keep cost reasonable: reuse existing tests, avoid duplicating heavy suites.
 
 Scope
@@ -17,8 +17,8 @@ Plan
 ----
 1) **Unit test dual-run helper**
    - Add a small helper to run existing producer unit tests twice, setting:
-     - mbv1: `multibatch=true`, `multibatch_v2=false`
-     - mbv2: `multibatch=false`, `multibatch_v2=true`
+     - mbv1: `produce.engine=v1` (and `multibatch=true` when v1 multibatch path is under test)
+     - mbv2: `produce.engine=v2`
    - Target tests: `unittest_msgset_writer`, `unittest_request` (and any other producer-only unittests).
    - Avoid body duplication: shared test body, engine set via helper.
 
@@ -26,7 +26,6 @@ Plan
    - Start mock broker; run produce with:
      - mbv1 config → assert mbv1 path taken (collector inactive, mbv1 handlers hit).
      - mbv2 config → assert collector active / mbv2 handlers hit.
-     - both true → assert config parse fails (existing check).
    - Use existing mock/telemetry hooks if available; otherwise minimal counters/log hooks.
 
 3) **Functional producer suite parameterization**

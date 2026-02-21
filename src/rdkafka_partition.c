@@ -266,7 +266,8 @@ rd_kafka_toppar_t *rd_kafka_toppar_new0(rd_kafka_topic_t *rkt,
         rd_atomic32_init(&rktp->rktp_msgs_inflight, 0);
         rd_kafka_pid_reset(&rktp->rktp_eos.pid);
 
-        if (rkt->rkt_rk->rk_conf.multibatch_v2) {
+        if (rkt->rkt_rk->rk_conf.produce_engine ==
+            RD_KAFKA_PRODUCE_ENGINE_V2) {
                 rktp->rktp_producer_mbv2 =
                     rd_calloc(1, sizeof(*rktp->rktp_producer_mbv2));
                 rd_atomic32_init(&rktp->rktp_producer_mbv2->rktp_xmit_msgq_cnt, 0);

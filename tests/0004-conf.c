@@ -532,6 +532,8 @@ int main_0004_conf(int argc, char **argv) {
 #endif
             "client.dns.lookup",
             "resolve_canonical_bootstrap_servers_only",
+            "produce.engine",
+            "v2",
             "produce.request.max.partitions",
             "42",
             NULL};
@@ -545,9 +547,10 @@ int main_0004_conf(int argc, char **argv) {
                                        "my/path", /* string */
                                        NULL};
 
-        /* Sanity-check validation for multibatch partition cap */
+        /* Sanity-check validation for producer-engine gating */
         {
                 rd_kafka_conf_t *tmp = rd_kafka_conf_new();
+                rd_kafka_t *tmp_rk;
 
                 res = rd_kafka_conf_set(tmp, "produce.request.max.partitions",
                                         "0", errstr, sizeof(errstr));
@@ -563,7 +566,128 @@ int main_0004_conf(int argc, char **argv) {
                             "to accept valid values: %d (%s)",
                             res, errstr);
 
-                rd_kafka_conf_destroy(tmp);
+                tmp_rk = rd_kafka_new(RD_KAFKA_PRODUCER, tmp, errstr,
+                                      sizeof(errstr));
+                TEST_ASSERT(!tmp_rk,
+                            "expected produce.request.max.partitions to "
+                            "require produce.engine=v2");
+                TEST_ASSERT(strstr(errstr, "produce.engine=v2"),
+                            "expected engine gating error, not \"%s\"", errstr);
+                if (tmp_rk)
+                        rd_kafka_destroy(tmp_rk);
+                else
+                        rd_kafka_conf_destroy(tmp);
+        }
+
+        {
+                rd_kafka_conf_t *tmp = rd_kafka_conf_new();
+                rd_kafka_t *tmp_rk;
+
+                res = rd_kafka_conf_set(tmp, "produce.engine", "v2", errstr,
+                                        sizeof(errstr));
+                TEST_ASSERT(res == RD_KAFKA_CONF_OK,
+                            "expected produce.engine=v2 to be accepted: "
+                            "%d (%s)",
+                            res, errstr);
+                res = rd_kafka_conf_set(tmp, "produce.request.max.partitions",
+                                        "42", errstr, sizeof(errstr));
+                TEST_ASSERT(res == RD_KAFKA_CONF_OK,
+                            "expected produce.request.max.partitions to be "
+                            "accepted in v2 engine: %d (%s)",
+                            res, errstr);
+
+                tmp_rk = rd_kafka_new(RD_KAFKA_PRODUCER, tmp, errstr,
+                                      sizeof(errstr));
+                TEST_ASSERT(tmp_rk,
+                            "expected produce.engine=v2 + "
+                            "produce.request.max.partitions to be valid: %s",
+                            errstr);
+                if (tmp_rk)
+                        rd_kafka_destroy(tmp_rk);
+                else
+                        rd_kafka_conf_destroy(tmp);
+        }
+
+        {
+                rd_kafka_conf_t *tmp = rd_kafka_conf_new();
+                rd_kafka_t *tmp_rk;
+
+                res = rd_kafka_conf_set(tmp, "produce.engine", "v2", errstr,
+                                        sizeof(errstr));
+                TEST_ASSERT(res == RD_KAFKA_CONF_OK,
+                            "expected produce.engine=v2 to be accepted: "
+                            "%d (%s)",
+                            res, errstr);
+                res = rd_kafka_conf_set(tmp, "multibatch", "true", errstr,
+                                        sizeof(errstr));
+                TEST_ASSERT(res == RD_KAFKA_CONF_OK,
+                            "expected multibatch to parse before finalize: "
+                            "%d (%s)",
+                            res, errstr);
+
+                tmp_rk = rd_kafka_new(RD_KAFKA_PRODUCER, tmp, errstr,
+                                      sizeof(errstr));
+                TEST_ASSERT(!tmp_rk,
+                            "expected multibatch to be rejected for "
+                            "produce.engine=v2");
+                TEST_ASSERT(strstr(errstr, "multibatch"),
+                            "expected multibatch gating error, not \"%s\"",
+                            errstr);
+                if (tmp_rk)
+                        rd_kafka_destroy(tmp_rk);
+                else
+                        rd_kafka_conf_destroy(tmp);
+        }
+
+        {
+                rd_kafka_conf_t *tmp = rd_kafka_conf_new();
+                rd_kafka_t *tmp_rk;
+
+                res = rd_kafka_conf_set(tmp, "produce.engine", "v2", errstr,
+                                        sizeof(errstr));
+                TEST_ASSERT(res == RD_KAFKA_CONF_OK,
+                            "expected produce.engine=v2 to be accepted: "
+                            "%d (%s)",
+                            res, errstr);
+                res = rd_kafka_conf_set(tmp, "multibatch", "false", errstr,
+                                        sizeof(errstr));
+                TEST_ASSERT(res == RD_KAFKA_CONF_OK,
+                            "expected multibatch=false to parse: %d (%s)",
+                            res, errstr);
+
+                tmp_rk = rd_kafka_new(RD_KAFKA_PRODUCER, tmp, errstr,
+                                      sizeof(errstr));
+                TEST_ASSERT(!tmp_rk,
+                            "expected multibatch to be rejected for "
+                            "produce.engine=v2, even when false");
+                TEST_ASSERT(strstr(errstr, "multibatch"),
+                            "expected multibatch gating error, not \"%s\"",
+                            errstr);
+                if (tmp_rk)
+                        rd_kafka_destroy(tmp_rk);
+                else
+                        rd_kafka_conf_destroy(tmp);
+        }
+
+        {
+                rd_kafka_conf_t *tmp = rd_kafka_conf_new();
+                rd_kafka_t *tmp_rk;
+
+                res = rd_kafka_conf_set(tmp, "multibatch", "true", errstr,
+                                        sizeof(errstr));
+                TEST_ASSERT(res == RD_KAFKA_CONF_OK,
+                            "expected multibatch=true to parse: %d (%s)",
+                            res, errstr);
+                tmp_rk = rd_kafka_new(RD_KAFKA_PRODUCER, tmp, errstr,
+                                      sizeof(errstr));
+                TEST_ASSERT(tmp_rk,
+                            "expected multibatch=true with default "
+                            "produce.engine=v1 to be valid: %s",
+                            errstr);
+                if (tmp_rk)
+                        rd_kafka_destroy(tmp_rk);
+                else
+                        rd_kafka_conf_destroy(tmp);
         }
 
         test_conf_init(&ignore_conf, &ignore_topic_conf, 10);

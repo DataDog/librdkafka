@@ -366,6 +366,7 @@ static rd_kafka_t *create_producer(bench_config_t *config, const char *topic) {
         test_conf_set(conf, "compression.type", "lz4");
         test_conf_set(conf, "message.max.bytes", "100000000"); /* 100MB */
         test_conf_set(conf, "batch.num.messages", "100000");
+        test_conf_set(conf, "produce.engine", "v2");
         test_conf_set(conf, "produce.request.max.partitions", "10000");
 
         /* Broker-level batching configuration (new) */
