@@ -45,6 +45,139 @@
 #include "rdvarint.h"
 #include "crc32c.h"
 
+/*
+ * v2 request batch queues may contain messages from multiple partitions.
+ * msgid is partition-local, so global msgid ordering is not meaningful here.
+ */
+static RD_INLINE void
+rd_kafka_msgq_concat_unordered_mbv2(rd_kafka_msgq_t *dst, rd_kafka_msgq_t *src) {
+        TAILQ_CONCAT(&dst->rkmq_msgs, &src->rkmq_msgs, rkm_link);
+        dst->rkmq_msg_cnt += src->rkmq_msg_cnt;
+        dst->rkmq_msg_bytes += src->rkmq_msg_bytes;
+        rd_kafka_msgq_init(src);
+}
+
+static RD_INLINE void rd_kafka_msgq_move_unordered_mbv2(rd_kafka_msgq_t *dst,
+                                                         rd_kafka_msgq_t *src) {
+        TAILQ_MOVE(&dst->rkmq_msgs, &src->rkmq_msgs, rkm_link);
+        dst->rkmq_msg_cnt   = src->rkmq_msg_cnt;
+        dst->rkmq_msg_bytes = src->rkmq_msg_bytes;
+        rd_kafka_msgq_init(src);
+}
+
+#if ENABLE_DEVEL == 1
+typedef struct rd_kafka_mbv2_part_state_s {
+        const rd_kafka_topic_t *rkt;
+        int32_t partition;
+        uint64_t last_msgid;
+} rd_kafka_mbv2_part_state_t;
+
+/*
+ * Optional trace for proving that mixed request queues are not globally
+ * monotonic by msgid while still preserving per-partition msgid order.
+ * Enable with: RDKAFKA_MBV2_TRACE_ORDER=1
+ */
+static void rd_kafka_msgq_trace_mixed_order_mbv2(rd_kafka_broker_t *rkb,
+                                                 const rd_kafka_msgq_t *rkmq,
+                                                 const char *where) {
+        static int trace_enabled = -1;
+        static int trace_log_budget = -1;
+        rd_kafka_mbv2_part_state_t *states = NULL;
+        size_t state_cnt = 0, state_cap = 0;
+        rd_kafka_msg_t *rkm;
+        uint64_t prev_msgid = 0;
+        rd_kafka_msg_t *prev = NULL;
+        int global_violations = 0;
+        int partition_violations = 0;
+        int log_cnt = 0;
+
+        if (trace_enabled == -1)
+                trace_enabled = rd_getenv("RDKAFKA_MBV2_TRACE_ORDER", NULL) ? 1 : 0;
+        if (trace_log_budget == -1) {
+                const char *s = rd_getenv("RDKAFKA_MBV2_TRACE_ORDER_MAX", NULL);
+                trace_log_budget = s ? atoi(s) : 40;
+                if (trace_log_budget < 0)
+                        trace_log_budget = 0;
+        }
+        if (!trace_enabled)
+                return;
+
+        TAILQ_FOREACH(rkm, &rkmq->rkmq_msgs, rkm_link) {
+                const rd_kafka_topic_t *rkt = rkm->rkm_rkmessage.rkt;
+                int32_t partition           = rkm->rkm_partition;
+                uint64_t msgid             = rkm->rkm_u.producer.msgid;
+                size_t i;
+                rd_kafka_mbv2_part_state_t *st = NULL;
+
+                if (prev && msgid <= prev_msgid) {
+                        global_violations++;
+                        if (log_cnt++ < 8 && trace_log_budget-- > 0)
+                                rd_rkb_log(
+                                    rkb, LOG_NOTICE, "MBV2ORDER",
+                                    "%s: global msgid drop: prev=%" PRIu64
+                                    " (%s[%" PRId32 "]) curr=%" PRIu64
+                                    " (%s[%" PRId32 "])",
+                                    where, prev_msgid,
+                                    prev->rkm_rkmessage.rkt
+                                            ? prev->rkm_rkmessage.rkt->rkt_topic->str
+                                            : "n/a",
+                                    prev->rkm_partition, msgid,
+                                    rkt ? rkt->rkt_topic->str : "n/a", partition);
+                }
+
+                for (i = 0; i < state_cnt; i++) {
+                        if (states[i].rkt == rkt &&
+                            states[i].partition == partition) {
+                                st = &states[i];
+                                break;
+                        }
+                }
+
+                if (!st) {
+                        if (state_cnt == state_cap) {
+                                size_t new_cap = state_cap ? state_cap * 2 : 32;
+                                states = rd_realloc(states, new_cap * sizeof(*states));
+                                state_cap = new_cap;
+                        }
+                        st = &states[state_cnt++];
+                        st->rkt = rkt;
+                        st->partition = partition;
+                        st->last_msgid = 0;
+                }
+
+                if (st->last_msgid && msgid <= st->last_msgid) {
+                        partition_violations++;
+                        rd_rkb_log(rkb, LOG_ERR, "MBV2ORDER",
+                                   "%s: per-partition msgid regression for "
+                                   "%s[%" PRId32 "]: prev=%" PRIu64
+                                   " curr=%" PRIu64,
+                                   where, rkt ? rkt->rkt_topic->str : "n/a",
+                                   partition, st->last_msgid, msgid);
+                }
+
+                st->last_msgid = msgid;
+                prev = rkm;
+                prev_msgid = msgid;
+        }
+
+        if ((global_violations || partition_violations) &&
+            trace_log_budget-- > 0) {
+                rd_rkb_log(rkb, LOG_NOTICE, "MBV2ORDER",
+                           "%s: mixed queue observations: global_violations=%d "
+                           "partition_violations=%d msgq_len=%d partitions=%" PRIusz,
+                           where, global_violations, partition_violations,
+                           rd_kafka_msgq_len(rkmq), state_cnt);
+        }
+
+        rd_free(states);
+        rd_assert(!partition_violations);
+}
+#else
+#define rd_kafka_msgq_trace_mixed_order_mbv2(rkb, rkmq, where)                 \
+        do {                                                                    \
+        } while (0)
+#endif
+
 /**
  * @brief Select produce request capabilities based on
  *       broker features.
@@ -1376,8 +1509,8 @@ int rd_kafka_produce_ctx_append_toppar_mbv2(rd_kafka_produce_ctx_t *rkpc,
 
         /* move msg q before write */
         // rd_kafka_msgq_move(*msgq, &rkpc->rkpc_buf->rkbuf_ba);
-        rd_kafka_msgq_move(&msgq,
-                           &rkpc->rkpc_buf->rkbuf_u.rkbuf_produce.mbv2.batch.msgq);
+        rd_kafka_msgq_move_unordered_mbv2(
+            &msgq, &rkpc->rkpc_buf->rkbuf_u.rkbuf_produce.mbv2.batch.msgq);
 
         /* Store the size of the message queue and the current offset of
          * write buffer. If no data is written to the message set, then
@@ -1439,10 +1572,13 @@ int rd_kafka_produce_ctx_append_toppar_mbv2(rd_kafka_produce_ctx_t *rkpc,
         rd_kafka_msgset_writer_finalize_mbv2(&msetw, appended_msg_bytes);
 
         /* concatenate msg queues together */
-        rd_kafka_msgq_concat(&msgq,
-                             &rkpc->rkpc_buf->rkbuf_u.rkbuf_produce.mbv2.batch.msgq);
-        rd_kafka_msgq_move(&rkpc->rkpc_buf->rkbuf_u.rkbuf_produce.mbv2.batch.msgq,
-                           &msgq);
+        rd_kafka_msgq_concat_unordered_mbv2(
+            &msgq, &rkpc->rkpc_buf->rkbuf_u.rkbuf_produce.mbv2.batch.msgq);
+        rd_kafka_msgq_move_unordered_mbv2(
+            &rkpc->rkpc_buf->rkbuf_u.rkbuf_produce.mbv2.batch.msgq, &msgq);
+        rd_kafka_msgq_trace_mixed_order_mbv2(
+            rkpc->rkpc_rkb, &rkpc->rkpc_buf->rkbuf_u.rkbuf_produce.mbv2.batch.msgq,
+            __FUNCTION__);
 
         /* If no messages were written, seek to the beginning of this write
          * so that the context can be finalized */

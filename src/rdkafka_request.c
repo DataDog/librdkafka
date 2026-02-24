@@ -6818,6 +6818,16 @@ static int64_t get_first_msg_timeout_mbv1(rd_list_t* msg_batch_list) {
         return result;
 }
 
+static void rd_kafka_msgbatch_destroy_free_mbv1(void *ptr) {
+        rd_kafka_msgbatch_t *msgbatch = ptr;
+
+        if (!msgbatch)
+                return;
+
+        rd_kafka_msgbatch_destroy(msgbatch);
+        rd_free(msgbatch);
+}
+
 
 /**
  * @brief Finalize the encoding of a topic. This happens after multiple
@@ -6902,10 +6912,12 @@ int rd_kafka_MultiBatchProduceRequest_mbv1(rd_kafka_broker_t *rkb,
                                         estimated_size,
                                         api_version >= 9);
                 rd_kafka_buf_ApiVersion_set(request_rkbuf, api_version, features);
+                request_rkbuf->rkbuf_produce_engine = RD_KAFKA_PRODUCE_MBV1;
 
                 /* init the list to hold rd_kafka_msgbatch_t for each batch*/
                 rd_list_init(&request_rkbuf->rkbuf_u.rkbuf_produce.v1.batch_list,
-                             next_ind - cur_ind, NULL);
+                             next_ind - cur_ind,
+                             rd_kafka_msgbatch_destroy_free_mbv1);
 
                 prev_topic = first_rkbuf->rkbuf_batch.rktp->rktp_rkt;
                 prev_rkbuf = first_rkbuf;

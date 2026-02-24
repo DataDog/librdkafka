@@ -87,7 +87,7 @@ struct rd_kafka_stats_counts {
         int topic_cnt;
         int total_partitions;
         int total_broker_toppars;
-        int total_broker_reqs; /**< Total non-zero req counts across all brokers */
+        int total_broker_reqs; /**< Total req slots across all brokers */
 };
 
 static void rd_kafka_stats_count(rd_kafka_t *rk,
@@ -100,18 +100,13 @@ static void rd_kafka_stats_count(rd_kafka_t *rk,
         /* Count brokers and their toppars and non-zero req counts */
         TAILQ_FOREACH(rkb, &rk->rk_brokers, rkb_link) {
                 rd_kafka_toppar_t *rktp;
-                int i;
                 counts->broker_cnt++;
 
                 rd_kafka_broker_lock(rkb);
                 TAILQ_FOREACH(rktp, &rkb->rkb_toppars, rktp_rkblink) {
                         counts->total_broker_toppars++;
                 }
-                /* Count non-zero request type counts */
-                for (i = 0; i < RD_KAFKAP__NUM; i++) {
-                        if (rd_atomic64_get(&rkb->rkb_c.reqtype[i]) > 0)
-                                counts->total_broker_reqs++;
-                }
+                counts->total_broker_reqs += RD_KAFKAP__NUM;
                 rd_kafka_broker_unlock(rkb);
         }
 
@@ -320,7 +315,9 @@ static int rd_kafka_stats_topic_populate(rd_kafka_topic_stats_t *dst,
 static void rd_kafka_stats_broker_populate(rd_kafka_broker_stats_t *dst,
                                             rd_kafka_broker_t *rkb,
                                             rd_kafka_broker_toppar_ref_t **toppar_ptr,
+                                            rd_kafka_broker_toppar_ref_t *toppar_end,
                                             rd_kafka_req_count_t **req_ptr,
+                                            rd_kafka_req_count_t *req_end,
                                             rd_ts_t now,
                                             int64_t *tx_total,
                                             int64_t *tx_bytes_total,
@@ -331,6 +328,10 @@ static void rd_kafka_stats_broker_populate(rd_kafka_broker_stats_t *dst,
         int req_idx    = 0;
         rd_ts_t txidle = -1, rxidle = -1;
         int i;
+        size_t req_cap =
+            req_end > *req_ptr ? (size_t)(req_end - *req_ptr) : 0;
+        size_t toppar_cap =
+            toppar_end > *toppar_ptr ? (size_t)(toppar_end - *toppar_ptr) : 0;
 
         rd_kafka_broker_lock(rkb);
 
@@ -448,6 +449,8 @@ static void rd_kafka_stats_broker_populate(rd_kafka_broker_stats_t *dst,
         for (i = 0; i < RD_KAFKAP__NUM; i++) {
                 int64_t cnt = rd_atomic64_get(&rkb->rkb_c.reqtype[i]);
                 if (cnt > 0) {
+                        if (unlikely((size_t)req_idx >= req_cap))
+                                break;
                         rd_kafka_req_count_t *req = &dst->reqs[req_idx++];
                         rd_kafka_stats_strcpy(req->name, sizeof(req->name),
                                                rd_kafka_ApiKey2str((int16_t)i));
@@ -456,19 +459,16 @@ static void rd_kafka_stats_broker_populate(rd_kafka_broker_stats_t *dst,
         }
         dst->req_cnt = req_idx;
 
-        /* Count and populate toppars */
-        dst->toppar_cnt = 0;
-        TAILQ_FOREACH(rktp, &rkb->rkb_toppars, rktp_rkblink) {
-                dst->toppar_cnt++;
-        }
-
         dst->toppars = *toppar_ptr;
         TAILQ_FOREACH(rktp, &rkb->rkb_toppars, rktp_rkblink) {
+                if (unlikely((size_t)toppar_idx >= toppar_cap))
+                        break;
                 rd_kafka_broker_toppar_ref_t *ref = &dst->toppars[toppar_idx++];
                 rd_kafka_stats_strcpy(ref->topic, sizeof(ref->topic),
                                        rktp->rktp_rkt->rkt_topic->str);
                 ref->partition = rktp->rktp_partition;
         }
+        dst->toppar_cnt = toppar_idx;
 
         rd_kafka_broker_unlock(rkb);
 
@@ -495,7 +495,9 @@ rd_kafka_stats_t *rd_kafka_stats_new(rd_kafka_t *rk) {
         int topic_idx    = 0;
         rd_kafka_partition_stats_t *part_ptr;
         rd_kafka_broker_toppar_ref_t *toppar_ptr;
+        rd_kafka_broker_toppar_ref_t *toppar_end;
         rd_kafka_req_count_t *req_ptr;
+        rd_kafka_req_count_t *req_end;
 
         rd_kafka_rdlock(rk);
 
@@ -535,8 +537,10 @@ rd_kafka_stats_t *rd_kafka_stats_new(rd_kafka_t *rk) {
 
         toppar_ptr = (rd_kafka_broker_toppar_ref_t *)ptr;
         ptr += counts.total_broker_toppars * sizeof(rd_kafka_broker_toppar_ref_t);
+        toppar_end = toppar_ptr + counts.total_broker_toppars;
 
         req_ptr = (rd_kafka_req_count_t *)ptr;
+        req_end = req_ptr + counts.total_broker_reqs;
 
         /* Get current time */
         now = rd_clock();
@@ -572,8 +576,8 @@ rd_kafka_stats_t *rd_kafka_stats_new(rd_kafka_t *rk) {
         /* Populate brokers */
         TAILQ_FOREACH(rkb, &rk->rk_brokers, rkb_link) {
                 rd_kafka_stats_broker_populate(
-                    &stats->brokers[broker_idx++], rkb, &toppar_ptr, &req_ptr,
-                    now, &stats->tx, &stats->tx_bytes, &stats->rx,
+                    &stats->brokers[broker_idx++], rkb, &toppar_ptr, toppar_end,
+                    &req_ptr, req_end, now, &stats->tx, &stats->tx_bytes, &stats->rx,
                     &stats->rx_bytes);
         }
 
