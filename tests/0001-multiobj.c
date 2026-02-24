@@ -38,13 +38,15 @@
  * is built from within the librdkafka source tree and thus differs. */
 #include "rdkafka.h" /* for Kafka driver */
 
-int main_0001_multiobj(int argc, char **argv) {
+static void do_test_multiobj(const char *engine_name, const char *prog_name) {
         int partition = RD_KAFKA_PARTITION_UA; /* random */
         int i;
         int NUM_ITER      = test_quick ? 2 : 5;
         const char *topic = NULL;
 
-        TEST_SAY("Creating and destroying %i kafka instances\n", NUM_ITER);
+        TEST_SAY("Creating and destroying %i kafka instances with "
+                 "produce.engine=%s\n",
+                 NUM_ITER, engine_name);
 
         /* Create, use and destroy NUM_ITER kafka instances. */
         for (i = 0; i < NUM_ITER; i++) {
@@ -56,6 +58,7 @@ int main_0001_multiobj(int argc, char **argv) {
                 test_timing_t t_full, t_destroy;
 
                 test_conf_init(&conf, &topic_conf, 30);
+                test_conf_set(conf, "produce.engine", engine_name);
 
                 if (!topic)
                         topic = test_mk_topic_name("0001", 0);
@@ -71,7 +74,7 @@ int main_0001_multiobj(int argc, char **argv) {
                             i, rd_kafka_err2str(rd_kafka_last_error()));
 
                 rd_snprintf(msg, sizeof(msg),
-                            "%s test message for iteration #%i", argv[0], i);
+                            "%s test message for iteration #%i", prog_name, i);
 
                 /* Produce a message */
                 rd_kafka_produce(rkt, partition, RD_KAFKA_MSG_F_COPY, msg,
@@ -97,6 +100,14 @@ int main_0001_multiobj(int argc, char **argv) {
                         /* Allow metadata propagation. */
                         rd_sleep(1);
         }
+}
+
+int main_0001_multiobj(int argc, char **argv) {
+        const char *engine_names[] = {"v1", "v2"};
+        size_t i;
+
+        for (i = 0; i < RD_ARRAYSIZE(engine_names); i++)
+                do_test_multiobj(engine_names[i], argv[0]);
 
         return 0;
 }

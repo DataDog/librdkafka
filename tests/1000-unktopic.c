@@ -78,7 +78,7 @@ static void dr_cb(rd_kafka_t *rk,
 }
 
 
-int main(int argc, char **argv) {
+static void do_test_unktopic(const char *engine_name, const char *prog_name) {
         char topic[64];
         int partition = 0;
         int r;
@@ -86,13 +86,16 @@ int main(int argc, char **argv) {
         rd_kafka_topic_t *rkt;
         rd_kafka_conf_t *conf;
         rd_kafka_topic_conf_t *topic_conf;
-        char errstr[512];
         char msg[128];
         int msgcnt = 10;
         int i;
 
+        TEST_SAY("Running unktopic test with produce.engine=%s\n", engine_name);
+        msgs_wait = 0;
+
         /* Generate unique topic name */
         test_conf_init(&conf, &topic_conf, 10);
+        test_conf_set(conf, "produce.engine", engine_name);
 
         rd_snprintf(topic, sizeof(topic), "rdkafkatest1_unk_%x%x", rand(),
                     rand());
@@ -116,7 +119,7 @@ int main(int argc, char **argv) {
         for (i = 0; i < msgcnt; i++) {
                 int *msgidp = malloc(sizeof(*msgidp));
                 *msgidp     = i;
-                rd_snprintf(msg, sizeof(msg), "%s test message #%i", argv[0],
+                rd_snprintf(msg, sizeof(msg), "%s test message #%i", prog_name,
                             i);
                 r = rd_kafka_produce(rkt, partition, RD_KAFKA_MSG_F_COPY, msg,
                                      strlen(msg), NULL, 0, msgidp);
@@ -159,6 +162,14 @@ int main(int argc, char **argv) {
         /* Destroy rdkafka instance */
         TEST_SAY("Destroying kafka instance %s\n", rd_kafka_name(rk));
         rd_kafka_destroy(rk);
+}
+
+int main(int argc, char **argv) {
+        const char *engine_names[] = {"v1", "v2"};
+        size_t i;
+
+        for (i = 0; i < RD_ARRAYSIZE(engine_names); i++)
+                do_test_unktopic(engine_names[i], argv[0]);
 
         return 0;
 }

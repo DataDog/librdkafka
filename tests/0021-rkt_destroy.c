@@ -42,19 +42,22 @@
 
 
 
-int main_0021_rkt_destroy(int argc, char **argv) {
+static void test_rkt_destroy_engine(const char *engine_name) {
         const char *topic = test_mk_topic_name(__FUNCTION__, 0);
         rd_kafka_t *rk;
         rd_kafka_topic_t *rkt;
+        rd_kafka_conf_t *pconf;
         const int msgcnt = 1000;
         uint64_t testid;
         int remains = 0;
 
-        test_conf_init(NULL, NULL, 10);
+        SUB_TEST("%s", engine_name);
 
+        test_conf_init(&pconf, NULL, 10);
+        test_conf_set(pconf, "produce.engine", engine_name);
 
         testid = test_id_generate();
-        rk     = test_create_producer();
+        rk     = test_create_handle(RD_KAFKA_PRODUCER, pconf);
         rkt    = test_create_producer_topic(rk, topic, NULL);
         test_wait_topic_exists(rk, topic, 5000);
 
@@ -67,6 +70,13 @@ int main_0021_rkt_destroy(int argc, char **argv) {
         test_wait_delivery(rk, &remains);
 
         rd_kafka_destroy(rk);
+
+        SUB_TEST_PASS();
+}
+
+int main_0021_rkt_destroy(int argc, char **argv) {
+        test_rkt_destroy_engine("v1");
+        test_rkt_destroy_engine("v2");
 
         return 0;
 }

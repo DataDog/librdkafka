@@ -43,8 +43,9 @@
  *  * Verify that there were no duplicate messages.
  */
 
-int main_0051_assign_adds(int argc, char **argv) {
+static void test_assign_adds_engine(const char *engine_name) {
         rd_kafka_t *rk;
+        rd_kafka_conf_t *pconf;
 #define TOPIC_CNT 3
         char *topic[TOPIC_CNT] = {
             rd_strdup(test_mk_topic_name("0051_assign_adds_1", 1)),
@@ -60,10 +61,15 @@ int main_0051_assign_adds(int argc, char **argv) {
         rd_kafka_topic_partition_list_t *tlist;
         rd_kafka_resp_err_t err;
 
+        SUB_TEST("%s", engine_name);
+
         msgcnt = (msgcnt / TOPIC_CNT) * TOPIC_CNT;
         testid = test_id_generate();
 
-        rk = test_create_producer();
+        test_conf_init(&pconf, NULL, 0);
+        test_conf_set(pconf, "produce.engine", engine_name);
+        rd_kafka_conf_set_dr_msg_cb(pconf, test_dr_msg_cb);
+        rk = test_create_handle(RD_KAFKA_PRODUCER, pconf);
         for (i = 0; i < TOPIC_CNT; i++) {
                 rd_kafka_topic_t *rkt;
 
@@ -121,6 +127,15 @@ int main_0051_assign_adds(int argc, char **argv) {
 
         for (i = 0; i < TOPIC_CNT; i++)
                 rd_free(topic[i]);
+
+        SUB_TEST_PASS();
+
+        return;
+}
+
+int main_0051_assign_adds(int argc, char **argv) {
+        test_assign_adds_engine("v1");
+        test_assign_adds_engine("v2");
 
         return 0;
 }

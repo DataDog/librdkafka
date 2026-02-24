@@ -71,7 +71,7 @@ static void dr_cb(rd_kafka_t *rk,
 }
 
 
-static void do_test_unkpart(void) {
+static void do_test_unkpart(const char *engine_name) {
         int partition = 99; /* non-existent */
         int r;
         rd_kafka_t *rk;
@@ -85,8 +85,10 @@ static void do_test_unkpart(void) {
         const struct rd_kafka_metadata *metadata;
 
         TEST_SAY(_C_BLU "%s\n" _C_CLR, __FUNCTION__);
+        msgs_wait = 0;
 
         test_conf_init(&conf, &topic_conf, 10);
+        test_conf_set(conf, "produce.engine", engine_name);
 
         /* Set delivery report callback */
         rd_kafka_conf_set_dr_cb(conf, dr_cb);
@@ -181,7 +183,7 @@ static void do_test_unkpart(void) {
  *        This test is a copy of confluent-kafka-python's
  *        test_Producer.test_basic_api() test that surfaced this issue.
  */
-static void do_test_unkpart_timeout_nobroker(void) {
+static void do_test_unkpart_timeout_nobroker(const char *engine_name) {
         const char *topic = test_mk_topic_name("0002_unkpart_tmout", 0);
         rd_kafka_conf_t *conf;
         rd_kafka_t *rk;
@@ -194,6 +196,7 @@ static void do_test_unkpart_timeout_nobroker(void) {
         test_conf_init(NULL, NULL, 10);
 
         conf = rd_kafka_conf_new();
+        test_conf_set(conf, "produce.engine", engine_name);
         test_conf_set(conf, "debug", "topic");
         test_conf_set(conf, "message.timeout.ms", "10");
         rd_kafka_conf_set_dr_msg_cb(conf, test_dr_msg_cb);
@@ -238,7 +241,15 @@ static void do_test_unkpart_timeout_nobroker(void) {
 
 
 int main_0002_unkpart(int argc, char **argv) {
-        do_test_unkpart();
-        do_test_unkpart_timeout_nobroker();
+        const char *engine_names[] = {"v1", "v2"};
+        size_t i;
+
+        for (i = 0; i < RD_ARRAYSIZE(engine_names); i++) {
+                TEST_SAY("Running unkpart tests with produce.engine=%s\n",
+                         engine_names[i]);
+                do_test_unkpart(engine_names[i]);
+                do_test_unkpart_timeout_nobroker(engine_names[i]);
+        }
+
         return 0;
 }

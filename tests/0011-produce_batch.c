@@ -78,7 +78,7 @@ static void dr_single_partition_cb(rd_kafka_t *rk,
 }
 
 /* Produce a batch of messages to a single partition. */
-static void test_single_partition(void) {
+static void test_single_partition(const char *engine_name) {
         int partition = 0;
         int r;
         rd_kafka_t *rk;
@@ -91,11 +91,12 @@ static void test_single_partition(void) {
         int i;
         rd_kafka_message_t *rkmessages;
         char client_id[271];
-        SUB_TEST_QUICK();
+        SUB_TEST_QUICK("%s", engine_name);
 
         msgid_next = 0;
 
         test_conf_init(&conf, &topic_conf, 20);
+        test_conf_set(conf, "produce.engine", engine_name);
 
         /* A long client id must not cause a segmentation fault
          * because of an erased segment when using flexver.
@@ -218,7 +219,7 @@ static void dr_partitioner_cb(rd_kafka_t *rk,
 }
 
 /* Produce a batch of messages using random (default) partitioner */
-static void test_partitioner(void) {
+static void test_partitioner(const char *engine_name) {
         int partition = RD_KAFKA_PARTITION_UA;
         int r;
         rd_kafka_t *rk;
@@ -231,9 +232,10 @@ static void test_partitioner(void) {
         int i;
         rd_kafka_message_t *rkmessages;
 
-        SUB_TEST_QUICK();
+        SUB_TEST_QUICK("%s", engine_name);
 
         test_conf_init(&conf, &topic_conf, 30);
+        test_conf_set(conf, "produce.engine", engine_name);
 
         /* Set delivery report callback */
         rd_kafka_conf_set_dr_cb(conf, dr_partitioner_cb);
@@ -338,7 +340,7 @@ static void dr_per_message_partition_cb(rd_kafka_t *rk,
 }
 
 /* Produce a batch of messages using with per message partition flag */
-static void test_per_message_partition_flag(void) {
+static void test_per_message_partition_flag(const char *engine_name) {
         int partition = 0;
         int r;
         rd_kafka_t *rk;
@@ -353,9 +355,10 @@ static void test_per_message_partition_flag(void) {
         rd_kafka_message_t *rkmessages;
         const char *topic_name;
 
-        SUB_TEST_QUICK();
+        SUB_TEST_QUICK("%s", engine_name);
 
         test_conf_init(&conf, &topic_conf, 30);
+        test_conf_set(conf, "produce.engine", engine_name);
 
         /* Set delivery report callback */
         rd_kafka_conf_set_dr_msg_cb(conf, dr_per_message_partition_cb);
@@ -479,7 +482,8 @@ dr_partitioner_wo_per_message_flag_cb(rd_kafka_t *rk,
  * @brief Produce a batch of messages using partitioner
  *        without per message partition flag
  */
-static void test_message_partitioner_wo_per_message_flag(void) {
+static void
+test_message_partitioner_wo_per_message_flag(const char *engine_name) {
         int partition = RD_KAFKA_PARTITION_UA;
         int r;
         rd_kafka_t *rk;
@@ -492,9 +496,12 @@ static void test_message_partitioner_wo_per_message_flag(void) {
         int i;
         rd_kafka_message_t *rkmessages;
 
-        SUB_TEST_QUICK();
+        SUB_TEST_QUICK("%s", engine_name);
+
+        msg_partition_wo_flag_success = 0;
 
         test_conf_init(&conf, &topic_conf, 30);
+        test_conf_set(conf, "produce.engine", engine_name);
 
         /* Set delivery report callback */
         rd_kafka_conf_set_dr_msg_cb(conf,
@@ -610,7 +617,9 @@ dr_message_single_partition_record_fail(rd_kafka_t *rk,
  *                       fail with _INVALID_DIFFERENT_RECORD
  *        - variation 2: one message per batch, other messages succeed
  */
-static void test_message_single_partition_record_fail(int variation) {
+static void
+test_message_single_partition_record_fail(const char *engine_name,
+                                          int variation) {
         int partition = 0;
         int r;
         rd_kafka_t *rk;
@@ -625,8 +634,9 @@ static void test_message_single_partition_record_fail(int variation) {
         const char *topic_name            = test_mk_topic_name(__FUNCTION__, 1);
         invalid_record_fail_cnt           = 0;
         invalid_different_record_fail_cnt = 0;
+        valid_message_cnt                 = 0;
 
-        SUB_TEST_QUICK();
+        SUB_TEST_QUICK("%s variation=%d", engine_name, variation);
 
         const char *confs_set_append[] = {"cleanup.policy", "APPEND",
                                           "compact"};
@@ -635,6 +645,7 @@ static void test_message_single_partition_record_fail(int variation) {
                                                "compact"};
 
         test_conf_init(&conf, &topic_conf, 20);
+        test_conf_set(conf, "produce.engine", engine_name);
         if (variation == 1)
                 test_conf_set(conf, "batch.size", "1");
 
@@ -739,15 +750,20 @@ static void test_message_single_partition_record_fail(int variation) {
         SUB_TEST_PASS();
 }
 
+static void test_produce_batch_engine(const char *engine_name) {
+        test_message_partitioner_wo_per_message_flag(engine_name);
+        test_single_partition(engine_name);
+        test_partitioner(engine_name);
+        if (test_can_create_topics(1))
+                test_per_message_partition_flag(engine_name);
+
+        test_message_single_partition_record_fail(engine_name, 0);
+        test_message_single_partition_record_fail(engine_name, 1);
+}
+
 
 int main_0011_produce_batch(int argc, char **argv) {
-        test_message_partitioner_wo_per_message_flag();
-        test_single_partition();
-        test_partitioner();
-        if (test_can_create_topics(1))
-                test_per_message_partition_flag();
-
-        test_message_single_partition_record_fail(0);
-        test_message_single_partition_record_fail(1);
+        test_produce_batch_engine("v1");
+        test_produce_batch_engine("v2");
         return 0;
 }

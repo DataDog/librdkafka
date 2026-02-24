@@ -104,15 +104,18 @@ static void rebalance_cb(rd_kafka_t *rk,
         }
 }
 
-int main_0029_assign_offset(int argc, char **argv) {
+static void test_assign_offset_engine(const char *engine_name) {
         const char *topic = test_mk_topic_name(__FUNCTION__, 1);
         rd_kafka_t *rk;
         rd_kafka_topic_t *rkt;
+        rd_kafka_conf_t *pconf;
         rd_kafka_topic_partition_list_t *parts;
         uint64_t testid;
         int i;
         test_timing_t t_simple, t_hl;
         test_msgver_t mv;
+
+        SUB_TEST("%s", engine_name);
 
         test_conf_init(NULL, NULL, 20 + (test_session_timeout_ms * 3 / 1000));
 
@@ -120,7 +123,10 @@ int main_0029_assign_offset(int argc, char **argv) {
          * nice seekable 0..X offset one each partition. */
         /* Produce messages */
         testid = test_id_generate();
-        rk     = test_create_producer();
+        test_conf_init(&pconf, NULL, 0);
+        test_conf_set(pconf, "produce.engine", engine_name);
+        rd_kafka_conf_set_dr_msg_cb(pconf, test_dr_msg_cb);
+        rk     = test_create_handle(RD_KAFKA_PRODUCER, pconf);
         rkt    = test_create_producer_topic(rk, topic, NULL);
         test_wait_topic_exists(rk, topic, 5000);
 
@@ -197,6 +203,13 @@ int main_0029_assign_offset(int argc, char **argv) {
                 rd_kafka_destroy(rk);
                 TIMING_STOP(&t_hl);
         }
+
+        SUB_TEST_PASS();
+}
+
+int main_0029_assign_offset(int argc, char **argv) {
+        test_assign_offset_engine("v1");
+        test_assign_offset_engine("v2");
 
         return 0;
 }

@@ -34,7 +34,7 @@
  * Verify that flush() overrides the linger.ms time.
  *
  */
-void do_test_flush_overrides_linger_ms_time() {
+void do_test_flush_overrides_linger_ms_time(const char *engine_name) {
         rd_kafka_t *rk;
         rd_kafka_conf_t *conf;
         const char *topic = test_mk_topic_name("0125_immediate_flush", 1);
@@ -44,6 +44,7 @@ void do_test_flush_overrides_linger_ms_time() {
 
         test_conf_init(&conf, NULL, 30);
 
+        test_conf_set(conf, "produce.engine", engine_name);
         test_conf_set(conf, "linger.ms", "10000");
         rd_kafka_conf_set_dr_msg_cb(conf, test_dr_msg_cb);
         rk = test_create_handle(RD_KAFKA_PRODUCER, conf);
@@ -86,7 +87,7 @@ void do_test_flush_overrides_linger_ms_time() {
  * brokers in the bootstrap.servers list for this test case to work correctly
  *
  */
-void do_test_first_flush_immediate() {
+void do_test_first_flush_immediate(const char *engine_name) {
         rd_kafka_mock_cluster_t *mock_cluster;
         rd_kafka_t *produce_rk;
         const char *brokers;
@@ -108,6 +109,7 @@ void do_test_first_flush_immediate() {
         test_conf_init(&conf, NULL, 30);
         rd_kafka_conf_set_dr_msg_cb(conf, test_dr_msg_cb);
         test_conf_set(conf, "bootstrap.servers", bootstrap_server);
+        test_conf_set(conf, "produce.engine", engine_name);
         free(bootstrap_server);
 
         rd_kafka_mock_topic_create(mock_cluster, topic, partition_cnt, 1);
@@ -128,17 +130,31 @@ void do_test_first_flush_immediate() {
 }
 
 int main_0125_immediate_flush(int argc, char **argv) {
+        const char *engine_names[] = {"v1", "v2"};
+        size_t i;
 
-        do_test_flush_overrides_linger_ms_time();
+        for (i = 0; i < RD_ARRAYSIZE(engine_names); i++) {
+                TEST_SAY(
+                    "Running immediate_flush with produce.engine=%s (broker)\n",
+                    engine_names[i]);
+                do_test_flush_overrides_linger_ms_time(engine_names[i]);
+        }
 
         return 0;
 }
 
 int main_0125_immediate_flush_mock(int argc, char **argv) {
+        const char *engine_names[] = {"v1", "v2"};
+        size_t i;
 
         TEST_SKIP_MOCK_CLUSTER(0);
 
-        do_test_first_flush_immediate();
+        for (i = 0; i < RD_ARRAYSIZE(engine_names); i++) {
+                TEST_SAY(
+                    "Running immediate_flush with produce.engine=%s (mock)\n",
+                    engine_names[i]);
+                do_test_first_flush_immediate(engine_names[i]);
+        }
 
         return 0;
 }

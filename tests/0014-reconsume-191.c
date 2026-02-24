@@ -62,6 +62,7 @@ static void dr_cb(rd_kafka_t *rk,
  * Produces 'msgcnt' messages split over 'partition_cnt' partitions.
  */
 static void produce_messages(uint64_t testid,
+                             const char *engine_name,
                              const char *topic,
                              int partition_cnt,
                              int msg_base,
@@ -77,6 +78,7 @@ static void produce_messages(uint64_t testid,
         int msgid = msg_base;
 
         test_conf_init(&conf, &topic_conf, 20);
+        test_conf_set(conf, "produce.engine", engine_name);
 
         rd_kafka_conf_set_dr_cb(conf, dr_cb);
 
@@ -435,13 +437,16 @@ static void consume_messages_callback_multi(const char *desc,
 
 
 
-static void test_produce_consume(const char *offset_store_method) {
+static void test_produce_consume(const char *engine_name,
+                                 const char *offset_store_method) {
         int msgcnt        = 100;
         int partition_cnt = 1;
         int i;
         uint64_t testid;
         int msg_base = 0;
         const char *topic;
+
+        SUB_TEST("%s offset.store.method=%s", engine_name, offset_store_method);
 
         /* Generate a testid so we can differentiate messages
          * from other tests */
@@ -455,7 +460,8 @@ static void test_produce_consume(const char *offset_store_method) {
                  topic, testid, offset_store_method);
 
         /* Produce messages */
-        produce_messages(testid, topic, partition_cnt, msg_base, msgcnt);
+        produce_messages(testid, engine_name, topic, partition_cnt, msg_base,
+                         msgcnt);
 
         /* 100% of messages */
         verify_consumed_msg_reset(msgcnt);
@@ -499,14 +505,18 @@ static void test_produce_consume(const char *offset_store_method) {
 
         verify_consumed_msg_reset(0);
 
-        return;
+        SUB_TEST_PASS();
 }
 
 
 
 int main_0014_reconsume_191(int argc, char **argv) {
         if (test_broker_version >= TEST_BRKVER(0, 8, 2, 0))
-                test_produce_consume("broker");
-        test_produce_consume("file");
+                test_produce_consume("v1", "broker");
+        test_produce_consume("v1", "file");
+
+        if (test_broker_version >= TEST_BRKVER(0, 8, 2, 0))
+                test_produce_consume("v2", "broker");
+        test_produce_consume("v2", "file");
         return 0;
 }

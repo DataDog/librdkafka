@@ -171,7 +171,8 @@ static void set_delay(int after, int delay) {
  * @brief Test that Metadata requests are retried properly when
  *        timing out due to high broker rtt.
  */
-static void do_test_low_socket_timeout(const char *topic) {
+static void
+do_test_low_socket_timeout(const char *engine_name, const char *topic) {
         rd_kafka_t *rk;
         rd_kafka_conf_t *conf;
         rd_kafka_topic_t *rkt;
@@ -179,12 +180,14 @@ static void do_test_low_socket_timeout(const char *topic) {
         const struct rd_kafka_metadata *md;
         int res;
 
+        memset(&ctrl, 0, sizeof(ctrl));
         mtx_init(&ctrl.lock, mtx_plain);
         cnd_init(&ctrl.cnd);
 
         TEST_SAY("Test Metadata request retries on timeout\n");
 
         test_conf_init(&conf, NULL, 60);
+        test_conf_set(conf, "produce.engine", engine_name);
         test_conf_set(conf, "socket.timeout.ms", "1000");
         test_conf_set(conf, "socket.max.fails", "12345");
         test_conf_set(conf, "retry.backoff.ms", "5000");
@@ -192,6 +195,7 @@ static void do_test_low_socket_timeout(const char *topic) {
         /* Avoid api version requests (with their own timeout) to get in
          * the way of our test */
         test_conf_set(conf, "api.version.request", "false");
+        rd_kafka_conf_set_dr_msg_cb(conf, test_dr_msg_cb);
         test_socket_enable(conf);
         test_curr->connect_cb  = connect_cb;
         test_curr->is_fatal_cb = is_fatal_cb;
@@ -251,10 +255,12 @@ static void do_test_low_socket_timeout(const char *topic) {
 
         cnd_destroy(&ctrl.cnd);
         mtx_destroy(&ctrl.lock);
+        test_curr->connect_cb  = NULL;
+        test_curr->is_fatal_cb = NULL;
 }
 
 int main_0075_retry(int argc, char **argv) {
-        const char *topic = test_mk_topic_name("0075_retry", 1);
+        const char *topic;
 
         if (test_needs_auth()) {
                 /* When authentication is involved there's the need
@@ -264,7 +270,11 @@ int main_0075_retry(int argc, char **argv) {
                 return 0;
         }
 
-        do_test_low_socket_timeout(topic);
+        topic = test_mk_topic_name("0075_retry", 1);
+        do_test_low_socket_timeout("v1", topic);
+
+        topic = test_mk_topic_name("0075_retry", 1);
+        do_test_low_socket_timeout("v2", topic);
 
         return 0;
 }

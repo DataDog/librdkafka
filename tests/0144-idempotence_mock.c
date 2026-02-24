@@ -40,6 +40,7 @@
 
 
 static int allowed_error;
+static const char *produce_engine_name = "v1";
 
 /**
  * @brief Decide what error_cb's will cause the test to fail.
@@ -140,6 +141,7 @@ create_idempo_producer(rd_kafka_mock_cluster_t **mclusterp,
 
         test_conf_init(&conf, NULL, 60);
 
+        test_conf_set(conf, "produce.engine", produce_engine_name);
         test_conf_set(conf, "enable.idempotence", "true");
         /* When mock brokers are set to down state they're still binding
          * the port, just not listening to it, which makes connection attempts
@@ -359,15 +361,25 @@ static void do_test_idempo_success_after_possibly_persisted(void) {
 }
 
 int main_0144_idempotence_mock(int argc, char **argv) {
+        const char *engine_names[] = {"v1", "v2"};
+        size_t j;
+
         TEST_SKIP_MOCK_CLUSTER(0);
 
-        int i;
-        for (i = 1; i <= 5; i++)
-                do_test_idempo_possibly_persisted_not_causing_fatal_error(i);
+        for (j = 0; j < RD_ARRAYSIZE(engine_names); j++) {
+                int i;
+                produce_engine_name = engine_names[j];
+                TEST_SAY("Running idempotence_mock with produce.engine=%s\n",
+                         produce_engine_name);
 
-        do_test_idempo_duplicate_sequence_number_after_possibly_persisted();
+                for (i = 1; i <= 5; i++)
+                        do_test_idempo_possibly_persisted_not_causing_fatal_error(
+                            i);
 
-        do_test_idempo_success_after_possibly_persisted();
+                do_test_idempo_duplicate_sequence_number_after_possibly_persisted();
+
+                do_test_idempo_success_after_possibly_persisted();
+        }
 
         return 0;
 }

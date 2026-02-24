@@ -42,6 +42,7 @@
 static mtx_t last_event_lock;
 static cnd_t last_event_cnd;
 static rd_kafka_event_t *last_event = NULL;
+static const char *produce_engine_name = "v1";
 
 /**
  * @brief The background event callback is called automatically
@@ -2901,6 +2902,8 @@ static rd_kafka_t *create_admin_client(rd_kafka_type_t cltype) {
                 test_conf_set(conf, "group.protocol",
                               test_consumer_group_protocol());
         }
+        if (cltype == RD_KAFKA_PRODUCER)
+                test_conf_set(conf, "produce.engine", produce_engine_name);
         /* For use with the background queue */
         rd_kafka_conf_set_background_event_cb(conf, background_event_cb);
 
@@ -3067,7 +3070,13 @@ static void do_test_apis(rd_kafka_type_t cltype) {
 
 
 int main_0080_admin_ut(int argc, char **argv) {
-        do_test_apis(RD_KAFKA_PRODUCER);
+        const char *engine_names[] = {"v1", "v2"};
+        size_t i;
+
+        for (i = 0; i < RD_ARRAYSIZE(engine_names); i++) {
+                produce_engine_name = engine_names[i];
+                do_test_apis(RD_KAFKA_PRODUCER);
+        }
         do_test_apis(RD_KAFKA_CONSUMER);
         return 0;
 }

@@ -30,6 +30,7 @@
 
 static rd_atomic32_t do_test_remove_then_add_received_terminate;
 static rd_atomic32_t verification_complete;
+static const char *produce_engine_name = "v1";
 
 /** @brief Verify that \p expected_broker_ids
  *         and \p actual_broker_ids correspond in
@@ -442,6 +443,7 @@ do_test_down_then_up_no_rebootstrap_loop_edit_configuration_cb(
         log_interceptor = test_conf_set_log_interceptor(
             conf, do_test_down_then_up_no_rebootstrap_loop_log_cb,
             debug_contexts);
+        test_conf_set(conf, "produce.engine", produce_engine_name);
         return RD_KAFKA_PRODUCER;
 }
 
@@ -471,7 +473,7 @@ do_test_down_then_up_no_rebootstrap_loop_await_after_action_cb(int action) {
  *        It shouldn't cause a loop of re-bootstrap sequences.
  */
 static void do_test_down_then_up_no_rebootstrap_loop(void) {
-        SUB_TEST_QUICK();
+        SUB_TEST_QUICK("produce.engine=%s", produce_engine_name);
         rd_atomic32_init(
             &do_test_down_then_up_no_rebootstrap_loop_rebootstrap_sequence_cnt,
             0);
@@ -544,6 +546,8 @@ static void do_test_add_same_broker_id(void) {
 }
 
 int main_0151_purge_brokers_mock(int argc, char **argv) {
+        const char *engine_names[] = {"v1", "v2"};
+        size_t i;
 
         if (test_needs_auth()) {
                 TEST_SKIP("Mock cluster does not support SSL/SASL\n");
@@ -558,7 +562,10 @@ int main_0151_purge_brokers_mock(int argc, char **argv) {
 
         do_test_remove_then_add();
 
-        do_test_down_then_up_no_rebootstrap_loop();
+        for (i = 0; i < RD_ARRAYSIZE(engine_names); i++) {
+                produce_engine_name = engine_names[i];
+                do_test_down_then_up_no_rebootstrap_loop();
+        }
 
         return 0;
 }

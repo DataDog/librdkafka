@@ -283,13 +283,17 @@ static rd_kafka_resp_err_t on_new(rd_kafka_t *rk,
 }
 
 
-static void do_produce(const char *topic, int msgcnt) {
+static void
+do_produce(const char *engine_name, const char *topic, int msgcnt) {
         rd_kafka_t *rk;
         rd_kafka_conf_t *conf;
         int i;
         rd_kafka_resp_err_t err;
 
+        exp_msgid = 0;
+
         test_conf_init(&conf, NULL, 0);
+        test_conf_set(conf, "produce.engine", engine_name);
         test_conf_set(conf, "acks", "all");
         rd_kafka_conf_set_dr_msg_cb(conf, dr_msg_cb);
 
@@ -371,10 +375,15 @@ static void do_consume(const char *topic, int msgcnt) {
 
 
 int main_0073_headers(int argc, char **argv) {
-        const char *topic = test_mk_topic_name(__FUNCTION__ + 5, 1);
+        const char *topic;
         const int msgcnt  = 10;
 
-        do_produce(topic, msgcnt);
+        topic = test_mk_topic_name(__FUNCTION__ + 5, 1);
+        do_produce("v1", topic, msgcnt);
+        do_consume(topic, msgcnt);
+
+        topic = test_mk_topic_name(__FUNCTION__ + 5, 1);
+        do_produce("v2", topic, msgcnt);
         do_consume(topic, msgcnt);
 
         return 0;

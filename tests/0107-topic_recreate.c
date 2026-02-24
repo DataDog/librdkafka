@@ -45,6 +45,7 @@
  */
 static mtx_t value_mtx;
 static char *value;
+static const char *producer_engine_name = "v1";
 
 static const int msg_rate = 10; /**< Messages produced per second */
 
@@ -65,13 +66,20 @@ is_error_fatal(rd_kafka_t *rk, rd_kafka_resp_err_t err, const char *reason) {
  */
 static int run_producer(void *arg) {
         const char *topic    = arg;
-        rd_kafka_t *producer = test_create_producer();
+        rd_kafka_conf_t *conf;
+        rd_kafka_t *producer;
         int ret              = 0;
 
         test_curr = this_test;
 
+        test_conf_init(&conf, NULL, 0);
+        test_conf_set(conf, "produce.engine", producer_engine_name);
+        rd_kafka_conf_set_dr_msg_cb(conf, test_dr_msg_cb);
+        producer = test_create_handle(RD_KAFKA_PRODUCER, conf);
+
         /* Don't check message status */
         test_curr->exp_dr_status = (rd_kafka_msg_status_t)-1;
+        test_curr->ignore_dr_err = rd_false;
 
         while (1) {
                 rd_kafka_resp_err_t err;
@@ -243,6 +251,9 @@ static void do_test_create_delete_create(int part_cnt_1, int part_cnt_2) {
 
 
 int main_0107_topic_recreate(int argc, char **argv) {
+        const char *engine_names[] = {"v1", "v2"};
+        size_t i;
+
         this_test = test_curr; /* Need to expose current test struct (in TLS)
                                 * to producer thread. */
 
@@ -252,8 +263,13 @@ int main_0107_topic_recreate(int argc, char **argv) {
 
         test_conf_init(NULL, NULL, 60);
 
-        do_test_create_delete_create(10, 3);
-        do_test_create_delete_create(3, 6);
+        for (i = 0; i < RD_ARRAYSIZE(engine_names); i++) {
+                TEST_SAY("Running topic_recreate with produce.engine=%s\n",
+                         engine_names[i]);
+                producer_engine_name = engine_names[i];
+                do_test_create_delete_create(10, 3);
+                do_test_create_delete_create(3, 6);
+        }
 
         return 0;
 }

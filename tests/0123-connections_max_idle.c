@@ -54,14 +54,16 @@ log_cb(const rd_kafka_t *rk, int level, const char *fac, const char *buf) {
         rd_atomic32_add(log_cntp, 1);
 }
 
-static void do_test_idle(rd_bool_t set_idle) {
+static void do_test_idle(const char *engine_name, rd_bool_t set_idle) {
         rd_kafka_t *rk;
         rd_kafka_conf_t *conf;
         rd_atomic32_t log_cnt;
 
-        SUB_TEST_QUICK("set_idle = %s", set_idle ? "yes" : "no");
+        SUB_TEST_QUICK("produce.engine=%s, set_idle=%s", engine_name,
+                       set_idle ? "yes" : "no");
 
         test_conf_init(&conf, NULL, 10);
+        test_conf_set(conf, "produce.engine", engine_name);
         test_conf_set(conf, "debug", "broker");
         test_conf_set(conf, "connections.max.idle.ms", set_idle ? "5000" : "0");
         rd_atomic32_init(&log_cnt, 0);
@@ -90,9 +92,13 @@ static void do_test_idle(rd_bool_t set_idle) {
 
 
 int main_0123_connections_max_idle(int argc, char **argv) {
+        const char *engine_names[] = {"v1", "v2"};
+        size_t i;
 
-        do_test_idle(rd_true);
-        do_test_idle(rd_false);
+        for (i = 0; i < RD_ARRAYSIZE(engine_names); i++) {
+                do_test_idle(engine_names[i], rd_true);
+                do_test_idle(engine_names[i], rd_false);
+        }
 
         return 0;
 }

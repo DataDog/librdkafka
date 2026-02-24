@@ -38,11 +38,12 @@
  */
 
 
-int main_0017_compression(int argc, char **argv) {
+static void test_compression_engine(const char *engine_name) {
         rd_kafka_t *rk_p, *rk_c;
         const int msg_cnt = 1000;
         int msg_base      = 0;
         uint64_t testid;
+        rd_kafka_conf_t *pconf;
 #define CODEC_CNT 5
         const char *codecs[CODEC_CNT + 1] = {"none",
 #if WITH_ZLIB
@@ -60,10 +61,15 @@ int main_0017_compression(int argc, char **argv) {
         int i;
         int crc;
 
+        SUB_TEST_QUICK("%s", engine_name);
+
         testid = test_id_generate();
 
         /* Produce messages */
-        rk_p = test_create_producer();
+        test_conf_init(&pconf, NULL, 0);
+        test_conf_set(pconf, "produce.engine", engine_name);
+        rd_kafka_conf_set_dr_msg_cb(pconf, test_dr_msg_cb);
+        rk_p = test_create_handle(RD_KAFKA_PRODUCER, pconf);
         for (i = 0; codecs[i] != NULL; i++) {
                 rd_kafka_topic_t *rkt_p;
 
@@ -135,6 +141,13 @@ int main_0017_compression(int argc, char **argv) {
         for (i = 0; codecs[i] != NULL; i++)
                 rd_free(topics[i]);
 
+
+        SUB_TEST_PASS();
+}
+
+int main_0017_compression(int argc, char **argv) {
+        test_compression_engine("v1");
+        test_compression_engine("v2");
 
         return 0;
 }

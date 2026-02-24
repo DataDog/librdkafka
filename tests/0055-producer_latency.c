@@ -159,7 +159,10 @@ static void measure_rtt(struct latconf *latconf, rd_kafka_t *rk) {
 
 
 
-static void test_producer_latency(const char *topic, struct latconf *latconf) {
+static void
+test_producer_latency(const char *topic,
+                      const char *engine_name,
+                      struct latconf *latconf) {
         rd_kafka_t *rk;
         rd_kafka_conf_t *conf;
         rd_kafka_resp_err_t err;
@@ -167,9 +170,15 @@ static void test_producer_latency(const char *topic, struct latconf *latconf) {
         size_t sz;
         rd_bool_t with_transactions = rd_false;
 
-        SUB_TEST("%s (linger.ms=%d)", latconf->name);
+        SUB_TEST("%s (%s)", latconf->name, engine_name);
 
         test_conf_init(&conf, NULL, 60);
+
+        latconf->passed  = rd_false;
+        latconf->sum     = 0;
+        latconf->cnt     = 0;
+        latconf->wakeups = 0;
+        memset(latconf->latency, 0, sizeof(latconf->latency));
 
         rd_kafka_conf_set_dr_msg_cb(conf, dr_msg_cb);
         rd_kafka_conf_set_opaque(conf, latconf);
@@ -177,6 +186,7 @@ static void test_producer_latency(const char *topic, struct latconf *latconf) {
         rd_kafka_conf_set_stats_cb(conf, NULL);
         rd_kafka_conf_set_stats_cb_typed(conf, stats_cb);
         test_conf_set(conf, "statistics.interval.ms", "100");
+        test_conf_set(conf, "produce.engine", engine_name);
         tot_wakeups = 0;
 
         for (i = 0; latconf->conf[i]; i += 2) {
@@ -291,6 +301,7 @@ static float find_max(const struct latconf *latconf) {
 
 int main_0055_producer_latency(int argc, char **argv) {
         const char *topic = test_mk_topic_name("0055_producer_latency", 1);
+        const char *engine_names[] = {"v1", "v2", NULL};
         struct latconf latconfs[] = {
             {"standard settings", {NULL}, 5, 5}, /* default is now 5ms */
             {"low linger.ms (0ms)", {"linger.ms", "0", NULL}, 0, 0},
@@ -321,6 +332,7 @@ int main_0055_producer_latency(int argc, char **argv) {
              50 + 35 /* extra time for AddPartitions..*/},
             {NULL}};
         struct latconf *latconf;
+        const char **engine_name;
 
         if (test_on_ci) {
                 TEST_SKIP("Latency measurements not reliable on CI\n");
@@ -330,21 +342,25 @@ int main_0055_producer_latency(int argc, char **argv) {
         /* Create topic without replicas to keep broker-side latency down */
         test_create_topic_wait_exists(NULL, topic, 1, 1, 5000);
 
-        for (latconf = latconfs; latconf->name; latconf++)
-                test_producer_latency(topic, latconf);
+        for (engine_name = engine_names; *engine_name; engine_name++) {
+                for (latconf = latconfs; latconf->name; latconf++)
+                        test_producer_latency(topic, *engine_name, latconf);
 
-        TEST_SAY(_C_YEL "Latency tests summary:\n" _C_CLR);
-        TEST_SAY("%-40s %9s  %6s..%-6s  %7s  %9s %9s %9s %8s\n", "Name",
-                 "linger.ms", "MinExp", "MaxExp", "RTT", "Min", "Average",
-                 "Max", "Wakeups");
+                TEST_SAY(_C_YEL "Latency tests summary (%s):\n" _C_CLR,
+                         *engine_name);
+                TEST_SAY("%-40s %9s  %6s..%-6s  %7s  %9s %9s %9s %8s\n", "Name",
+                         "linger.ms", "MinExp", "MaxExp", "RTT", "Min",
+                         "Average", "Max", "Wakeups");
 
-        for (latconf = latconfs; latconf->name; latconf++)
-                TEST_SAY("%-40s %9s  %6d..%-6d  %7g  %9g %9g %9g %8d%s\n",
-                         latconf->name, latconf->linger_ms_conf, latconf->min,
-                         latconf->max, latconf->rtt, find_min(latconf),
-                         latconf->sum / latconf->cnt, find_max(latconf),
-                         latconf->wakeups,
-                         latconf->passed ? "" : _C_RED "  FAILED");
+                for (latconf = latconfs; latconf->name; latconf++)
+                        TEST_SAY(
+                            "%-40s %9s  %6d..%-6d  %7g  %9g %9g %9g %8d%s\n",
+                            latconf->name, latconf->linger_ms_conf,
+                            latconf->min, latconf->max, latconf->rtt,
+                            find_min(latconf), latconf->sum / latconf->cnt,
+                            find_max(latconf), latconf->wakeups,
+                            latconf->passed ? "" : _C_RED "  FAILED");
+        }
 
 
         TEST_LATER_CHECK("");
@@ -377,7 +393,8 @@ static void dr_msg_cb_first_message(rd_kafka_t *rk,
  * 2: rd_kafka_produceva
  * 3: rd_kafka_produce_batch
  */
-static void test_producer_latency_first_message(int case_number) {
+static void
+test_producer_latency_first_message(const char *engine_name, int case_number) {
         rd_kafka_t *rk;
         rd_kafka_conf_t *conf;
         const char *topic;
@@ -403,10 +420,11 @@ static void test_producer_latency_first_message(int case_number) {
                 case_name = "rd_kafka_produce_batch";
         }
 
-        SUB_TEST("Starting test for %s", case_name);
+        SUB_TEST("Starting test for %s (%s)", case_name, engine_name);
         mcluster = test_mock_cluster_new(1, &bootstrap_servers);
 
         test_conf_init(&conf, NULL, 60);
+        test_conf_set(conf, "produce.engine", engine_name);
         test_conf_set(conf, "bootstrap.servers", bootstrap_servers);
         test_conf_set(conf, "linger.ms", "0");
         rd_kafka_conf_set_dr_msg_cb(conf, dr_msg_cb_first_message);
@@ -513,9 +531,14 @@ static void test_producer_latency_first_message(int case_number) {
 }
 
 int main_0055_producer_latency_mock(int argc, char **argv) {
+        const char *engine_names[] = {"v1", "v2", NULL};
+        const char **engine_name;
         int case_number;
-        for (case_number = 0; case_number < 4; case_number++) {
-                test_producer_latency_first_message(case_number);
+        for (engine_name = engine_names; *engine_name; engine_name++) {
+                for (case_number = 0; case_number < 4; case_number++) {
+                        test_producer_latency_first_message(*engine_name,
+                                                            case_number);
+                }
         }
 
         return 0;

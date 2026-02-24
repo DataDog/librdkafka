@@ -146,11 +146,12 @@ list_groups(rd_kafka_t *rk, char **groups, int group_cnt, const char *desc) {
 
 
 
-static void do_test_list_groups(void) {
+static void do_test_list_groups(const char *engine_name) {
         const char *topic = test_mk_topic_name(__FUNCTION__, 1);
 #define _CONS_CNT 2
         char *groups[_CONS_CNT];
         rd_kafka_t *rk, *rk_c[_CONS_CNT];
+        rd_kafka_conf_t *pconf;
         rd_kafka_topic_partition_list_t *topics;
         rd_kafka_resp_err_t err;
         test_timing_t t_grps;
@@ -159,10 +160,12 @@ static void do_test_list_groups(void) {
         rd_kafka_topic_t *rkt;
         const struct rd_kafka_group_list *grplist;
 
-        SUB_TEST();
+        SUB_TEST("%s", engine_name);
 
         /* Handle for group listings */
-        rk = test_create_producer();
+        test_conf_init(&pconf, NULL, 0);
+        test_conf_set(pconf, "produce.engine", engine_name);
+        rk = test_create_handle(RD_KAFKA_PRODUCER, pconf);
 
         /* Produce messages so that topic is auto created */
         rkt = test_create_topic_object(rk, topic, NULL);
@@ -283,7 +286,8 @@ static void do_test_list_groups_hang(void) {
 
 
 int main_0019_list_groups(int argc, char **argv) {
-        do_test_list_groups();
+        do_test_list_groups("v1");
+        do_test_list_groups("v2");
         do_test_list_groups_hang();
         return 0;
 }

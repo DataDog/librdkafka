@@ -39,7 +39,7 @@
  */
 
 
-static void do_test_consume_batch(void) {
+static void do_test_consume_batch(const char *engine_name) {
 #define topic_cnt 2
         char *topics[topic_cnt];
         const int partition_cnt = 2;
@@ -53,7 +53,7 @@ static void do_test_consume_batch(void) {
         int batch_cnt = 0;
         int remains;
 
-        SUB_TEST();
+        SUB_TEST("%s", engine_name);
 
         testid = test_id_generate();
 
@@ -61,9 +61,10 @@ static void do_test_consume_batch(void) {
         for (i = 0; i < topic_cnt; i++) {
                 topics[i] = rd_strdup(test_mk_topic_name(__FUNCTION__, 1));
                 for (p = 0; p < partition_cnt; p++)
-                        test_produce_msgs_easy(topics[i], testid, p,
-                                               msgcnt / topic_cnt /
-                                                   partition_cnt);
+                        test_produce_msgs_easy_v(
+                            topics[i], testid, p, 0,
+                            msgcnt / topic_cnt / partition_cnt, 0,
+                            "produce.engine", engine_name, NULL);
         }
 
 
@@ -258,7 +259,8 @@ static void do_test_consume_batch_non_existent_topic(void) {
 
 
 int main_0022_consume_batch(int argc, char **argv) {
-        do_test_consume_batch();
+        do_test_consume_batch("v1");
+        do_test_consume_batch("v2");
         /* FIXME: this must be implemented in KIP-848 for compatibility. */
         if (test_consumer_group_protocol_classic()) {
                 do_test_consume_batch_non_existent_topic();

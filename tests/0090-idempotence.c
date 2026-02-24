@@ -96,6 +96,7 @@ static rd_kafka_resp_err_t handle_ProduceResponse(rd_kafka_t *rk,
  *                               fail with an emulated network timeout.
  */
 static void do_test_implicit_ack(const char *what,
+                                 const char *engine_name,
                                  int batch_cnt,
                                  int initial_fail_batch_cnt) {
         rd_kafka_t *rk;
@@ -107,7 +108,8 @@ static void do_test_implicit_ack(const char *what,
         rd_kafka_topic_t *rkt;
         test_msgver_t mv;
 
-        TEST_SAY(_C_MAG "[ Test implicit ack: %s ]\n", what);
+        TEST_SAY(_C_MAG "[ Test implicit ack: %s, produce.engine=%s ]\n" _C_CLR,
+                 what, engine_name);
 
         rd_atomic32_init(&state.produce_cnt, 0);
         state.batch_cnt              = batch_cnt;
@@ -117,6 +119,7 @@ static void do_test_implicit_ack(const char *what,
 
         test_conf_init(&conf, NULL, 60);
         rd_kafka_conf_set_dr_msg_cb(conf, test_dr_msg_cb);
+        test_conf_set(conf, "produce.engine", engine_name);
         test_conf_set(conf, "enable.idempotence", "true");
         test_conf_set(conf, "batch.num.messages", "10");
         test_conf_set(conf, "linger.ms", "500");
@@ -150,7 +153,9 @@ static void do_test_implicit_ack(const char *what,
         test_msgver_verify("verify", &mv, TEST_MSGVER_ALL, 0, msgcnt);
         test_msgver_clear(&mv);
 
-        TEST_SAY(_C_GRN "[ Test implicit ack: %s : PASS ]\n", what);
+        TEST_SAY(_C_GRN "[ Test implicit ack: %s, produce.engine=%s: PASS ]\n"
+                        _C_CLR,
+                 what, engine_name);
 }
 
 
@@ -160,12 +165,18 @@ int main_0090_idempotence(int argc, char **argv) {
          * for previously successful requests to return a non-error response.
          * This limit is currently (AK 2.0) hard coded at 5. */
         const int broker_req_window = 5;
+        const char *engine_names[]  = {"v1", "v2"};
+        size_t i;
 
-        do_test_implicit_ack("within broker request window",
-                             broker_req_window * 2, broker_req_window);
+        for (i = 0; i < RD_ARRAYSIZE(engine_names); i++) {
+                do_test_implicit_ack("within broker request window",
+                                     engine_names[i], broker_req_window * 2,
+                                     broker_req_window);
 
-        do_test_implicit_ack("outside broker request window",
-                             broker_req_window + 3, broker_req_window + 3);
+                do_test_implicit_ack("outside broker request window",
+                                     engine_names[i], broker_req_window + 3,
+                                     broker_req_window + 3);
+        }
 
         return 0;
 }

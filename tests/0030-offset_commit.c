@@ -102,7 +102,8 @@ static void offset_commit_cb(rd_kafka_t *rk,
 }
 
 
-static void do_offset_test(const char *what,
+static void do_offset_test(const char *engine_name,
+                           const char *what,
                            int auto_commit,
                            int auto_store,
                            int async,
@@ -119,7 +120,7 @@ static void do_offset_test(const char *what,
         rd_kafka_topic_partition_t *rktpar;
         int64_t next_offset = -1;
 
-        SUB_TEST_QUICK("%s", what);
+        SUB_TEST_QUICK("%s %s", engine_name, what);
 
         test_conf_init(&conf, &tconf, subscribe ? 30 : 10);
         test_conf_set(conf, "session.timeout.ms", "6000");
@@ -404,14 +405,14 @@ static void empty_offset_commit_cb(rd_kafka_t *rk,
 /**
  * Trigger an empty cgrp commit (issue #803)
  */
-static void do_empty_commit(void) {
+static void do_empty_commit(const char *engine_name) {
         rd_kafka_t *rk;
         char group_id[64];
         rd_kafka_conf_t *conf;
         rd_kafka_topic_conf_t *tconf;
         rd_kafka_resp_err_t err, expect;
 
-        SUB_TEST_QUICK();
+        SUB_TEST_QUICK("%s", engine_name);
 
         test_conf_init(&conf, &tconf, 20);
         test_conf_set(conf, "enable.auto.commit", "false");
@@ -485,7 +486,7 @@ static void nonexist_offset_commit_cb(rd_kafka_t *rk,
                     failed_offsets);
 }
 
-static void do_nonexist_commit(void) {
+static void do_nonexist_commit(const char *engine_name) {
         rd_kafka_t *rk;
         char group_id[64];
         rd_kafka_conf_t *conf;
@@ -494,7 +495,7 @@ static void do_nonexist_commit(void) {
         const char *unk_topic = test_mk_topic_name(__FUNCTION__, 1);
         rd_kafka_resp_err_t err;
 
-        SUB_TEST_QUICK();
+        SUB_TEST_QUICK("%s", engine_name);
 
         test_conf_init(&conf, &tconf, 20);
         /* Offset commit deferrals when the broker is down is limited to
@@ -536,54 +537,63 @@ static void do_nonexist_commit(void) {
 }
 
 
-int main_0030_offset_commit(int argc, char **argv) {
+static void run_offset_commit_engine(const char *engine_name) {
 
         topic  = rd_strdup(test_mk_topic_name(__FUNCTION__, 1));
-        testid = test_produce_msgs_easy(topic, 0, partition, msgcnt);
+        testid = test_id_generate();
+        test_produce_msgs_easy_v(topic, testid, partition, 0, msgcnt, 0,
+                                 "produce.engine", engine_name, NULL);
 
-        do_empty_commit();
+        do_empty_commit(engine_name);
 
-        do_nonexist_commit();
+        do_nonexist_commit(engine_name);
 
-        do_offset_test("AUTO.COMMIT & AUTO.STORE", 1 /* enable.auto.commit */,
+        do_offset_test(engine_name, "AUTO.COMMIT & AUTO.STORE",
+                       1 /* enable.auto.commit */,
                        1 /* enable.auto.offset.store */, 0 /* not used. */,
                        1 /* use subscribe */);
 
-        do_offset_test("MANUAL.COMMIT.ASYNC & AUTO.STORE",
+        do_offset_test(engine_name, "MANUAL.COMMIT.ASYNC & AUTO.STORE",
                        0 /* enable.auto.commit */,
                        1 /* enable.auto.offset.store */, 1 /* async */,
                        1 /* use subscribe */);
 
-        do_offset_test("AUTO.COMMIT.ASYNC & AUTO.STORE & ASSIGN",
+        do_offset_test(engine_name, "AUTO.COMMIT.ASYNC & AUTO.STORE & ASSIGN",
                        1 /* enable.auto.commit */,
                        1 /* enable.auto.offset.store */, 0 /* not used. */,
                        0 /* use assign */);
 
         if (test_quick) {
                 rd_free(topic);
-                return 0;
+                return;
         }
 
-        do_offset_test("AUTO.COMMIT & MANUAL.STORE", 1 /* enable.auto.commit */,
+        do_offset_test(engine_name, "AUTO.COMMIT & MANUAL.STORE",
+                       1 /* enable.auto.commit */,
                        0 /* enable.auto.offset.store */, 0 /* not used */,
                        1 /* use subscribe */);
 
-        do_offset_test("MANUAL.COMMIT.SYNC & AUTO.STORE",
+        do_offset_test(engine_name, "MANUAL.COMMIT.SYNC & AUTO.STORE",
                        0 /* enable.auto.commit */,
                        1 /* enable.auto.offset.store */, 0 /* async */,
                        1 /* use subscribe */);
 
-        do_offset_test("MANUAL.COMMIT.ASYNC & MANUAL.STORE",
+        do_offset_test(engine_name, "MANUAL.COMMIT.ASYNC & MANUAL.STORE",
                        0 /* enable.auto.commit */,
                        0 /* enable.auto.offset.store */, 1 /* sync */,
                        1 /* use subscribe */);
 
-        do_offset_test("MANUAL.COMMIT.SYNC & MANUAL.STORE",
+        do_offset_test(engine_name, "MANUAL.COMMIT.SYNC & MANUAL.STORE",
                        0 /* enable.auto.commit */,
                        0 /* enable.auto.offset.store */, 0 /* sync */,
                        1 /* use subscribe */);
 
         rd_free(topic);
+}
+
+int main_0030_offset_commit(int argc, char **argv) {
+        run_offset_commit_engine("v1");
+        run_offset_commit_engine("v2");
 
         return 0;
 }

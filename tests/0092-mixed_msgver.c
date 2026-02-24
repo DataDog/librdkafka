@@ -41,28 +41,23 @@
 
 
 
-int main_0092_mixed_msgver(int argc, char **argv) {
+static void do_test_mixed_msgver(const char *engine_name) {
         rd_kafka_t *rk;
+        rd_kafka_conf_t *conf;
         const char *topic = test_mk_topic_name("0092_mixed_msgver", 1);
         int32_t partition = 0;
         const int msgcnt  = 60;
         int cnt;
         int64_t testid;
         int msgcounter = msgcnt;
-
-        if (test_idempotent_producer) {
-                TEST_SKIP("Idempotent producer requires MsgVersion >= 2\n");
-                return 0;
-        }
-
-        if (test_broker_version >= TEST_BRKVER(4, 0, 0, 0)) {
-                TEST_SKIP("MsgVersion 1 was removed in Apache Kafka 4.0\n");
-                return 0;
-        }
+        TEST_SAY("Running mixed_msgver with produce.engine=%s\n", engine_name);
 
         testid = test_id_generate();
 
-        rk = test_create_producer();
+        test_conf_init(&conf, NULL, 0);
+        rd_kafka_conf_set_dr_msg_cb(conf, test_dr_msg_cb);
+        test_conf_set(conf, "produce.engine", engine_name);
+        rk = test_create_handle(RD_KAFKA_PRODUCER, conf);
 
         /* Produce messages */
         for (cnt = 0; cnt < msgcnt; cnt++) {
@@ -98,6 +93,24 @@ int main_0092_mixed_msgver(int argc, char **argv) {
 
         /* Consume messages */
         test_consume_msgs_easy(NULL, topic, testid, -1, msgcnt, NULL);
+}
+
+int main_0092_mixed_msgver(int argc, char **argv) {
+        const char *engine_names[] = {"v1", "v2"};
+        size_t i;
+
+        if (test_idempotent_producer) {
+                TEST_SKIP("Idempotent producer requires MsgVersion >= 2\n");
+                return 0;
+        }
+
+        if (test_broker_version >= TEST_BRKVER(4, 0, 0, 0)) {
+                TEST_SKIP("MsgVersion 1 was removed in Apache Kafka 4.0\n");
+                return 0;
+        }
+
+        for (i = 0; i < RD_ARRAYSIZE(engine_names); i++)
+                do_test_mixed_msgver(engine_names[i]);
 
         return 0;
 }

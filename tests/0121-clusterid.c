@@ -55,7 +55,7 @@ log_cb(const rd_kafka_t *rk, int level, const char *fac, const char *buf) {
 }
 
 
-int main_0121_clusterid(int argc, char **argv) {
+static void do_test_clusterid(const char *engine_name) {
         rd_kafka_mock_cluster_t *cluster_a, *cluster_b;
         const char *bootstraps_a, *bootstraps_b;
         size_t bs_size;
@@ -65,7 +65,8 @@ int main_0121_clusterid(int argc, char **argv) {
         rd_atomic32_t log_cnt;
         int cnt = 0;
 
-        TEST_SKIP_MOCK_CLUSTER(0);
+        TEST_SAY("Running clusterid warning test with produce.engine=%s\n",
+                 engine_name);
 
         /* Create two clusters */
         cluster_a = test_mock_cluster_new(1, &bootstraps_a);
@@ -80,6 +81,7 @@ int main_0121_clusterid(int argc, char **argv) {
         rd_snprintf(bootstraps, bs_size, "%s,%s", bootstraps_a, bootstraps_b);
         test_conf_set(conf, "bootstrap.servers", bootstraps);
         free(bootstraps);
+        test_conf_set(conf, "produce.engine", engine_name);
 
         rd_atomic32_init(&log_cnt, 0);
         rd_kafka_conf_set_log_cb(conf, log_cb);
@@ -110,6 +112,16 @@ int main_0121_clusterid(int argc, char **argv) {
         rd_kafka_destroy(rk);
         test_mock_cluster_destroy(cluster_a);
         test_mock_cluster_destroy(cluster_b);
+}
+
+int main_0121_clusterid(int argc, char **argv) {
+        const char *engine_names[] = {"v1", "v2"};
+        size_t i;
+
+        TEST_SKIP_MOCK_CLUSTER(0);
+
+        for (i = 0; i < RD_ARRAYSIZE(engine_names); i++)
+                do_test_clusterid(engine_names[i]);
 
         return 0;
 }

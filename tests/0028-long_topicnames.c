@@ -40,14 +40,13 @@
  */
 
 
-int main_0028_long_topicnames(int argc, char **argv) {
+static void do_test_long_topicnames(const char *engine_name) {
         const int msgcnt = 1000;
         uint64_t testid;
         char topic[256];
         rd_kafka_t *rk_c;
 
-        if (!test_can_create_topics(1))
-                return 0;
+        SUB_TEST("%s", engine_name);
 
         memset(topic, 'a', sizeof(topic) - 1);
         topic[sizeof(topic) - 1] = '\0';
@@ -69,11 +68,23 @@ int main_0028_long_topicnames(int argc, char **argv) {
         test_consumer_close(rk_c);
 
         /* Produce messages */
-        testid =
-            test_produce_msgs_easy(topic, 0, RD_KAFKA_PARTITION_UA, msgcnt);
+        testid = test_id_generate();
+        test_produce_msgs_easy_v(topic, testid, RD_KAFKA_PARTITION_UA, 0,
+                                 msgcnt, 0, "produce.engine", engine_name,
+                                 NULL);
 
         /* Consume messages */
         test_consume_msgs_easy(NULL, topic, testid, -1, msgcnt, NULL);
+
+        SUB_TEST_PASS();
+}
+
+int main_0028_long_topicnames(int argc, char **argv) {
+        if (!test_can_create_topics(1))
+                return 0;
+
+        do_test_long_topicnames("v1");
+        do_test_long_topicnames("v2");
 
         return 0;
 }

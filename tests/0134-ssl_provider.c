@@ -31,7 +31,8 @@
 
 static void test_providers(const char *providers,
                            rd_bool_t must_pass,
-                           rd_bool_t must_fail) {
+                           rd_bool_t must_fail,
+                           const char *engine_name) {
         rd_kafka_conf_t *conf;
         rd_kafka_t *rk;
         char errstr[512];
@@ -43,6 +44,7 @@ static void test_providers(const char *providers,
 
         /* Enable debugging so we get some extra information on
          * OpenSSL version and provider versions in the test log. */
+        test_conf_set(conf, "produce.engine", engine_name);
         test_conf_set(conf, "debug", "security");
         test_conf_set(conf, "ssl.providers", providers);
         test_conf_set(conf, "security.protocol", "ssl");
@@ -67,9 +69,11 @@ static void test_providers(const char *providers,
 }
 
 int main_0134_ssl_provider(int argc, char **argv) {
+        const char *engine_names[] = {"v1", "v2"};
         rd_kafka_conf_t *conf;
         char errstr[512];
         rd_kafka_conf_res_t res;
+        size_t i;
 
         test_conf_init(&conf, NULL, 10);
 
@@ -82,11 +86,17 @@ int main_0134_ssl_provider(int argc, char **argv) {
                 return 0;
         }
 
-        /* Must pass since 'default' is always built in */
-        test_providers("default", rd_true, rd_false);
-        /* May fail, if legacy provider is not available. */
-        test_providers("default,legacy", rd_false, rd_false);
-        /* Must fail since non-existent provider */
-        test_providers("default,thisProviderDoesNotExist", rd_false, rd_true);
+        for (i = 0; i < RD_ARRAYSIZE(engine_names); i++) {
+                TEST_SAY("Running ssl_provider with produce.engine=%s\n",
+                         engine_names[i]);
+                /* Must pass since 'default' is always built in */
+                test_providers("default", rd_true, rd_false, engine_names[i]);
+                /* May fail, if legacy provider is not available. */
+                test_providers("default,legacy", rd_false, rd_false,
+                               engine_names[i]);
+                /* Must fail since non-existent provider */
+                test_providers("default,thisProviderDoesNotExist", rd_false,
+                               rd_true, engine_names[i]);
+        }
         return 0;
 }

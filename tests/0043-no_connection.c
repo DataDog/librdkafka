@@ -36,7 +36,7 @@
 
 
 
-static void test_producer_no_connection(void) {
+static void test_producer_no_connection(const char *engine_name) {
         rd_kafka_t *rk;
         rd_kafka_conf_t *conf;
         rd_kafka_topic_t *rkt;
@@ -45,9 +45,13 @@ static void test_producer_no_connection(void) {
         int msgcnt              = 0;
         test_timing_t t_destroy;
 
+        SUB_TEST("%s", engine_name);
+
         test_conf_init(&conf, NULL, 20);
 
         test_conf_set(conf, "bootstrap.servers", NULL);
+        test_conf_set(conf, "produce.engine", engine_name);
+        rd_kafka_conf_set_dr_msg_cb(conf, test_dr_msg_cb);
 
         rk  = test_create_handle(RD_KAFKA_PRODUCER, conf);
         rkt = test_create_topic_object(rk, __FUNCTION__, "message.timeout.ms",
@@ -68,10 +72,13 @@ static void test_producer_no_connection(void) {
         TIMING_START(&t_destroy, "rd_kafka_destroy()");
         rd_kafka_destroy(rk);
         TIMING_STOP(&t_destroy);
+
+        SUB_TEST_PASS();
 }
 
 int main_0043_no_connection(int argc, char **argv) {
-        test_producer_no_connection();
+        test_producer_no_connection("v1");
+        test_producer_no_connection("v2");
 
         return 0;
 }

@@ -89,7 +89,7 @@ dr_msg_cb(rd_kafka_t *rk, const rd_kafka_message_t *rkmessage, void *opaque) {
 
 
 
-int main_0088_produce_metadata_timeout(int argc, char **argv) {
+static void do_test_produce_metadata_timeout(const char *engine_name) {
         int64_t testid;
         rd_kafka_t *rk;
         rd_kafka_topic_t *rkt;
@@ -100,8 +100,15 @@ int main_0088_produce_metadata_timeout(int argc, char **argv) {
 
         testid = test_id_generate();
 
+        TEST_SAY("Running produce_metadata_timeout with produce.engine=%s\n",
+                 engine_name);
+        msg_dr_cnt      = 0;
+        msg_dr_fail_cnt = 0;
+        rd_atomic32_set(&refuse_connect, 0);
+
         test_conf_init(&conf, NULL, 60);
         rd_kafka_conf_set_dr_msg_cb(conf, dr_msg_cb);
+        test_conf_set(conf, "produce.engine", engine_name);
         test_conf_set(conf, "metadata.max.age.ms", "10000");
         test_conf_set(conf, "topic.metadata.refresh.interval.ms", "-1");
         test_conf_set(conf, "linger.ms", "5000");
@@ -156,6 +163,14 @@ int main_0088_produce_metadata_timeout(int argc, char **argv) {
 
         rd_kafka_topic_destroy(rkt);
         rd_kafka_destroy(rk);
+}
+
+int main_0088_produce_metadata_timeout(int argc, char **argv) {
+        const char *engine_names[] = {"v1", "v2"};
+        size_t i;
+
+        for (i = 0; i < RD_ARRAYSIZE(engine_names); i++)
+                do_test_produce_metadata_timeout(engine_names[i]);
 
         return 0;
 }

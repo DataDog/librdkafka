@@ -124,13 +124,16 @@ static void do_test_reset(const char *topic,
         rd_kafka_destroy(rk);
 }
 
-int main_0034_offset_reset(int argc, char **argv) {
+static void do_test_offset_reset_engine(const char *engine_name) {
         const char *topic   = test_mk_topic_name(__FUNCTION__, 1);
         const int partition = 0;
         const int msgcnt    = test_quick ? 20 : 100;
 
+        SUB_TEST_QUICK("%s", engine_name);
+
         /* Produce messages */
-        test_produce_msgs_easy(topic, 0, partition, msgcnt);
+        test_produce_msgs_easy_v(topic, 0, partition, 0, msgcnt, 0,
+                                 "produce.engine", engine_name, NULL);
 
         /* auto.offset.reset=latest: Consume messages from invalid offset:
          * Should return EOF. */
@@ -145,6 +148,13 @@ int main_0034_offset_reset(int argc, char **argv) {
          * Should return error. */
         do_test_reset(topic, partition, "error", msgcnt + 5, 0, 0, 0, 1);
 
+        SUB_TEST_PASS();
+}
+
+int main_0034_offset_reset(int argc, char **argv) {
+        do_test_offset_reset_engine("v1");
+        do_test_offset_reset_engine("v2");
+
         return 0;
 }
 
@@ -153,7 +163,7 @@ int main_0034_offset_reset(int argc, char **argv) {
  * @brief Verify auto.offset.reset=error behaviour for a range of different
  *        error cases.
  */
-static void offset_reset_errors(void) {
+static void offset_reset_errors(const char *engine_name) {
         rd_kafka_t *c;
         rd_kafka_conf_t *conf;
         rd_kafka_mock_cluster_t *mcluster;
@@ -198,13 +208,14 @@ static void offset_reset_errors(void) {
 
         };
 
-        SUB_TEST_QUICK();
+        SUB_TEST_QUICK("%s", engine_name);
 
         mcluster = test_mock_cluster_new(1, &bootstraps);
 
         /* Seed partition 0 with some messages so we can differ
          * between beginning and end. */
         test_produce_msgs_easy_v(topic, 0, partition, 0, msgcnt, 10,
+                                 "produce.engine", engine_name,
                                  "security.protocol", "plaintext",
                                  "bootstrap.servers", bootstraps, NULL);
 
@@ -371,7 +382,8 @@ static void offset_reset_errors(void) {
 }
 
 int main_0034_offset_reset_mock(int argc, char **argv) {
-        offset_reset_errors();
+        offset_reset_errors("v1");
+        offset_reset_errors("v2");
 
         return 0;
 }

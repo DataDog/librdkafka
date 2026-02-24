@@ -40,7 +40,7 @@
  * @brief Verify that rd_kafka_query_watermark_offsets times out in case we're
  * unable to fetch offsets within the timeout (Issue #2588).
  */
-void test_query_watermark_offsets_timeout(void) {
+void test_query_watermark_offsets_timeout(const char *engine_name) {
         int64_t qry_low, qry_high;
         rd_kafka_resp_err_t err;
         const char *topic = test_mk_topic_name(__FUNCTION__, 1);
@@ -52,7 +52,7 @@ void test_query_watermark_offsets_timeout(void) {
 
         TEST_SKIP_MOCK_CLUSTER();
 
-        SUB_TEST_QUICK();
+        SUB_TEST_QUICK("%s", engine_name);
 
         mcluster = test_mock_cluster_new(1, &bootstraps);
         rd_kafka_mock_topic_create(mcluster, topic, 1, 1);
@@ -62,6 +62,7 @@ void test_query_watermark_offsets_timeout(void) {
 
         test_conf_init(&conf, NULL, 30);
         test_conf_set(conf, "bootstrap.servers", bootstraps);
+        test_conf_set(conf, "produce.engine", engine_name);
         rk = test_create_handle(RD_KAFKA_PRODUCER, conf);
 
 
@@ -84,7 +85,7 @@ void test_query_watermark_offsets_timeout(void) {
  * @brief Query watermark offsets should be able to query the correct
  *        leader immediately after a leader change.
  */
-void test_query_watermark_offsets_leader_change(void) {
+void test_query_watermark_offsets_leader_change(const char *engine_name) {
         int64_t qry_low, qry_high;
         rd_kafka_resp_err_t err;
         const char *topic = test_mk_topic_name(__FUNCTION__, 1);
@@ -96,7 +97,7 @@ void test_query_watermark_offsets_leader_change(void) {
 
         TEST_SKIP_MOCK_CLUSTER();
 
-        SUB_TEST_QUICK();
+        SUB_TEST_QUICK("%s", engine_name);
 
         mcluster = test_mock_cluster_new(2, &bootstraps);
         rd_kafka_mock_topic_create(mcluster, topic, 1, 2);
@@ -106,6 +107,7 @@ void test_query_watermark_offsets_leader_change(void) {
 
         test_conf_init(&conf, NULL, 30);
         test_conf_set(conf, "bootstrap.servers", bootstraps);
+        test_conf_set(conf, "produce.engine", engine_name);
         rk = test_create_handle(RD_KAFKA_PRODUCER, conf);
 
         err = rd_kafka_query_watermark_offsets(rk, topic, 0, &qry_low,
@@ -147,7 +149,7 @@ void test_query_watermark_offsets_leader_change(void) {
 /**
  * Verify that rd_kafka_(query|get)_watermark_offsets() works.
  */
-int main_0031_get_offsets(int argc, char **argv) {
+static void do_test_get_offsets_engine(const char *engine_name) {
         const char *topic = test_mk_topic_name(__FUNCTION__, 1);
         const int msgcnt  = test_quick ? 10 : 100;
         rd_kafka_t *rk;
@@ -158,8 +160,12 @@ int main_0031_get_offsets(int argc, char **argv) {
         test_timing_t t_qry, t_get;
         uint64_t testid;
 
+        SUB_TEST_QUICK("%s", engine_name);
+
         /* Produce messages */
-        testid = test_produce_msgs_easy(topic, 0, 0, msgcnt);
+        testid = test_id_generate();
+        test_produce_msgs_easy_v(topic, testid, 0, 0, msgcnt, 0,
+                                 "produce.engine", engine_name, NULL);
 
         /* Get offsets */
         rk = test_create_consumer(NULL, NULL, NULL, NULL);
@@ -222,14 +228,24 @@ int main_0031_get_offsets(int argc, char **argv) {
 
         rd_kafka_topic_destroy(rkt);
         rd_kafka_destroy(rk);
+        SUB_TEST_PASS();
+}
+
+int main_0031_get_offsets(int argc, char **argv) {
+        do_test_get_offsets_engine("v1");
+        do_test_get_offsets_engine("v2");
         return 0;
 }
 
 int main_0031_get_offsets_mock(int argc, char **argv) {
 
-        test_query_watermark_offsets_timeout();
+        test_query_watermark_offsets_timeout("v1");
 
-        test_query_watermark_offsets_leader_change();
+        test_query_watermark_offsets_leader_change("v1");
+
+        test_query_watermark_offsets_timeout("v2");
+
+        test_query_watermark_offsets_leader_change("v2");
 
         return 0;
 }

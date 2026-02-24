@@ -66,7 +66,8 @@ is_fatal_cb(rd_kafka_t *rk, rd_kafka_resp_err_t err, const char *reason) {
  *
  * @param should_fail If true, do negative testing which should fail.
  */
-static void do_test_produce_retries(const char *topic,
+static void do_test_produce_retries(const char *engine_name,
+                                    const char *topic,
                                     int idempotence,
                                     int try_fail,
                                     int should_fail) {
@@ -86,6 +87,7 @@ static void do_test_produce_retries(const char *topic,
         testid = test_id_generate();
 
         test_conf_init(&conf, NULL, 60);
+        test_conf_set(conf, "produce.engine", engine_name);
 
         if (should_fail &&
             !strcmp(test_conf_get(conf, "enable.sparse.connections"), "true")) {
@@ -233,7 +235,9 @@ static rd_kafka_resp_err_t on_new_producer(rd_kafka_t *rk,
  *
  * @param should_fail If true, do negative testing which should fail.
  */
-static void do_test_produce_retries_disconnect(const char *topic,
+static void
+do_test_produce_retries_disconnect(const char *engine_name,
+                                   const char *topic,
                                                int idempotence,
                                                int try_fail,
                                                int should_fail) {
@@ -255,6 +259,7 @@ static void do_test_produce_retries_disconnect(const char *topic,
         testid = test_id_generate();
 
         test_conf_init(&conf, NULL, 60);
+        test_conf_set(conf, "produce.engine", engine_name);
         rd_kafka_conf_set_dr_msg_cb(conf, test_dr_msg_cb);
         test_conf_set(conf, "socket.timeout.ms", test_quick ? "3000" : "10000");
         test_conf_set(conf, "message.timeout.ms",
@@ -373,6 +378,7 @@ static int wait_produce_requests_done(rd_kafka_mock_cluster_t *mcluster,
  *        INVALID_MSG from the broker.
  */
 static void do_test_produce_retry_invalid_msg(rd_kafka_mock_cluster_t *mcluster,
+                                              const char *engine_name,
                                               const char *bootstraps) {
         rd_kafka_t *producer;
         rd_kafka_topic_t *rkt;
@@ -386,6 +392,7 @@ static void do_test_produce_retry_invalid_msg(rd_kafka_mock_cluster_t *mcluster,
         rd_kafka_mock_start_request_tracking(mcluster);
 
         test_conf_init(&conf, NULL, 30);
+        test_conf_set(conf, "produce.engine", engine_name);
         test_conf_set(conf, "bootstrap.servers", bootstraps);
         rd_kafka_conf_set_dr_msg_cb(conf, test_dr_msg_cb);
 
@@ -408,29 +415,38 @@ static void do_test_produce_retry_invalid_msg(rd_kafka_mock_cluster_t *mcluster,
 }
 
 int main_0076_produce_retry(int argc, char **argv) {
-        const char *topic = test_mk_topic_name("0076_produce_retry", 1);
+        const char *topic;
         const rd_bool_t has_idempotence =
             test_broker_version >= TEST_BRKVER(0, 11, 0, 0);
+        const char **engine_name;
+        const char *engine_names[] = {"v1", "v2", NULL};
+
+        for (engine_name = engine_names; *engine_name; engine_name++) {
+                topic = test_mk_topic_name("0076_produce_retry", 1);
 
 #if WITH_SOCKEM
-        if (has_idempotence) {
-                /* Idempotence, no try fail, should succeed. */
-                do_test_produce_retries(topic, 1, 0, 0);
-                /* Idempotence, try fail, should succeed. */
-                do_test_produce_retries(topic, 1, 1, 0);
-        }
-        /* No idempotence, try fail, should fail. */
-        do_test_produce_retries(topic, 0, 1, 1);
+                if (has_idempotence) {
+                        /* Idempotence, no try fail, should succeed. */
+                        do_test_produce_retries(*engine_name, topic, 1, 0, 0);
+                        /* Idempotence, try fail, should succeed. */
+                        do_test_produce_retries(*engine_name, topic, 1, 1, 0);
+                }
+                /* No idempotence, try fail, should fail. */
+                do_test_produce_retries(*engine_name, topic, 0, 1, 1);
 #endif
 
-        if (has_idempotence) {
-                /* Idempotence, no try fail, should succeed. */
-                do_test_produce_retries_disconnect(topic, 1, 0, 0);
-                /* Idempotence, try fail, should succeed. */
-                do_test_produce_retries_disconnect(topic, 1, 1, 0);
+                if (has_idempotence) {
+                        /* Idempotence, no try fail, should succeed. */
+                        do_test_produce_retries_disconnect(*engine_name, topic,
+                                                           1, 0, 0);
+                        /* Idempotence, try fail, should succeed. */
+                        do_test_produce_retries_disconnect(*engine_name, topic,
+                                                           1, 1, 0);
+                }
+                /* No idempotence, try fail, should fail. */
+                do_test_produce_retries_disconnect(*engine_name, topic, 0, 1,
+                                                   1);
         }
-        /* No idempotence, try fail, should fail. */
-        do_test_produce_retries_disconnect(topic, 0, 1, 1);
 
         return 0;
 }
@@ -438,15 +454,20 @@ int main_0076_produce_retry(int argc, char **argv) {
 int main_0076_produce_retry_mock(int argc, char **argv) {
         rd_kafka_mock_cluster_t *mcluster;
         const char *bootstraps;
+        const char **engine_name;
+        const char *engine_names[] = {"v1", "v2", NULL};
 
         if (test_needs_auth()) {
                 TEST_SKIP("Mock cluster does not support SSL/SASL\n");
                 return 0;
         }
 
-        mcluster = test_mock_cluster_new(1, &bootstraps);
-        do_test_produce_retry_invalid_msg(mcluster, bootstraps);
-        test_mock_cluster_destroy(mcluster);
+        for (engine_name = engine_names; *engine_name; engine_name++) {
+                mcluster = test_mock_cluster_new(1, &bootstraps);
+                do_test_produce_retry_invalid_msg(mcluster, *engine_name,
+                                                  bootstraps);
+                test_mock_cluster_destroy(mcluster);
+        }
 
         return 0;
 }

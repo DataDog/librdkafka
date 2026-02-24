@@ -36,7 +36,9 @@
  * Ensures it's read correctly on Windows too.
  * See https://github.com/confluentinc/librdkafka/issues/3992
  */
-static void do_test_ssl_keys(const char *type, rd_bool_t correct_password) {
+static void do_test_ssl_keys(const char *type,
+                             rd_bool_t correct_password,
+                             const char *engine_name) {
 #define TEST_FIXTURES_FOLDER            "./fixtures"
 #define TEST_FIXTURES_SSL_FOLDER        TEST_FIXTURES_FOLDER "/ssl/"
 #define TEST_FIXTURES_KEYSTORE_PASSWORD "use_strong_password_keystore_client"
@@ -58,6 +60,7 @@ static void do_test_ssl_keys(const char *type, rd_bool_t correct_password) {
          * with PEM string configuration,
          * when running in --ssl mode. */
         conf = rd_kafka_conf_new();
+        test_conf_set(conf, "produce.engine", engine_name);
         test_conf_set(conf, "security.protocol", "SSL");
 
         if (!strcmp(type, "PKCS12")) {
@@ -125,9 +128,11 @@ static void do_test_ssl_keys(const char *type, rd_bool_t correct_password) {
 
 
 int main_0133_ssl_keys(int argc, char **argv) {
+        const char *engine_names[] = {"v1", "v2"};
         rd_kafka_conf_t *conf;
         char errstr[512];
         rd_kafka_conf_res_t res;
+        size_t i;
 
         test_conf_init(&conf, NULL, 10);
 
@@ -140,11 +145,15 @@ int main_0133_ssl_keys(int argc, char **argv) {
                 return 0;
         }
 
-        do_test_ssl_keys("PKCS12", rd_true);
-        do_test_ssl_keys("PKCS12", rd_false);
-        do_test_ssl_keys("PEM", rd_true);
-        do_test_ssl_keys("PEM", rd_false);
-        do_test_ssl_keys("PEM_STRING", rd_true);
-        do_test_ssl_keys("PEM_STRING", rd_false);
+        for (i = 0; i < RD_ARRAYSIZE(engine_names); i++) {
+                TEST_SAY("Running ssl_keys with produce.engine=%s\n",
+                         engine_names[i]);
+                do_test_ssl_keys("PKCS12", rd_true, engine_names[i]);
+                do_test_ssl_keys("PKCS12", rd_false, engine_names[i]);
+                do_test_ssl_keys("PEM", rd_true, engine_names[i]);
+                do_test_ssl_keys("PEM", rd_false, engine_names[i]);
+                do_test_ssl_keys("PEM_STRING", rd_true, engine_names[i]);
+                do_test_ssl_keys("PEM_STRING", rd_false, engine_names[i]);
+        }
         return 0;
 }

@@ -41,15 +41,18 @@
  */
 
 
-int main_0035_api_version(int argc, char **argv) {
+static void do_test_api_version_engine(const char *engine_name) {
         rd_kafka_t *rk;
         rd_kafka_conf_t *conf;
         const struct rd_kafka_metadata *metadata;
         rd_kafka_resp_err_t err;
         test_timing_t t_meta;
 
+        SUB_TEST_QUICK("%s", engine_name);
+
         test_conf_init(&conf, NULL, 30);
         test_conf_set(conf, "socket.timeout.ms", "12000");
+        test_conf_set(conf, "produce.engine", engine_name);
         rk = test_create_handle(RD_KAFKA_PRODUCER, conf);
 
         TEST_SAY("Querying for metadata\n");
@@ -68,6 +71,13 @@ int main_0035_api_version(int argc, char **argv) {
         TEST_SAY("Metadata succeeded\n");
 
         rd_kafka_destroy(rk);
+
+        SUB_TEST_PASS();
+}
+
+int main_0035_api_version(int argc, char **argv) {
+        do_test_api_version_engine("v1");
+        do_test_api_version_engine("v2");
 
         return 0;
 }

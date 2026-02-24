@@ -53,7 +53,7 @@ int32_t my_invalid_partitioner(const rd_kafka_topic_t *rkt,
 
 /* FIXME: This doesn't seem to trigger the bug in #797.
  *        Still a useful test though. */
-static void do_test_failed_partitioning(void) {
+static void do_test_failed_partitioning(const char *engine_name) {
         rd_kafka_t *rk;
         rd_kafka_conf_t *conf;
         rd_kafka_topic_t *rkt;
@@ -62,7 +62,10 @@ static void do_test_failed_partitioning(void) {
         int i;
         int msgcnt = test_quick ? 100 : 10000;
 
+        SUB_TEST("%s", engine_name);
+
         test_conf_init(&conf, &tconf, 0);
+        test_conf_set(conf, "produce.engine", engine_name);
         rd_kafka_conf_set_dr_msg_cb(conf, test_dr_msg_cb);
         test_conf_set(conf, "sticky.partitioning.linger.ms", "0");
         rk = test_create_handle(RD_KAFKA_PRODUCER, conf);
@@ -92,6 +95,8 @@ static void do_test_failed_partitioning(void) {
 
         rd_kafka_topic_destroy(rkt);
         rd_kafka_destroy(rk);
+
+        SUB_TEST_PASS();
 }
 
 
@@ -116,7 +121,8 @@ static void part_dr_msg_cb(rd_kafka_t *rk,
 /**
  * @brief Test single \p partitioner
  */
-static void do_test_partitioner(const char *topic,
+static void do_test_partitioner(const char *engine_name,
+                                const char *topic,
                                 const char *partitioner,
                                 int msgcnt,
                                 const char **keys,
@@ -129,11 +135,12 @@ static void do_test_partitioner(const char *topic,
         int randcnt = 0;
         int fails   = 0;
 
-        TEST_SAY(_C_MAG "Test partitioner \"%s\"\n", partitioner);
+        SUB_TEST("%s (%s)", partitioner, engine_name);
 
         test_conf_init(&conf, NULL, 30);
         rd_kafka_conf_set_opaque(conf, &remains);
         rd_kafka_conf_set_dr_msg_cb(conf, part_dr_msg_cb);
+        test_conf_set(conf, "produce.engine", engine_name);
         test_conf_set(conf, "partitioner", partitioner);
         test_conf_set(conf, "sticky.partitioning.linger.ms", "0");
 
@@ -216,7 +223,7 @@ static void do_test_partitioner(const char *topic,
 
         rd_kafka_destroy(rk);
 
-        TEST_SAY(_C_GRN "Test partitioner \"%s\": PASS\n", partitioner);
+        SUB_TEST_PASS();
 }
 
 extern uint32_t rd_crc32(const char *, size_t);
@@ -224,7 +231,7 @@ extern uint32_t rd_crc32(const char *, size_t);
 /**
  * @brief Test all builtin partitioners
  */
-static void do_test_partitioners(void) {
+static void do_test_partitioners(const char *engine_name) {
         int part_cnt = test_quick ? 7 : 17;
 #define _MSG_CNT 5
         const char *unaligned = "123456";
@@ -270,14 +277,17 @@ static void do_test_partitioners(void) {
         test_create_topic_wait_exists(NULL, topic, part_cnt, 1, 5000);
 
         for (pi = 0; ptest[pi].partitioner; pi++) {
-                do_test_partitioner(topic, ptest[pi].partitioner, _MSG_CNT,
-                                    keys, ptest[pi].exp_part);
+                do_test_partitioner(engine_name, topic, ptest[pi].partitioner,
+                                    _MSG_CNT, keys, ptest[pi].exp_part);
         }
 }
 
 int main_0048_partitioner(int argc, char **argv) {
-        if (test_can_create_topics(0))
-                do_test_partitioners();
-        do_test_failed_partitioning();
+        if (test_can_create_topics(0)) {
+                do_test_partitioners("v1");
+                do_test_partitioners("v2");
+        }
+        do_test_failed_partitioning("v1");
+        do_test_failed_partitioning("v2");
         return 0;
 }

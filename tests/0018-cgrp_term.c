@@ -174,11 +174,12 @@ static void consumer_close_queue(rd_kafka_t *c) {
 }
 
 
-static void do_test(rd_bool_t with_queue) {
+static void do_test(const char *engine_name, rd_bool_t with_queue) {
         const char *topic = test_mk_topic_name(__FUNCTION__, 1);
 #define _CONS_CNT 2
         rd_kafka_t *rk_p, *rk_c[_CONS_CNT];
         rd_kafka_topic_t *rkt_p;
+        rd_kafka_conf_t *pconf;
         int msg_cnt       = test_quick ? 100 : 1000;
         int msg_base      = 0;
         int partition_cnt = 2;
@@ -191,12 +192,18 @@ static void do_test(rd_bool_t with_queue) {
         char errstr[512];
         int i;
 
-        SUB_TEST("with_queue=%s", RD_STR_ToF(with_queue));
+        SUB_TEST("%s with_queue=%s", engine_name, RD_STR_ToF(with_queue));
+
+        assign_cnt       = 0;
+        consumed_msg_cnt = 0;
 
         testid = test_id_generate();
 
         /* Produce messages */
-        rk_p  = test_create_producer();
+        test_conf_init(&pconf, NULL, 0);
+        test_conf_set(pconf, "produce.engine", engine_name);
+        rd_kafka_conf_set_dr_msg_cb(pconf, test_dr_msg_cb);
+        rk_p  = test_create_handle(RD_KAFKA_PRODUCER, pconf);
         rkt_p = test_create_producer_topic(rk_p, topic, NULL);
         test_wait_topic_exists(rk_p, topic, 5000);
 
@@ -331,8 +338,10 @@ static void do_test(rd_bool_t with_queue) {
 
 
 int main_0018_cgrp_term(int argc, char **argv) {
-        do_test(rd_false /* rd_kafka_consumer_close() */);
-        do_test(rd_true /*  rd_kafka_consumer_close_queue() */);
+        do_test("v1", rd_false /* rd_kafka_consumer_close() */);
+        do_test("v1", rd_true /*  rd_kafka_consumer_close_queue() */);
+        do_test("v2", rd_false /* rd_kafka_consumer_close() */);
+        do_test("v2", rd_true /*  rd_kafka_consumer_close_queue() */);
 
         return 0;
 }

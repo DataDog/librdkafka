@@ -202,8 +202,9 @@ static void get_assignment(rd_kafka_t *rk_c) {
         }
 }
 
-int main_0056_balanced_group_mt(int argc, char **argv) {
+static void do_test_balanced_group_mt(const char *engine_name) {
         const char *topic = test_mk_topic_name(__FUNCTION__, 1);
+        rd_kafka_conf_t *pconf;
         rd_kafka_t *rk_p, *rk_c;
         rd_kafka_topic_t *rkt_p;
         int msg_cnt       = test_quick ? 100 : 1000;
@@ -218,12 +219,22 @@ int main_0056_balanced_group_mt(int argc, char **argv) {
         test_timing_t t_assign, t_close, t_consume;
         int i;
 
+        SUB_TEST("%s", engine_name);
+
+        assign_cnt        = 0;
+        consumed_msg_cnt  = 0;
+        consumers_running = 0;
+        rebalanced        = 0;
+        memset(tids, 0, sizeof(tids));
         exp_msg_cnt = msg_cnt * partition_cnt;
 
         testid = test_id_generate();
 
         /* Produce messages */
-        rk_p  = test_create_producer();
+        test_conf_init(&pconf, NULL, 0);
+        test_conf_set(pconf, "produce.engine", engine_name);
+        rd_kafka_conf_set_dr_msg_cb(pconf, test_dr_msg_cb);
+        rk_p  = test_create_handle(RD_KAFKA_PRODUCER, pconf);
         rkt_p = test_create_producer_topic(rk_p, topic, NULL);
         test_wait_topic_exists(rk_p, topic, 5000);
 
@@ -310,6 +321,15 @@ int main_0056_balanced_group_mt(int argc, char **argv) {
                     consumed_msg_cnt - exp_msg_cnt, exp_msg_cnt);
 
         mtx_destroy(&lock);
+
+        SUB_TEST_PASS();
+
+        return;
+}
+
+int main_0056_balanced_group_mt(int argc, char **argv) {
+        do_test_balanced_group_mt("v1");
+        do_test_balanced_group_mt("v2");
 
         return 0;
 }

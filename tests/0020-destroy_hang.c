@@ -44,7 +44,7 @@
  * Will cause rd_kafka_destroy() to hang.
  */
 
-static int nonexist_part(void) {
+static int nonexist_part(const char *engine_name) {
         const char *topic = test_mk_topic_name(__FUNCTION__, 1);
         rd_kafka_t *rk;
         rd_kafka_topic_partition_list_t *parts;
@@ -55,9 +55,13 @@ static int nonexist_part(void) {
         int i;
         int it, iterations = 5;
 
+        TEST_SAY("nonexist_part hang test (engine=%s)\n", engine_name);
+
         /* Produce messages */
-        testid =
-            test_produce_msgs_easy(topic, 0, RD_KAFKA_PARTITION_UA, msgcnt);
+        testid = test_id_generate();
+        test_produce_msgs_easy_v(topic, testid, RD_KAFKA_PARTITION_UA, 0,
+                                 msgcnt, 0, "produce.engine", engine_name,
+                                 NULL);
 
         for (it = 0; it < iterations; it++) {
                 char group_id[32];
@@ -131,14 +135,15 @@ static int nonexist_part(void) {
 /**
  * Issue #691: Producer hangs on destroy if group.id is configured.
  */
-static int producer_groupid(void) {
+static int producer_groupid(const char *engine_name) {
         rd_kafka_conf_t *conf;
         rd_kafka_t *rk;
 
-        TEST_SAY("producer_groupid hang test\n");
+        TEST_SAY("producer_groupid hang test (engine=%s)\n", engine_name);
         test_conf_init(&conf, NULL, 10);
 
         test_conf_set(conf, "group.id", "dummy");
+        test_conf_set(conf, "produce.engine", engine_name);
 
         rk = test_create_handle(RD_KAFKA_PRODUCER, conf);
 
@@ -153,8 +158,10 @@ int main_0020_destroy_hang(int argc, char **argv) {
 
         test_conf_init(NULL, NULL, 30);
 
-        fails += nonexist_part();
-        fails += producer_groupid();
+        fails += nonexist_part("v1");
+        fails += producer_groupid("v1");
+        fails += nonexist_part("v2");
+        fails += producer_groupid("v2");
         if (fails > 0)
                 TEST_FAIL("See %d previous error(s)\n", fails);
 

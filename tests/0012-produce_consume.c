@@ -69,6 +69,7 @@ static void dr_cb(rd_kafka_t *rk,
  * Produces 'msgcnt' messages split over 'partition_cnt' partitions.
  */
 static void produce_messages(uint64_t testid,
+                             const char *engine_name,
                              const char *topic,
                              int partition_cnt,
                              int msgcnt) {
@@ -86,6 +87,7 @@ static void produce_messages(uint64_t testid,
         int msgid = 0;
 
         test_conf_init(&conf, &topic_conf, 20);
+        test_conf_set(conf, "produce.engine", engine_name);
 
         rd_kafka_conf_set_dr_cb(conf, dr_cb);
 
@@ -490,13 +492,15 @@ static void consume_messages_with_queues(uint64_t testid,
  * Consume with standard interface from both, one after the other.
  * Consume with queue interface from both, simultanously.
  */
-static void test_produce_consume(void) {
+static void test_produce_consume(const char *engine_name) {
         int msgcnt        = test_quick ? 100 : 1000;
         int partition_cnt = 2;
         int i;
         uint64_t testid;
         int msg_base = 0;
         const char *topic;
+
+        SUB_TEST_QUICK("%s", engine_name);
 
         /* Generate a testid so we can differentiate messages
          * from other tests */
@@ -509,7 +513,7 @@ static void test_produce_consume(void) {
         TEST_SAY("Topic %s, testid %" PRIu64 "\n", topic, testid);
 
         /* Produce messages */
-        produce_messages(testid, topic, partition_cnt, msgcnt);
+        produce_messages(testid, engine_name, topic, partition_cnt, msgcnt);
 
 
         /* Consume messages with standard interface */
@@ -526,12 +530,13 @@ static void test_produce_consume(void) {
         consume_messages_with_queues(testid, topic, partition_cnt, msgcnt);
         verify_consumed_msg_check();
 
-        return;
+        SUB_TEST_PASS();
 }
 
 
 
 int main_0012_produce_consume(int argc, char **argv) {
-        test_produce_consume();
+        test_produce_consume("v1");
+        test_produce_consume("v2");
         return 0;
 }

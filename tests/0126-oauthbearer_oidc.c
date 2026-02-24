@@ -39,7 +39,8 @@ static rd_bool_t error_seen;
  *
  */
 static void
-do_test_produce_consumer_with_OIDC(const rd_kafka_conf_t *base_conf) {
+do_test_produce_consumer_with_OIDC(const rd_kafka_conf_t *base_conf,
+                                   const char *engine_name) {
         const char *topic;
         uint64_t testid;
         rd_kafka_t *p1;
@@ -48,7 +49,9 @@ do_test_produce_consumer_with_OIDC(const rd_kafka_conf_t *base_conf) {
 
         const char *url = test_getenv("VALID_OIDC_URL", NULL);
 
-        SUB_TEST("Test producer and consumer with oidc configuration");
+        SUB_TEST("Test producer and consumer with oidc configuration, "
+                 "produce.engine=%s",
+                 engine_name);
 
         if (!url) {
                 SUB_TEST_SKIP(
@@ -58,6 +61,7 @@ do_test_produce_consumer_with_OIDC(const rd_kafka_conf_t *base_conf) {
 
         conf = rd_kafka_conf_dup(base_conf);
         test_conf_set(conf, "sasl.oauthbearer.token.endpoint.url", url);
+        test_conf_set(conf, "produce.engine", engine_name);
 
         testid = test_id_generate();
 
@@ -189,6 +193,8 @@ int main_0126_oauthbearer_oidc(int argc, char **argv) {
         rd_kafka_conf_t *conf;
         const char *sec;
         const char *oidc;
+        const char *engine_names[] = {"v1", "v2"};
+        size_t i;
 
         test_conf_init(&conf, NULL, 60);
 
@@ -206,7 +212,8 @@ int main_0126_oauthbearer_oidc(int argc, char **argv) {
                 return 0;
         }
 
-        do_test_produce_consumer_with_OIDC(conf);
+        for (i = 0; i < RD_ARRAYSIZE(engine_names); i++)
+                do_test_produce_consumer_with_OIDC(conf, engine_names[i]);
         do_test_produce_consumer_with_OIDC_should_fail(conf);
         do_test_produce_consumer_with_OIDC_expired_token_should_fail(conf);
 

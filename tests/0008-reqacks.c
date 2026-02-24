@@ -71,7 +71,7 @@ dr_msg_cb(rd_kafka_t *rk, const rd_kafka_message_t *rkmessage, void *opaque) {
 }
 
 
-int main_0008_reqacks(int argc, char **argv) {
+static void test_reqacks_engine(const char *engine_name, char **argv) {
         int partition = 0;
         int r;
         rd_kafka_t *rk;
@@ -86,6 +86,12 @@ int main_0008_reqacks(int argc, char **argv) {
         int idbase        = 0;
         const char *topic = NULL;
 
+        msgid_next = 0;
+        fails      = 0;
+
+        TEST_SAY("Running request.required.acks test with produce.engine=%s\n",
+                 engine_name);
+
         TEST_SAY(
             "\033[33mNOTE! This test requires at "
             "least 3 brokers!\033[0m\n");
@@ -99,7 +105,10 @@ int main_0008_reqacks(int argc, char **argv) {
         for (reqacks = -1; reqacks <= 1; reqacks++) {
                 char tmp[10];
 
+                SUB_TEST("%s reqacks=%d", engine_name, reqacks);
+
                 test_conf_init(&conf, &topic_conf, 10);
+                test_conf_set(conf, "produce.engine", engine_name);
 
                 if (reqacks != -1)
                         test_conf_set(conf, "enable.idempotence", "false");
@@ -173,7 +182,14 @@ int main_0008_reqacks(int argc, char **argv) {
                 /* Destroy rdkafka instance */
                 TEST_SAY("Destroying kafka instance %s\n", rd_kafka_name(rk));
                 rd_kafka_destroy(rk);
+
+                SUB_TEST_PASS();
         }
+}
+
+int main_0008_reqacks(int argc, char **argv) {
+        test_reqacks_engine("v1", argv);
+        test_reqacks_engine("v2", argv);
 
         return 0;
 }

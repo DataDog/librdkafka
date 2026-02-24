@@ -39,6 +39,7 @@
 static int32_t *avail_brokers;
 static size_t avail_broker_cnt;
 static rd_bool_t acl_authorizer_unavailable = rd_false;
+static const char *produce_engine_name      = "v1";
 
 static rd_bool_t
 is_unknown_topic_compat_error(rd_kafka_resp_err_t expected,
@@ -2424,6 +2425,8 @@ static void do_test_unclean_destroy(rd_kafka_type_t cltype, int with_mainq) {
                        with_mainq ? "mainq" : "tempq");
 
         test_conf_init(&conf, NULL, 0);
+        if (cltype == RD_KAFKA_PRODUCER)
+                test_conf_set(conf, "produce.engine", produce_engine_name);
 
         rk = rd_kafka_new(cltype, conf, errstr, sizeof(errstr));
         TEST_ASSERT(rk, "kafka_new(%d): %s", cltype, errstr);
@@ -5262,6 +5265,7 @@ static void do_test_ListOffsets(const char *what,
         rd_kafka_AdminOptions_t *options;
         rd_kafka_event_t *event;
         rd_kafka_queue_t *q;
+        rd_kafka_conf_t *pconf;
         rd_kafka_t *p;
         size_t i = 0, cnt = 0;
         rd_kafka_topic_partition_list_t *topic_partitions,
@@ -5300,7 +5304,10 @@ static void do_test_ListOffsets(const char *what,
 
         test_wait_topic_exists(rk, topic, 5000);
 
-        p = test_create_producer();
+        test_conf_init(&pconf, NULL, 0);
+        test_conf_set(pconf, "produce.engine", produce_engine_name);
+        rd_kafka_conf_set_dr_msg_cb(pconf, test_dr_msg_cb);
+        p = test_create_handle(RD_KAFKA_PRODUCER, pconf);
         for (i = 0; i < RD_ARRAY_SIZE(timestamps); i++) {
                 rd_kafka_producev(
                     /* Producer handle */
@@ -5461,6 +5468,8 @@ static void do_test_apis(rd_kafka_type_t cltype) {
 
         test_conf_init(&conf, NULL, 180);
         test_conf_set(conf, "socket.timeout.ms", "10000");
+        if (cltype == RD_KAFKA_PRODUCER)
+                test_conf_set(conf, "produce.engine", produce_engine_name);
 
         rk = test_create_handle(cltype, conf);
 
@@ -5629,8 +5638,13 @@ static void do_test_apis(rd_kafka_type_t cltype) {
 
 
 int main_0081_admin(int argc, char **argv) {
+        const char *engine_names[] = {"v1", "v2"};
+        size_t i;
 
-        do_test_apis(RD_KAFKA_PRODUCER);
+        for (i = 0; i < RD_ARRAYSIZE(engine_names); i++) {
+                produce_engine_name = engine_names[i];
+                do_test_apis(RD_KAFKA_PRODUCER);
+        }
         if (test_quick) {
                 TEST_SAY("Skipping further 0081 tests due to quick mode\n");
                 return 0;

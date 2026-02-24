@@ -75,7 +75,8 @@ static int wait_event_cb(int timeout_secs) {
 }
 
 
-int main_0083_cb_event(int argc, char **argv) {
+static void do_test_cb_event(const char *engine_name) {
+        rd_kafka_conf_t *pconf;
         rd_kafka_conf_t *conf;
         rd_kafka_topic_conf_t *tconf;
         rd_kafka_t *rk_p, *rk_c;
@@ -92,12 +93,18 @@ int main_0083_cb_event(int argc, char **argv) {
         rd_kafka_event_t *rkev;
         int eventcnt = 0;
 
-        mtx_init(&event_receiver.lock, mtx_plain);
+        TEST_SAY("Running cb_event test with produce.engine=%s\n", engine_name);
+        mtx_lock(&event_receiver.lock);
+        event_receiver.count = 0;
+        mtx_unlock(&event_receiver.lock);
 
         testid = test_id_generate();
         topic  = test_mk_topic_name(__FUNCTION__, 1);
 
-        rk_p  = test_create_producer();
+        test_conf_init(&pconf, NULL, 0);
+        test_conf_set(pconf, "produce.engine", engine_name);
+        rd_kafka_conf_set_dr_msg_cb(pconf, test_dr_msg_cb);
+        rk_p  = test_create_handle(RD_KAFKA_PRODUCER, pconf);
         rkt_p = test_create_producer_topic(rk_p, topic, NULL);
         test_wait_topic_exists(rk_p, topic, 5000);
         err = test_auto_create_topic_rkt(rk_p, rkt_p, tmout_multip(5000));
@@ -226,6 +233,16 @@ int main_0083_cb_event(int argc, char **argv) {
         rd_kafka_queue_destroy(queue);
         rd_kafka_consumer_close(rk_c);
         rd_kafka_destroy(rk_c);
+}
+
+int main_0083_cb_event(int argc, char **argv) {
+        const char *engine_names[] = {"v1", "v2"};
+        size_t i;
+
+        mtx_init(&event_receiver.lock, mtx_plain);
+
+        for (i = 0; i < RD_ARRAYSIZE(engine_names); i++)
+                do_test_cb_event(engine_names[i]);
 
         mtx_destroy(&event_receiver.lock);
 
