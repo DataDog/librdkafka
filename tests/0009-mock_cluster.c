@@ -36,7 +36,7 @@
 
 
 
-int main_0009_mock_cluster(int argc, char **argv) {
+static void do_test_mock_cluster(const char *engine_name) {
         const char *topic = test_mk_topic_name("0009_mock_cluster", 1);
         rd_kafka_mock_cluster_t *mcluster;
         rd_kafka_t *p, *c;
@@ -46,7 +46,7 @@ int main_0009_mock_cluster(int argc, char **argv) {
         const char *bootstraps;
         rd_kafka_topic_partition_list_t *parts;
 
-        TEST_SKIP_MOCK_CLUSTER(0);
+        SUB_TEST_QUICK("produce.engine=%s", engine_name);
 
         mcluster = test_mock_cluster_new(3, &bootstraps);
 
@@ -56,6 +56,7 @@ int main_0009_mock_cluster(int argc, char **argv) {
         test_conf_set(conf, "bootstrap.servers", bootstraps);
 
         /* Producer */
+        test_conf_set(conf, "produce.engine", engine_name);
         rd_kafka_conf_set_dr_msg_cb(conf, test_dr_msg_cb);
         p = test_create_handle(RD_KAFKA_PRODUCER, rd_kafka_conf_dup(conf));
 
@@ -92,6 +93,18 @@ int main_0009_mock_cluster(int argc, char **argv) {
         rd_kafka_destroy(p);
 
         test_mock_cluster_destroy(mcluster);
+
+        SUB_TEST_PASS();
+}
+
+int main_0009_mock_cluster(int argc, char **argv) {
+        const char *engine_names[] = {"v1", "v2"};
+        size_t i;
+
+        TEST_SKIP_MOCK_CLUSTER(0);
+
+        for (i = 0; i < RD_ARRAYSIZE(engine_names); i++)
+                do_test_mock_cluster(engine_names[i]);
 
         return 0;
 }

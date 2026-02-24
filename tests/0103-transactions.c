@@ -36,6 +36,12 @@
  *
  */
 
+static const char *produce_engine_name = "v1";
+
+static void set_produce_engine(rd_kafka_conf_t *conf) {
+        test_conf_set(conf, "produce.engine", produce_engine_name);
+}
+
 
 /**
  * @brief Produce messages using batch interface.
@@ -136,6 +142,7 @@ static void do_test_basic_producer_txn(rd_bool_t enable_compression) {
         p_conf = rd_kafka_conf_dup(conf);
         rd_kafka_conf_set_dr_msg_cb(p_conf, test_dr_msg_cb);
         test_conf_set(p_conf, "transactional.id", topic);
+        set_produce_engine(p_conf);
         if (enable_compression)
                 test_conf_set(p_conf, "compression.type", "lz4");
         p = test_create_handle(RD_KAFKA_PRODUCER, p_conf);
@@ -344,6 +351,7 @@ void do_test_consumer_producer_txn(void) {
         /* Create Producer 1 and seed input topic */
         tmpconf = rd_kafka_conf_dup(conf);
         test_conf_set(tmpconf, "transactional.id", input_topic);
+        set_produce_engine(tmpconf);
         rd_kafka_conf_set_dr_msg_cb(tmpconf, test_dr_msg_cb);
         p1 = test_create_handle(RD_KAFKA_PRODUCER, tmpconf);
 
@@ -371,6 +379,7 @@ void do_test_consumer_producer_txn(void) {
         /* Create Producer 2 */
         tmpconf = rd_kafka_conf_dup(conf);
         test_conf_set(tmpconf, "transactional.id", output_topic);
+        set_produce_engine(tmpconf);
         rd_kafka_conf_set_dr_msg_cb(tmpconf, test_dr_msg_cb);
         p2 = test_create_handle(RD_KAFKA_PRODUCER, tmpconf);
         TEST_CALL_ERROR__(rd_kafka_init_transactions(p2, 30 * 1000));
@@ -598,6 +607,7 @@ static void do_test_misuse_txn(void) {
         test_conf_init(&conf, NULL, 10);
 
         test_conf_set(conf, "transactional.id", topic);
+        set_produce_engine(conf);
         test_conf_set(conf, "transaction.timeout.ms", "2147483647");
 
         p = test_create_handle(RD_KAFKA_PRODUCER, conf);
@@ -630,6 +640,7 @@ static void do_test_misuse_txn(void) {
         test_conf_init(&conf, NULL, 10);
 
         test_conf_set(conf, "transactional.id", topic);
+        set_produce_engine(conf);
 
         p = test_create_handle(RD_KAFKA_PRODUCER, conf);
 
@@ -661,6 +672,7 @@ static void do_test_misuse_txn(void) {
         test_conf_init(&conf, NULL, 10);
 
         test_conf_set(conf, "transactional.id", topic);
+        set_produce_engine(conf);
 
         p = test_create_handle(RD_KAFKA_PRODUCER, conf);
 
@@ -687,6 +699,7 @@ static void do_test_misuse_txn(void) {
         test_conf_init(&conf, NULL, 10);
 
         test_conf_set(conf, "transactional.id", topic);
+        set_produce_engine(conf);
 
         p = test_create_handle(RD_KAFKA_PRODUCER, conf);
 
@@ -770,6 +783,7 @@ static void do_test_fenced_txn(rd_bool_t produce_after_fence) {
         test_conf_init(&conf, NULL, 30);
 
         test_conf_set(conf, "transactional.id", topic);
+        set_produce_engine(conf);
         rd_kafka_conf_set_dr_msg_cb(conf, test_dr_msg_cb);
 
         p1 = test_create_handle(RD_KAFKA_PRODUCER, rd_kafka_conf_dup(conf));
@@ -874,6 +888,7 @@ static void do_test_fatal_idempo_error_without_kip360(void) {
         test_conf_init(&conf, NULL, 30);
 
         test_conf_set(conf, "transactional.id", topic);
+        set_produce_engine(conf);
         test_conf_set(conf, "batch.num.messages", "1");
         rd_kafka_conf_set_dr_msg_cb(conf, test_dr_msg_cb);
 
@@ -1026,6 +1041,7 @@ static void do_test_empty_txn(rd_bool_t send_offsets, rd_bool_t do_commit) {
         c_conf = rd_kafka_conf_dup(conf);
 
         test_conf_set(conf, "transactional.id", topic);
+        set_produce_engine(conf);
         rd_kafka_conf_set_dr_msg_cb(conf, test_dr_msg_cb);
         p = test_create_handle(RD_KAFKA_PRODUCER, conf);
 
@@ -1127,6 +1143,7 @@ static void do_test_txn_abort_control_message_leader_epoch(void) {
         c_conf = rd_kafka_conf_dup(p_conf);
 
         test_conf_set(p_conf, "transactional.id", topic);
+        set_produce_engine(p_conf);
         rd_kafka_conf_set_dr_msg_cb(p_conf, test_dr_msg_cb);
         p = test_create_handle(RD_KAFKA_PRODUCER, p_conf);
 
@@ -1222,6 +1239,7 @@ static void do_test_wmark_isolation_level(void) {
         c_conf = rd_kafka_conf_dup(conf);
 
         test_conf_set(conf, "transactional.id", topic);
+        set_produce_engine(conf);
         rd_kafka_conf_set_dr_msg_cb(conf, test_dr_msg_cb);
         p = test_create_handle(RD_KAFKA_PRODUCER, rd_kafka_conf_dup(conf));
 
@@ -1290,7 +1308,7 @@ static void do_test_wmark_isolation_level(void) {
 
 
 
-int main_0103_transactions(int argc, char **argv) {
+static void run_0103_transactions(void) {
 
         do_test_misuse_txn();
         do_test_basic_producer_txn(rd_false /* without compression */);
@@ -1305,6 +1323,19 @@ int main_0103_transactions(int argc, char **argv) {
         do_test_empty_txn(rd_true /*send offsets*/, rd_false /*abort*/);
         do_test_wmark_isolation_level();
         do_test_txn_abort_control_message_leader_epoch();
+}
+
+int main_0103_transactions(int argc, char **argv) {
+        const char *engine_names[] = {"v1", "v2"};
+        size_t i;
+
+        for (i = 0; i < RD_ARRAYSIZE(engine_names); i++) {
+                produce_engine_name = engine_names[i];
+                TEST_SAY("Running 0103_transactions with produce.engine=%s\n",
+                         produce_engine_name);
+                run_0103_transactions();
+        }
+
         return 0;
 }
 
@@ -1327,6 +1358,7 @@ static void do_test_txn_local(void) {
          */
         test_conf_init(&conf, NULL, 0);
         test_conf_set(conf, "bootstrap.servers", NULL);
+        set_produce_engine(conf);
 
         p = test_create_handle(RD_KAFKA_PRODUCER, conf);
 
@@ -1347,6 +1379,7 @@ static void do_test_txn_local(void) {
         test_conf_init(&conf, NULL, 0);
         test_conf_set(conf, "bootstrap.servers", NULL);
         test_conf_set(conf, "transactional.id", "test");
+        set_produce_engine(conf);
         p = test_create_handle(RD_KAFKA_PRODUCER, conf);
 
         TEST_SAY("Waiting for init_transactions() timeout %d ms\n", timeout_ms);
@@ -1376,8 +1409,16 @@ static void do_test_txn_local(void) {
 
 
 int main_0103_transactions_local(int argc, char **argv) {
+        const char *engine_names[] = {"v1", "v2"};
+        size_t i;
 
-        do_test_txn_local();
+        for (i = 0; i < RD_ARRAYSIZE(engine_names); i++) {
+                produce_engine_name = engine_names[i];
+                TEST_SAY(
+                    "Running 0103_transactions_local with produce.engine=%s\n",
+                    produce_engine_name);
+                do_test_txn_local();
+        }
 
         return 0;
 }

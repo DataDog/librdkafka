@@ -46,6 +46,11 @@
 
 static int allowed_error;
 static int allowed_error_2;
+static const char *produce_engine_name = "v1";
+
+static void set_produce_engine(rd_kafka_conf_t *conf) {
+        test_conf_set(conf, "produce.engine", produce_engine_name);
+}
 
 /**
  * @brief Decide what error_cb's will cause the test to fail.
@@ -156,6 +161,7 @@ create_txn_producer(rd_kafka_mock_cluster_t **mclusterp,
         test_conf_set(conf, "socket.connection.setup.timeout.ms", "5000");
         /* Speed up reconnects */
         test_conf_set(conf, "reconnect.backoff.max.ms", "2000");
+        set_produce_engine(conf);
         test_conf_set(conf, "test.mock.num.brokers", numstr);
         rd_kafka_conf_set_dr_msg_cb(conf, test_dr_msg_cb);
 
@@ -1597,6 +1603,7 @@ static void do_test_txns_not_supported(void) {
 
         test_conf_set(conf, "transactional.id", "myxnid");
         test_conf_set(conf, "bootstrap.servers", ",");
+        set_produce_engine(conf);
         rd_kafka_conf_set_dr_msg_cb(conf, test_dr_msg_cb);
 
         rk = test_create_handle(RD_KAFKA_PRODUCER, conf);
@@ -3146,6 +3153,7 @@ static void do_test_txn_resumable_init(void) {
         test_conf_set(conf, "bootstrap.servers", "");
         test_conf_set(conf, "transactional.id", transactional_id);
         test_conf_set(conf, "transaction.timeout.ms", "4000");
+        set_produce_engine(conf);
 
         rk = test_create_handle(RD_KAFKA_PRODUCER, conf);
 
@@ -3828,9 +3836,7 @@ do_test_txn_offset_commit_doesnt_retry_too_quickly(rd_bool_t times_out) {
 }
 
 
-int main_0105_transactions_mock(int argc, char **argv) {
-        TEST_SKIP_MOCK_CLUSTER(0);
-
+static void run_0105_transactions_mock(void) {
         do_test_txn_recoverable_errors();
 
         do_test_txn_fatal_idempo_errors();
@@ -3847,7 +3853,7 @@ int main_0105_transactions_mock(int argc, char **argv) {
 
         /* Just do a subset of tests in quick mode */
         if (test_quick)
-                return 0;
+                return;
 
         do_test_txn_endtxn_errors();
 
@@ -3925,6 +3931,20 @@ int main_0105_transactions_mock(int argc, char **argv) {
         do_test_txn_offset_commit_doesnt_retry_too_quickly(rd_true);
 
         do_test_txn_offset_commit_doesnt_retry_too_quickly(rd_false);
+}
+
+int main_0105_transactions_mock(int argc, char **argv) {
+        const char *engine_names[] = {"v1", "v2"};
+        size_t i;
+
+        TEST_SKIP_MOCK_CLUSTER(0);
+
+        for (i = 0; i < RD_ARRAYSIZE(engine_names); i++) {
+                produce_engine_name = engine_names[i];
+                TEST_SAY("Running 0105_transactions_mock with produce.engine=%s\n",
+                         produce_engine_name);
+                run_0105_transactions_mock();
+        }
 
         return 0;
 }
