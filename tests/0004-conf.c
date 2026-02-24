@@ -552,11 +552,19 @@ int main_0004_conf(int argc, char **argv) {
                 rd_kafka_conf_t *tmp = rd_kafka_conf_new();
                 rd_kafka_t *tmp_rk;
 
+
+                res = rd_kafka_conf_set(tmp, "produce.request.max.partitions",
+                                        "-1", errstr, sizeof(errstr));
+                TEST_ASSERT(res == RD_KAFKA_CONF_INVALID,
+                            "expected produce.request.max.partitions=-1 "
+                            "to be rejected, not %d (%s)",
+                            res, errstr);
+
                 res = rd_kafka_conf_set(tmp, "produce.request.max.partitions",
                                         "0", errstr, sizeof(errstr));
-                TEST_ASSERT(res == RD_KAFKA_CONF_INVALID,
+                TEST_ASSERT(res == RD_KAFKA_CONF_OK,
                             "expected produce.request.max.partitions=0 "
-                            "to be rejected, not %d (%s)",
+                            "to accept valid value, not %d (%s)",
                             res, errstr);
 
                 res = rd_kafka_conf_set(tmp, "produce.request.max.partitions",

@@ -1108,10 +1108,8 @@ int rd_kafka_produce_calculator_add(rd_kafka_produce_calculator_t *rkpca,
         int added_batch_cnt;
 
 
-        // TODO(xvandish): Think about removing this. Why would anyone want to make
-        // their requests worse?
-        if (rkpca->rkpca_partition_cnt >=
-            rktp->rktp_rkt->rkt_rk->rk_conf.produce_request_max_partitions) {
+        int max_partitions = rk->rk_conf.produce_request_max_partitions;
+        if (max_partitions > 0 && rkpca->rkpca_partition_cnt >= max_partitions) {
                 return 0;
         }
 

@@ -1554,8 +1554,8 @@ static const struct rd_kafka_property rd_kafka_properties[] = {
      "This setting is also used for transactional produce requests. "
      "Note that the broker has a maximum request size (configured via "
      "`message.max.bytes` on the broker and topic) which may be hit "
-     "before reaching this partition limit.",
-     1, 10000000, 10},
+     "before reaching this partition limit. 0 means unlimited.",
+     0, 10000000, 0},
 
     /* Broker-level batching configuration */
     {_RK_GLOBAL | _RK_PRODUCER, "broker.linger.ms", _RK_C_DBL,

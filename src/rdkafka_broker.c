@@ -6590,11 +6590,16 @@ rd_kafka_broker_t *rd_kafka_broker_add(rd_kafka_t *rk,
         rd_avg_init(&rkb->rkb_avg_throttle, RD_AVG_GAUGE, 0, 5000 * 1000, 2,
                     rk->rk_conf.stats_interval_ms);
         if (rk->rk_conf.produce_engine == RD_KAFKA_PRODUCE_ENGINE_V2) {
+                /* For unlimited partition cap (0), use a practical histogram
+                 * upper bound for initial stats bucketing. */
+                int64_t produce_partitions_hist_max =
+                    rk->rk_conf.produce_request_max_partitions > 0
+                        ? rk->rk_conf.produce_request_max_partitions
+                        : 2000;
                 rkb->rkb_producer_mbv2 = rd_calloc(1, sizeof(*rkb->rkb_producer_mbv2));
                 rd_kafka_broker_batch_collector_init_mbv2(rkb);
                 rd_avg_init(&rkb->rkb_producer_mbv2->rkbp_avg_produce_partitions,
-                            RD_AVG_GAUGE, 0,
-                            rk->rk_conf.produce_request_max_partitions, 2,
+                            RD_AVG_GAUGE, 0, produce_partitions_hist_max, 2,
                             rk->rk_conf.stats_interval_ms);
                 rd_avg_init(&rkb->rkb_producer_mbv2->rkbp_avg_produce_messages,
                             RD_AVG_GAUGE, 0,
