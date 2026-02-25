@@ -4366,7 +4366,9 @@ int rd_kafka_conf_warn(rd_kafka_t *rk) {
                              "explicitly setting a default_topic_conf: "
                              "recommend not using set_default_topic_conf");
 
-        if (rk->rk_conf.warn.linger_ms_used_for_broker_linger)
+        if (rk->rk_type == RD_KAFKA_PRODUCER &&
+            rk->rk_conf.produce_engine == RD_KAFKA_PRODUCE_ENGINE_V2 &&
+            rk->rk_conf.warn.linger_ms_used_for_broker_linger)
                 rd_kafka_log(rk, LOG_WARNING, "CONFWARN",
                              "Configuration `linger.ms` is deprecated for "
                              "producer batching. Using its value (%.0fms) for "

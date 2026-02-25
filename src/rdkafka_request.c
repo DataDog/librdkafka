@@ -165,6 +165,18 @@ rd_crc32_t get_toppar_crc(rd_kafka_topic_t *rkt, int32_t partition) {
         return crc;
 }
 
+static RD_INLINE int32_t
+rd_kafka_toppar_probe_index(const rd_kafka_produce_req_ctx_t *req_ctx,
+                            int32_t start_offset,
+                            int32_t probe) {
+        int32_t index = start_offset + probe;
+
+        if (index >= req_ctx->rkprc_toppar_alloc_cnt)
+                index -= req_ctx->rkprc_toppar_alloc_cnt;
+
+        return index;
+}
+
 /**
  * @brief Reserve (and return) a toppar tracking slot for the given
  * topic-partition.
@@ -179,36 +191,18 @@ assign_toppar_info(rd_kafka_produce_req_ctx_t *req_ctx,
                    int32_t partition) {
         rd_crc32_t crc = get_toppar_crc(rkt, partition);
 
-        int32_t index;
+        int32_t probe;
         int32_t start_offset = (int32_t)(crc % req_ctx->rkprc_toppar_alloc_cnt);
 
-        rd_kafka_dbg(rkt->rkt_rk, MSG, "HASHMAP",
-                     "assign_toppar_info: topic=%p (%s) partition=%d crc=%u start_offset=%d alloc_cnt=%d",
-                     (void*)rkt, rkt->rkt_topic->str, partition, crc, start_offset, req_ctx->rkprc_toppar_alloc_cnt);
-
-        for (index = start_offset; index < req_ctx->rkprc_toppar_alloc_cnt;
-             ++index) {
+        for (probe = 0; probe < req_ctx->rkprc_toppar_alloc_cnt; ++probe) {
+                int32_t index = rd_kafka_toppar_probe_index(req_ctx, start_offset,
+                                                            probe);
                 rd_kafka_produce_req_toppar_t *rtoppar =
                     &req_ctx->rkprc_toppar_info[index];
 
                 if (!rtoppar->rkprt_assigned) {
                         rtoppar->rkprt_assigned = 1;
                         rtoppar->rkprt_crc      = crc;
-                        rd_kafka_dbg(rkt->rkt_rk, MSG, "HASHMAP",
-                                     "assign_toppar_info: assigned at index=%d", index);
-                        return rtoppar;
-                }
-        }
-
-        for (index = 0; index < start_offset; ++index) {
-                rd_kafka_produce_req_toppar_t *rtoppar =
-                    &req_ctx->rkprc_toppar_info[index];
-
-                if (!rtoppar->rkprt_assigned) {
-                        rtoppar->rkprt_assigned = 1;
-                        rtoppar->rkprt_crc      = crc;
-                        rd_kafka_dbg(rkt->rkt_rk, MSG, "HASHMAP",
-                                     "assign_toppar_info: assigned at index=%d", index);
                         return rtoppar;
                 }
         }
@@ -222,15 +216,12 @@ get_toppar_info(rd_kafka_produce_req_ctx_t *req_ctx,
                 int32_t partition) {
         rd_crc32_t crc = get_toppar_crc(rkt, partition);
 
-        int32_t index;
+        int32_t probe;
         int32_t start_offset = (int32_t)(crc % req_ctx->rkprc_toppar_alloc_cnt);
 
-        rd_kafka_dbg(rkt->rkt_rk, MSG, "HASHMAP",
-                     "get_toppar_info: topic=%p (%s) partition=%d crc=%u start_offset=%d alloc_cnt=%d",
-                     (void*)rkt, rkt->rkt_topic->str, partition, crc, start_offset, req_ctx->rkprc_toppar_alloc_cnt);
-
-        for (index = start_offset; index < req_ctx->rkprc_toppar_alloc_cnt;
-             ++index) {
+        for (probe = 0; probe < req_ctx->rkprc_toppar_alloc_cnt; ++probe) {
+                int32_t index = rd_kafka_toppar_probe_index(req_ctx, start_offset,
+                                                            probe);
                 rd_kafka_produce_req_toppar_t *rtoppar =
                     &req_ctx->rkprc_toppar_info[index];
                 rd_kafka_toppar_t *rktp = NULL;
@@ -244,46 +235,12 @@ get_toppar_info(rd_kafka_produce_req_ctx_t *req_ctx,
 
                 rktp = rtoppar->rkprt_s_rktp;
 
-                rd_kafka_dbg(rkt->rkt_rk, MSG, "HASHMAP",
-                             "get_toppar_info: checking index=%d stored_topic=%p stored_partition=%d",
-                             index, (void*)rktp->rktp_rkt, rktp->rktp_partition);
-
                 if (rktp->rktp_rkt == rkt &&
                     rktp->rktp_partition == partition) {
-                        rd_kafka_dbg(rkt->rkt_rk, MSG, "HASHMAP",
-                                     "get_toppar_info: FOUND at index=%d", index);
                         return rtoppar;
                 }
         }
 
-        for (index = 0; index < start_offset; ++index) {
-                rd_kafka_produce_req_toppar_t *rtoppar =
-                    &req_ctx->rkprc_toppar_info[index];
-                rd_kafka_toppar_t *rktp = NULL;
-
-                if (!rtoppar->rkprt_assigned || !rtoppar->rkprt_s_rktp) {
-                        continue;
-                }
-
-                if (rtoppar->rkprt_crc && rtoppar->rkprt_crc != crc)
-                        continue;
-
-                rktp = rtoppar->rkprt_s_rktp;
-
-                rd_kafka_dbg(rkt->rkt_rk, MSG, "HASHMAP",
-                             "get_toppar_info: checking index=%d stored_topic=%p stored_partition=%d",
-                             index, (void*)rktp->rktp_rkt, rktp->rktp_partition);
-
-                if (rktp->rktp_rkt == rkt &&
-                    rktp->rktp_partition == partition) {
-                        rd_kafka_dbg(rkt->rkt_rk, MSG, "HASHMAP",
-                                     "get_toppar_info: FOUND at index=%d", index);
-                        return rtoppar;
-                }
-        }
-
-        rd_kafka_dbg(rkt->rkt_rk, MSG, "HASHMAP",
-                     "get_toppar_info: NOT FOUND!");
         return NULL;
 }
 
@@ -4181,7 +4138,6 @@ rd_kafka_handle_Produce_parse_mbv2(rd_kafka_produce_req_ctx_t *rkprc,
                 int64_t Offset;
         } hdr;
         const int log_decode_errors                = LOG_ERR;
-        int64_t log_start_offset                   = -1;
         rd_kafkap_Produce_reply_tags_t ProduceTags = RD_ZERO_INIT;
 
         rd_kafka_buf_read_arraycnt(rkbuf, &topic_array_cnt,
@@ -4222,7 +4178,6 @@ rd_kafka_handle_Produce_parse_mbv2(rd_kafka_produce_req_ctx_t *rkprc,
                      partition_index < partition_array_cnt; partition_index++) {
                         int64_t timestamp                  = -1;
                         int64_t partition_log_start_offset = -1;
-                        rd_kafka_toppar_t *s_rktp          = NULL;
                         rd_kafka_resp_err_t partition_err =
                             RD_KAFKA_RESP_ERR_NO_ERROR;
 
@@ -4231,8 +4186,9 @@ rd_kafka_handle_Produce_parse_mbv2(rd_kafka_produce_req_ctx_t *rkprc,
                         rd_kafka_buf_read_i64(rkbuf, &hdr.Offset);
 
                         rd_rkb_dbg(rkb, MSG, "PRODUCE",
-                                   "Produce_parse: partition_index=%d partition_id=%d error=%d offset=%lld",
-                                   partition_index, hdr.Partition, hdr.ErrorCode, hdr.Offset);
+                                   "Produce_parse: partition_index=%d partition_id=%d error=%d offset=%" PRId64,
+                                   partition_index, hdr.Partition,
+                                   hdr.ErrorCode, hdr.Offset);
 
                         partition_err = (rd_kafka_resp_err_t)hdr.ErrorCode;
 
@@ -4356,10 +4312,7 @@ rd_kafka_handle_Produce_parse_mbv2(rd_kafka_produce_req_ctx_t *rkprc,
                                         rd_kafka_buf_skip_str(rkbuf);
                                 }
 
-                                if (request->rkbuf_reqhdr.ApiVersion >= 10)
-                                        rd_kafka_buf_skip_tags(rkbuf);
-                                else
-                                        rd_kafka_buf_skip_tags(rkbuf);
+                                rd_kafka_buf_skip_tags(rkbuf);
 
                                 rd_rkb_dbg(
                                     rkb, MSG, "MSGSET",
@@ -6440,15 +6393,12 @@ static void rd_kafka_handle_Produce_mbv2(rd_kafka_t *rk,
                                     rd_kafka_buf_t *request,
                                     void *opaque) {
         rd_kafka_produce_req_ctx_t *rkprc = opaque;
-        size_t i;
+        int32_t i;
 
         if (!err && reply)
                 err = rd_kafka_handle_Produce_parse_mbv2(rkprc, rkb, reply, request);
 
         for (i = 0; i < rkprc->rkprc_toppar_alloc_cnt; i++) {
-                rd_kafka_msg_status_t status =
-                    RD_KAFKA_MSG_STATUS_POSSIBLY_PERSISTED;
-                rd_bool_t last_inflight        = 0;
                 rd_kafka_toppar_t *rktp        = NULL;
                 rd_kafka_resp_err_t toppar_err = err;
                 rd_kafka_msg_t *rkm, *rkm_next;
@@ -6505,9 +6455,6 @@ static void rd_kafka_handle_Produce_mbv2(rd_kafka_t *rk,
                                 toppar_err = toppar->rkprt_produce_errorcode;
                         }
                 }
-
-                int inflight_cnt = rd_atomic32_get(&batch.rktp->rktp_msgs_inflight);
-                int batch_msgq_len = rd_kafka_msgq_len(&batch.msgq);
 
                 /* NOTE: Don't decrement inflight here - rd_kafka_msgbatch_handle_Produce_result()
                  * will handle it. Decrementing here would be a double-decrement. */
@@ -7048,7 +6995,8 @@ int rd_kafka_ProduceRequest_mbv2(rd_kafka_broker_t *rkb,
          * transmit queue as possible.
          */
         if (unlikely(!rd_kafka_ProduceRequest_append_mbv2(&ctx, rktp))) {
-                if (rkbuf = rd_kafka_produce_ctx_finalize_mbv2(&ctx)) {
+                rkbuf = rd_kafka_produce_ctx_finalize_mbv2(&ctx);
+                if (rkbuf) {
                         rd_kafka_buf_destroy(rkbuf);
                 }
                 return 0;
