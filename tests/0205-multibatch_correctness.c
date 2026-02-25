@@ -98,8 +98,22 @@ typedef enum {
         MM_PAYLOAD_LEN   = 1 << 5,
         MM_PAYLOAD_BYTES = 1 << 6,
         MM_KEY_LEN       = 1 << 7,
-        MM_KEY_BYTES     = 1 << 8
+        MM_KEY_BYTES     = 1 << 8,
+        MM_HEADER_CNT    = 1 << 9,
+        MM_HEADER_NAME   = 1 << 10,
+        MM_HEADER_LEN    = 1 << 11,
+        MM_HEADER_BYTES  = 1 << 12,
+        MM_OFFSET_ORDER  = 1 << 13,
+        MM_OFFSET_GAP    = 1 << 14,
+        MM_OFFSET_BASE   = 1 << 15
 } mm_flags_t;
+
+typedef struct {
+        char *name;
+        size_t name_len;
+        unsigned char *value;
+        size_t value_len;
+} msg_header_t;
 
 typedef struct {
         int msgid; /* -1 if parse/range failed */
@@ -132,6 +146,9 @@ typedef struct {
         size_t payload_len;
         unsigned char *payload;
 
+        size_t header_cnt;
+        msg_header_t *headers;
+
         int dr_seen_cnt;                  // exactly 1 expected
         rd_kafka_resp_err_t dr_last_err;  // last dr_err
 } msg_verify_t;
@@ -159,6 +176,10 @@ typedef struct {
 
         int *
             last_msgid_per_partition;  // init -1, for per-partition order check
+        int *expected_per_partition;   // expected consumed messages per partition
+        int *seen_per_partition;       // observed consumed messages per partition
+        int64_t *first_offset_per_partition; // first consumed offset per partition
+        int64_t *last_offset_per_partition;  // last consumed offset per partition
 
 
         // aggregate counters
@@ -176,6 +197,14 @@ typedef struct {
         int key_byte_mismatches;
         int payload_len_mismatches;
         int payload_byte_mismatches;
+        int header_count_mismatches;
+        int header_name_mismatches;
+        int header_len_mismatches;
+        int header_byte_mismatches;
+        int offset_order_violations;
+        int offset_gap_violations;
+        int offset_base_violations;
+        int partition_count_mismatches;
         int duplicates;
         int missing;
 
@@ -333,6 +362,83 @@ static void fill_random_bytes(unsigned char *dst, size_t len, uint64_t seed) {
                 }
         }
 }
+
+static void fill_random_bytes_stored(unsigned char *dst, size_t len) {
+        for (size_t i = 0; i < len; i++)
+                dst[i] = (unsigned char)(rand() & 0xff);
+}
+
+static rd_kafka_headers_t *
+msg_headers_build_for_produce(const msg_verify_t *m) {
+        rd_kafka_headers_t *hdrs = rd_kafka_headers_new(m->header_cnt);
+
+        for (size_t i = 0; i < m->header_cnt; i++) {
+                const msg_header_t *h = &m->headers[i];
+                rd_kafka_resp_err_t err =
+                    rd_kafka_header_add(hdrs, h->name, -1, h->value, h->value_len);
+                TEST_ASSERT(!err,
+                            "rd_kafka_header_add failed for name=%s len=%zu: %s",
+                            h->name, h->value_len, rd_kafka_err2str(err));
+        }
+
+        return hdrs;
+}
+
+static void verify_message_headers(verify_state_t *vs,
+                                   msg_verify_t *m,
+                                   const rd_kafka_message_t *rkmsg,
+                                   seen_record_t *rec) {
+        rd_kafka_headers_t *hdrs = NULL;
+        rd_kafka_resp_err_t err;
+        size_t got_cnt;
+        size_t cmp_cnt;
+
+        err = rd_kafka_message_headers(rkmsg, &hdrs);
+        if (err) {
+                rec->flags |= MM_HEADER_CNT;
+                vs->header_count_mismatches++;
+                return;
+        }
+
+        got_cnt = rd_kafka_header_cnt(hdrs);
+        if (got_cnt != m->header_cnt) {
+                rec->flags |= MM_HEADER_CNT;
+                vs->header_count_mismatches++;
+        }
+
+        cmp_cnt = got_cnt < m->header_cnt ? got_cnt : m->header_cnt;
+        for (size_t i = 0; i < cmp_cnt; i++) {
+                const char *got_name = NULL;
+                const void *got_value = NULL;
+                size_t got_value_len = 0;
+                const msg_header_t *exp = &m->headers[i];
+
+                err = rd_kafka_header_get_all(hdrs, i, &got_name, &got_value,
+                                              &got_value_len);
+                if (err) {
+                        rec->flags |= MM_HEADER_CNT;
+                        vs->header_count_mismatches++;
+                        break;
+                }
+
+                if (!got_name || strcmp(got_name, exp->name)) {
+                        rec->flags |= MM_HEADER_NAME;
+                        vs->header_name_mismatches++;
+                }
+
+                if (got_value_len != exp->value_len) {
+                        rec->flags |= MM_HEADER_LEN;
+                        vs->header_len_mismatches++;
+                } else if (got_value_len > 0 &&
+                           (!got_value ||
+                            memcmp(got_value, exp->value, exp->value_len) !=
+                                0)) {
+                        rec->flags |= MM_HEADER_BYTES;
+                        vs->header_byte_mismatches++;
+                }
+        }
+}
+
 static verify_state_t *init_verification_state(bench_config_t *config,
                                                uint64_t testid) {
         verify_state_t *vs;
@@ -352,8 +458,20 @@ static verify_state_t *init_verification_state(bench_config_t *config,
         vs->msgs          = calloc(msgs_to_produce, sizeof(*vs->msgs));
         vs->last_msgid_per_partition =
             malloc(sizeof(int) * partition_cnt);  // IS this right?
+        vs->expected_per_partition = calloc((size_t)partition_cnt, sizeof(int));
+        vs->seen_per_partition     = calloc((size_t)partition_cnt, sizeof(int));
+        vs->first_offset_per_partition =
+            malloc(sizeof(*vs->first_offset_per_partition) * (size_t)partition_cnt);
+        vs->last_offset_per_partition =
+            malloc(sizeof(*vs->last_offset_per_partition) * (size_t)partition_cnt);
+        TEST_ASSERT(vs->last_msgid_per_partition && vs->expected_per_partition &&
+                        vs->seen_per_partition && vs->first_offset_per_partition &&
+                        vs->last_offset_per_partition,
+                    "OOM allocating per-partition verification arrays");
         for (int i = 0; i < partition_cnt; i++) {
                 vs->last_msgid_per_partition[i] = -1;
+                vs->first_offset_per_partition[i] = -1;
+                vs->last_offset_per_partition[i]  = -1;
         }
 
         vs->size_seed    = (uint64_t)time(NULL);
@@ -369,6 +487,7 @@ static verify_state_t *init_verification_state(bench_config_t *config,
 
                 m->msgid              = msgid;
                 m->expected_partition = part;
+                vs->expected_per_partition[part]++;
 
                 // ----------------
                 // generate a key and store it
@@ -393,6 +512,29 @@ static verify_state_t *init_verification_state(bench_config_t *config,
                 uint64_t seed = ((uint64_t)msgid << 32) ^ (uint64_t)part ^
                                 (testid * 0x9e3779b97f4a7c15ULL);
                 fill_random_bytes(m->payload, sz, seed);
+
+                m->header_cnt = 2 + (size_t)(rand() % 3); /* 2..4 headers */
+                m->headers    = calloc(m->header_cnt, sizeof(*m->headers));
+                TEST_ASSERT(m->headers, "OOM allocating headers");
+
+                for (size_t h = 0; h < m->header_cnt; h++) {
+                        msg_header_t *mh = &m->headers[h];
+                        char namebuf[64];
+                        int n = rd_snprintf(namebuf, sizeof(namebuf),
+                                            "h%02zu_msg%05d", h, msgid);
+                        size_t val_len = 8 + (size_t)(rand() % 57); /* 8..64 */
+
+                        TEST_ASSERT(n > 0, "header name generation failed");
+                        mh->name_len = (size_t)n;
+                        mh->name     = malloc(mh->name_len + 1);
+                        TEST_ASSERT(mh->name, "OOM allocating header name");
+                        memcpy(mh->name, namebuf, mh->name_len + 1);
+
+                        mh->value_len = val_len;
+                        mh->value     = malloc(mh->value_len);
+                        TEST_ASSERT(mh->value, "OOM allocating header value");
+                        fill_random_bytes_stored(mh->value, mh->value_len);
+                }
         }
         return vs;
 }
@@ -585,13 +727,22 @@ static void run_produce_phase(bench_config_t *config,
 
                 msg_verify_t *m      = &vs->msgs[i];
                 produce_opaque_t *op = malloc(sizeof(*op));
+                rd_kafka_headers_t *hdrs;
+                rd_kafka_resp_err_t err_send;
                 op->vs               = vs;
                 op->msgid            = m->msgid;
 
-                int err_send = rd_kafka_produce(
-                    rkt, m->expected_partition, RD_KAFKA_MSG_F_COPY, m->payload,
-                    m->payload_len, m->key, m->key_len, op);
+                hdrs = msg_headers_build_for_produce(m);
+                err_send =
+                    rd_kafka_producev(rk, RD_KAFKA_V_RKT(rkt),
+                                      RD_KAFKA_V_PARTITION(m->expected_partition),
+                                      RD_KAFKA_V_VALUE(m->payload, m->payload_len),
+                                      RD_KAFKA_V_KEY(m->key, m->key_len),
+                                      RD_KAFKA_V_HEADERS(hdrs),
+                                      RD_KAFKA_V_MSGFLAGS(RD_KAFKA_MSG_F_COPY),
+                                      RD_KAFKA_V_OPAQUE(op), RD_KAFKA_V_END);
                 if (err_send) {
+                        rd_kafka_headers_destroy(hdrs);
                         free(op);
                         msg_fails++;
                 } else {
@@ -603,12 +754,13 @@ static void run_produce_phase(bench_config_t *config,
                             message_crc32(m->payload, m->payload_len);
                         TEST_SAY(
                             "PRODUCE msgid=%d partition=%" PRId32
-                            " key_len=%zu payload_len=%zu payload_crc=%08x "
+                            " key_len=%zu payload_len=%zu headers=%zu "
+                            "payload_crc=%08x "
                             "status=%s\n",
                             m->msgid, m->expected_partition, m->key_len,
-                            m->payload_len, (unsigned int)payload_crc,
-                            err_send ? "enqueue_failed"
-                                                     : "enqueued");
+                            m->payload_len, m->header_cnt,
+                            (unsigned int)payload_crc,
+                            err_send ? "enqueue_failed" : "enqueued");
                 }
 
                 if (i % 100 == 0) {
@@ -811,15 +963,42 @@ static rd_bool_t verify_consumed_message(verify_state_t *vs,
                 vs->partition_mismatches++;
         }
 
+        if (rkmsg->partition >= 0 && rkmsg->partition < vs->partition_cnt) {
+                int32_t p = rkmsg->partition;
+                int64_t prev_off = vs->last_offset_per_partition[p];
+                vs->seen_per_partition[p]++;
+
+                if (vs->first_offset_per_partition[p] == -1) {
+                        vs->first_offset_per_partition[p] = rkmsg->offset;
+                        if (rkmsg->offset != 0) {
+                                rec.flags |= MM_OFFSET_BASE;
+                                vs->offset_base_violations++;
+                        }
+                } else {
+                        if (rkmsg->offset <= prev_off) {
+                                rec.flags |= MM_OFFSET_ORDER;
+                                vs->offset_order_violations++;
+                        } else if (rkmsg->offset != prev_off + 1) {
+                                rec.flags |= MM_OFFSET_GAP;
+                                vs->offset_gap_violations++;
+                        }
+                }
+
+                if (rkmsg->offset > vs->last_offset_per_partition[p])
+                        vs->last_offset_per_partition[p] = rkmsg->offset;
+        }
+
         // Now do a per-partition order check
         if (!(rec.flags & MM_MSGID_RANGE)) {
-                int prev = vs->last_msgid_per_partition[rkmsg->partition];
-                if (prev != -1 && in_msgid <= prev) {
-                        rec.flags |= MM_ORDER;
-                        vs->order_violations++;
-                } else {
-                        vs->last_msgid_per_partition[rkmsg->partition] =
-                            in_msgid;
+                if (rkmsg->partition >= 0 && rkmsg->partition < vs->partition_cnt) {
+                        int prev = vs->last_msgid_per_partition[rkmsg->partition];
+                        if (prev != -1 && in_msgid <= prev) {
+                                rec.flags |= MM_ORDER;
+                                vs->order_violations++;
+                        } else {
+                                vs->last_msgid_per_partition[rkmsg->partition] =
+                                    in_msgid;
+                        }
                 }
         }
 
@@ -848,6 +1027,8 @@ static rd_bool_t verify_consumed_message(verify_state_t *vs,
                                m->payload_len, rkmsg->len);
         }
 
+        verify_message_headers(vs, m, rkmsg, &rec);
+
         if (should_log_this_message(vs, rec.flags)) {
                 uint32_t expected_payload_crc =
                     message_crc32(m->payload, m->payload_len);
@@ -859,13 +1040,14 @@ static rd_bool_t verify_consumed_message(verify_state_t *vs,
                     "VERIFY msgid=%d expected(part=%" PRId32
                     ",key=%zu,payload=%zu,payload_crc=%08x) got(part=%" PRId32
                     ",offset=%" PRId64 ",key=%zu,payload=%zu,payload_crc=%08x) "
-                    "result=%s flags=%s key_diff=%d payload_diff=%d\n",
+                    "result=%s flags=%s key_diff=%d payload_diff=%d headers=%zu\n",
                     in_msgid, m->expected_partition, m->key_len, m->payload_len,
                     (unsigned int)expected_payload_crc, rkmsg->partition,
                     rkmsg->offset, rkmsg->key_len, rkmsg->len,
                     (unsigned int)got_payload_crc,
                     rec.flags == MM_NONE ? "OK" : "MISMATCH", flags,
-                    rec.first_key_diff_idx, rec.first_payload_diff_idx);
+                    rec.first_key_diff_idx, rec.first_payload_diff_idx,
+                    m->header_cnt);
                 log_verify_payloads(vs, m, &rec, rd_true);
         }
 
@@ -895,6 +1077,17 @@ static void destroy_verify_state(verify_state_t *vs) {
 
                         free(m->key);
                         free(m->payload);
+                        for (size_t h = 0; h < m->header_cnt; h++) {
+                                free(m->headers[h].name);
+                                free(m->headers[h].value);
+                                m->headers[h].name      = NULL;
+                                m->headers[h].value     = NULL;
+                                m->headers[h].name_len  = 0;
+                                m->headers[h].value_len = 0;
+                        }
+                        free(m->headers);
+                        m->headers    = NULL;
+                        m->header_cnt = 0;
 
                         for (size_t j = 0; j < m->seen_cnt; j++)
                                 destroy_seen_record(&m->seen[j]);
@@ -915,6 +1108,10 @@ static void destroy_verify_state(verify_state_t *vs) {
         free(vs->msgs);
         free(vs->size_by_msgid);
         free(vs->last_msgid_per_partition);
+        free(vs->expected_per_partition);
+        free(vs->seen_per_partition);
+        free(vs->first_offset_per_partition);
+        free(vs->last_offset_per_partition);
         free(vs);
 }
 
@@ -986,6 +1183,13 @@ static void mm_flags_to_str(mm_flags_t flags, char *dst, size_t dst_size) {
         APPEND_FLAG(MM_PAYLOAD_BYTES, "PAYLOAD_BYTES");
         APPEND_FLAG(MM_KEY_LEN, "KEY_LEN");
         APPEND_FLAG(MM_KEY_BYTES, "KEY_BYTES");
+        APPEND_FLAG(MM_HEADER_CNT, "HEADER_CNT");
+        APPEND_FLAG(MM_HEADER_NAME, "HEADER_NAME");
+        APPEND_FLAG(MM_HEADER_LEN, "HEADER_LEN");
+        APPEND_FLAG(MM_HEADER_BYTES, "HEADER_BYTES");
+        APPEND_FLAG(MM_OFFSET_ORDER, "OFFSET_ORDER");
+        APPEND_FLAG(MM_OFFSET_GAP, "OFFSET_GAP");
+        APPEND_FLAG(MM_OFFSET_BASE, "OFFSET_BASE");
 
 #undef APPEND_FLAG
 }
@@ -1141,6 +1345,16 @@ static void dump_full_mismatch_report(verify_state_t *vs) {
                  vs->key_len_mismatches, vs->key_byte_mismatches);
         TEST_SAY("payload_len_mismatches=%d payload_byte_mismatches=%d\n",
                  vs->payload_len_mismatches, vs->payload_byte_mismatches);
+        TEST_SAY(
+            "header_count_mismatches=%d header_name_mismatches=%d "
+            "header_len_mismatches=%d header_byte_mismatches=%d\n",
+            vs->header_count_mismatches, vs->header_name_mismatches,
+            vs->header_len_mismatches, vs->header_byte_mismatches);
+        TEST_SAY(
+            "offset_order_violations=%d offset_gap_violations=%d "
+            "offset_base_violations=%d partition_count_mismatches=%d\n",
+            vs->offset_order_violations, vs->offset_gap_violations,
+            vs->offset_base_violations, vs->partition_count_mismatches);
         TEST_SAY("dr_total=%d dr_success=%d dr_errors=%d dr_orphan=%d\n",
                  vs->dr_total, vs->dr_success, vs->dr_errors, vs->dr_orphan);
 
@@ -1180,6 +1394,21 @@ static void dump_full_mismatch_report(verify_state_t *vs) {
                 for (size_t j = 0; j < m->seen_cnt; j++) {
                         TEST_SAY("  seen[%zu]\n", j);
                         dump_seen_record("", &m->seen[j]);
+                }
+        }
+
+        TEST_SAY("\n-- Per-partition counts and offsets --\n");
+        for (int p = 0; p < vs->partition_cnt; p++) {
+                if (vs->seen_per_partition[p] != vs->expected_per_partition[p] ||
+                    (vs->seen_per_partition[p] > 0 &&
+                     vs->first_offset_per_partition[p] != 0)) {
+                        TEST_SAY(
+                            " partition=%d expected=%d seen=%d first_offset=%" PRId64
+                            " last_offset=%" PRId64 "\n",
+                            p, vs->expected_per_partition[p],
+                            vs->seen_per_partition[p],
+                            vs->first_offset_per_partition[p],
+                            vs->last_offset_per_partition[p]);
                 }
         }
 
@@ -1238,12 +1467,21 @@ static void run_consume_and_verify_phase(bench_config_t *config,
                 }
         }
 
+        for (int p = 0; p < vs->partition_cnt; p++) {
+                if (vs->seen_per_partition[p] != vs->expected_per_partition[p])
+                        vs->partition_count_mismatches++;
+        }
+
         // Correctness gate
         if (vs->missing || vs->duplicates || vs->parse_key_errors ||
             vs->testid_mismatches || vs->msgid_range_errors ||
             vs->partition_mismatches || vs->order_violations ||
             vs->key_len_mismatches || vs->key_byte_mismatches ||
-            vs->payload_len_mismatches || vs->payload_byte_mismatches) {
+            vs->payload_len_mismatches || vs->payload_byte_mismatches ||
+            vs->header_count_mismatches || vs->header_name_mismatches ||
+            vs->header_len_mismatches || vs->header_byte_mismatches ||
+            vs->offset_order_violations || vs->offset_gap_violations ||
+            vs->offset_base_violations || vs->partition_count_mismatches) {
                 dump_full_mismatch_report(vs);  // print it all
                 TEST_FAIL("0205 correctness failed");
         }
@@ -1287,6 +1525,15 @@ static void report_verification_state(verify_state_t *vs) {
                  vs->partition_mismatches, vs->order_violations,
                  vs->key_len_mismatches, vs->key_byte_mismatches,
                  vs->payload_len_mismatches, vs->payload_byte_mismatches);
+        TEST_SAY(
+            "header_cnt=%d header_name=%d header_len=%d header_bytes=%d\n",
+            vs->header_count_mismatches, vs->header_name_mismatches,
+            vs->header_len_mismatches, vs->header_byte_mismatches);
+        TEST_SAY(
+            "offset_order=%d offset_gap=%d offset_base=%d "
+            "partition_count=%d\n",
+            vs->offset_order_violations, vs->offset_gap_violations,
+            vs->offset_base_violations, vs->partition_count_mismatches);
         TEST_SAY("dr_total=%d dr_success=%d dr_errors=%d dr_orphan=%d dr_missing=%d dr_duplicates=%d dr_nonzero=%d\n",
                  vs->dr_total, vs->dr_success, vs->dr_errors, vs->dr_orphan,
                  dr_missing, dr_duplicates, dr_nonzero);
