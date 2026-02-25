@@ -429,6 +429,7 @@ static rd_kafka_t *create_producer(bench_config_t *config,
         test_conf_set(conf, "queue.buffering.max.kbytes", "102400"); /* 100MB */
         test_conf_set(conf, "compression.type", "lz4");
         test_conf_set(conf, "message.max.bytes", "100000000"); /* 100MB */
+        test_conf_set(conf, "max.in.flight", "1");
         batch_num_messages = test_getenv("BENCH_BATCH_NUM_MESSAGES", "100000");
         batch_size         = test_getenv("BENCH_BATCH_SIZE", "1000000");
         test_conf_set(conf, "batch.num.messages", batch_num_messages);
