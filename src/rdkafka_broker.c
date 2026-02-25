@@ -3921,7 +3921,8 @@ static rd_kafka_resp_err_t rd_kafka_broker_destroy_error(rd_kafka_t *rk) {
  * @locks none
  */
 static RD_WARN_UNUSED_RESULT rd_bool_t
-rd_kafka_broker_op_serve_v1(rd_kafka_broker_t *rkb, rd_kafka_op_t *rko) {
+RD_UNUSED rd_kafka_broker_op_serve_v1(rd_kafka_broker_t *rkb,
+                                      rd_kafka_op_t *rko) {
         rd_kafka_toppar_t *rktp;
         rd_kafka_resp_err_t topic_err;
         rd_bool_t wakeup = rd_false;
@@ -5304,12 +5305,10 @@ static int rd_kafka_toppar_producer_serve_mbv2(rd_kafka_broker_t *rkb,
                                           rd_bool_t do_timeout_scan,
                                           rd_bool_t may_send,
                                           rd_bool_t flushing) {
-        int cnt = 0;
         int r;
         rd_kafka_msg_t *rkm;
         int move_cnt = 0;
         int inflight              = 0;
-        uint64_t epoch_base_msgid = 0;
         rd_bool_t batch_ready     = rd_false;
         int produce_enabled = 1;
 
@@ -5394,36 +5393,16 @@ static int rd_kafka_toppar_producer_serve_mbv2(rd_kafka_broker_t *rkb,
         if (unlikely(!may_send)) {
                 /* Sends prohibited on the broker or instance level */
                 produce_enabled = 0;
-                rd_rkb_dbg(rkb, QUEUE, "TOPPAR",
-                           "%.*s [%" PRId32
-                           "] produce disabled: may_send=false",
-                           RD_KAFKAP_STR_PR(rktp->rktp_rkt->rkt_topic),
-                           rktp->rktp_partition);
         } else if (unlikely(rd_kafka_fatal_error_code(rkb->rkb_rk))) {
                 /* Fatal error has been raised, don't produce. */
                 produce_enabled = 0;
-                rd_rkb_dbg(rkb, QUEUE, "TOPPAR",
-                           "%.*s [%" PRId32
-                           "] produce disabled: fatal error",
-                           RD_KAFKAP_STR_PR(rktp->rktp_rkt->rkt_topic),
-                           rktp->rktp_partition);
         } else if (unlikely(RD_KAFKA_TOPPAR_IS_PAUSED(rktp))) {
                 /* Partition is paused */
                 produce_enabled = 0;
-                rd_rkb_dbg(rkb, QUEUE, "TOPPAR",
-                           "%.*s [%" PRId32
-                           "] produce disabled: partition paused",
-                           RD_KAFKAP_STR_PR(rktp->rktp_rkt->rkt_topic),
-                           rktp->rktp_partition);
         } else if (unlikely(rd_kafka_is_transactional(rkb->rkb_rk) &&
                             !rd_kafka_txn_toppar_may_send_msg(rktp))) {
                 /* Partition not registered in transaction yet */
                 produce_enabled = 0;
-                rd_rkb_dbg(rkb, QUEUE, "TOPPAR",
-                           "%.*s [%" PRId32
-                           "] produce disabled: transaction gating",
-                           RD_KAFKAP_STR_PR(rktp->rktp_rkt->rkt_topic),
-                           rktp->rktp_partition);
         } else if (produce_enabled > 0) {
                 /* Move messages from locked partition produce queue
                  * to broker-local xmit queue. */
@@ -5548,12 +5527,6 @@ static int rd_kafka_toppar_producer_serve_mbv2(rd_kafka_broker_t *rkb,
                                 return 0;
                 }
 
-                rd_kafka_toppar_lock(rktp);
-                /* Idempotent producer epoch base msgid, this is passed to the
-                 * ProduceRequest and msgset writer to adjust the protocol-level
-                 * per-message sequence number. */
-                epoch_base_msgid = rktp->rktp_eos.epoch_base_msgid;
-                rd_kafka_toppar_unlock(rktp);
         }
 
         if (unlikely(rkb->rkb_state != RD_KAFKA_BROKER_STATE_UP)) {
