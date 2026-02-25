@@ -2360,7 +2360,6 @@ rd_kafka_t *rd_kafka_new(rd_kafka_type_t type,
         rd_kafka_resp_err_t ret_err = RD_KAFKA_RESP_ERR_NO_ERROR;
         int ret_errno               = 0;
         const char *conf_err;
-        const char *app_conf_gid;
         static int dd_identity_once = 0;
 #ifndef _WIN32
         sigset_t newset, oldset;
@@ -2395,14 +2394,6 @@ rd_kafka_t *rd_kafka_new(rd_kafka_type_t type,
                 conf = rd_kafka_conf_new();
         else
                 conf = app_conf;
-
-        app_conf_gid = conf->group_id_str ? conf->group_id_str : "<null>";
-        fprintf(stderr,
-                "[DDSUBPROBE_20260211A] rd_kafka_new enter "
-                "type=%s app_conf=%p group.id=%s\n",
-                rd_kafka_type2str(type), (void *)app_conf, app_conf_gid);
-        fflush(stderr);
-
 
         /* Verify and finalize configuration */
         if ((conf_err = rd_kafka_conf_finalize(type, conf))) {
@@ -2662,10 +2653,6 @@ rd_kafka_t *rd_kafka_new(rd_kafka_type_t type,
                         rk->rk_cgrp = rd_kafka_cgrp_new(
                             rk, rk->rk_conf.group_protocol, rk->rk_group_id,
                             rk->rk_client_id);
-
-                        rd_kafka_dbg(rk, CGRP, "CGRP_NEW",
-                           "Setting rk->rk_cgrp for group_id=%s ",
-                           rk->rk_group_id ? rk->rk_group_id->str : "(null)");
 
                         rk->rk_consumer.q =
                             rd_kafka_q_keep(rk->rk_cgrp->rkcg_q);
