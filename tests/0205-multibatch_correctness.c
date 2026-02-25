@@ -65,6 +65,14 @@ static const char *bench_producer_profile_slug(profile_t producer_profile) {
         }
 }
 
+static const char *idempotence_mode_name(rd_bool_t enable_idempotence) {
+        return enable_idempotence ? "enabled" : "disabled";
+}
+
+static const char *idempotence_mode_slug(rd_bool_t enable_idempotence) {
+        return enable_idempotence ? "idempotent" : "non_idempotent";
+}
+
 typedef enum {
         MSGLOG_COMPACT = 0,
         MSGLOG_PREVIEW,
@@ -657,28 +665,17 @@ dr_cb(rd_kafka_t *rk, const rd_kafka_message_t *rkmsg, void *opaque) {
 }
 
 /**
- * Create producer with standard configuration
+ * Configure producer with standard multibatch settings.
  */
-static rd_kafka_t *create_producer(bench_config_t *config,
-                                   const char *topic,
-                                   profile_t producer_profile) {
-        rd_kafka_conf_t *conf;
-        rd_kafka_t *rk;
+static void configure_producer_conf(bench_config_t *config,
+                                    rd_kafka_conf_t *conf,
+                                    profile_t producer_profile,
+                                    rd_bool_t enable_idempotence) {
         const char *val;
         const char *v1_linger_ms;
 
-        (void)topic;
+        (void)config;
 
-        test_conf_init(&conf, NULL, 120);
-        rd_kafka_conf_set_dr_msg_cb(conf, dr_cb);
-        /* Use typed stats callback only - disable JSON callback set by
-         * test_conf_init to avoid double rd_avg_rollover consumption */
-        rd_kafka_conf_set_stats_cb(conf, NULL);
-        produce_req_stats_ctx_ensure_init();
-        rd_kafka_conf_set_opaque(conf, &g_produce_req_stats);
-        rd_kafka_conf_set_stats_cb_typed(conf, stats_cb_produce_requests);
-
-        /* Standard MultiBatch configuration */
         test_conf_set(conf, "statistics.interval.ms", "50");
         test_conf_set(conf, "queue.buffering.max.messages", "1000000");
         test_conf_set(conf, "queue.buffering.max.kbytes", "102400"); /* 100MB */
@@ -721,11 +718,35 @@ static rd_kafka_t *create_producer(bench_config_t *config,
             (val = test_getenv("MAX_PARTITIONS", NULL))) {
                 test_conf_set(conf, "produce.request.max.partitions", val);
         }
+        if (enable_idempotence)
+                test_conf_set(conf, "enable.idempotence", "true");
+}
 
+/**
+ * Create producer with standard configuration
+ */
+static rd_kafka_t *create_producer(bench_config_t *config,
+                                   const char *topic,
+                                   profile_t producer_profile,
+                                   rd_bool_t enable_idempotence) {
+        rd_kafka_conf_t *conf;
+        rd_kafka_t *rk;
+
+        (void)topic;
+
+        test_conf_init(&conf, NULL, 120);
+        rd_kafka_conf_set_dr_msg_cb(conf, dr_cb);
+        /* Use typed stats callback only - disable JSON callback set by
+         * test_conf_init to avoid double rd_avg_rollover consumption */
+        rd_kafka_conf_set_stats_cb(conf, NULL);
+        produce_req_stats_ctx_ensure_init();
+        rd_kafka_conf_set_opaque(conf, &g_produce_req_stats);
+        rd_kafka_conf_set_stats_cb_typed(conf, stats_cb_produce_requests);
+        configure_producer_conf(config, conf, producer_profile,
+                                enable_idempotence);
         rk = test_create_handle(RD_KAFKA_PRODUCER, conf);
         return rk;
 }
-
 
 static void append_seen(msg_verify_t *m, const seen_record_t *rec) {
         if (m->seen_cnt == m->seen_cap) {
@@ -755,6 +776,7 @@ static void append_orphan(verify_state_t *vs, seen_record_t *rec) {
 static void run_produce_phase(bench_config_t *config,
                               verify_state_t *vs,
                               profile_t producer_profile,
+                              rd_bool_t enable_idempotence,
                               const char *topic,
                               int rate_msgs_sec) {
         rd_kafka_t *rk;
@@ -775,6 +797,8 @@ static void run_produce_phase(bench_config_t *config,
         TEST_SAY("========================================\n");
         TEST_SAY("Producer profile: %s\n",
                  bench_producer_profile_name(producer_profile));
+        TEST_SAY("Idempotence: %s\n",
+                 idempotence_mode_name(enable_idempotence));
         TEST_SAY("Target messages: %d\n", target_msgs);
         TEST_SAY("Partitions: %d\n", vs->partition_cnt);
         TEST_SAY("Message size: %zu-%zu bytes\n", vs->msg_size_min,
@@ -782,7 +806,8 @@ static void run_produce_phase(bench_config_t *config,
         TEST_SAY("========================================\n\n");
 
         produce_req_stats_ctx_reset();
-        rk  = create_producer(config, topic, producer_profile);
+        rk  = create_producer(config, topic, producer_profile,
+                              enable_idempotence);
         rkt = test_create_producer_topic(rk, topic, "acks", "-1", NULL);
 
         for (int i = 0; i < 3; i++)
@@ -1566,7 +1591,8 @@ static void run_consume_and_verify_phase(bench_config_t *config,
                                          verify_state_t *vs,
                                          uint64_t testid,
                                          const char *topic,
-                                         profile_t producer_profile) {
+                                         profile_t producer_profile,
+                                         rd_bool_t enable_idempotence) {
         char group_id[128];
         rd_snprintf(group_id, sizeof(group_id), "0205-correctness-%s-%" PRIu64,
                     bench_producer_profile_slug(producer_profile), testid);
@@ -1617,6 +1643,40 @@ static void run_consume_and_verify_phase(bench_config_t *config,
         for (int p = 0; p < vs->partition_cnt; p++) {
                 if (vs->seen_per_partition[p] != vs->expected_per_partition[p])
                         vs->partition_count_mismatches++;
+        }
+
+        if (enable_idempotence) {
+                int dr_missing    = 0;
+                int dr_duplicates = 0;
+                int dr_nonzero    = 0;
+
+                for (int msgid = 0; msgid < vs->expected_msgs; msgid++) {
+                        const msg_verify_t *m = &vs->msgs[msgid];
+
+                        if (m->dr_seen_cnt == 0)
+                                dr_missing++;
+                        else if (m->dr_seen_cnt > 1)
+                                dr_duplicates += (m->dr_seen_cnt - 1);
+
+                        if (m->dr_seen_cnt > 0 &&
+                            m->dr_last_err != RD_KAFKA_RESP_ERR_NO_ERROR)
+                                dr_nonzero++;
+                }
+
+                if (vs->dr_total != vs->expected_msgs ||
+                    vs->dr_success != vs->expected_msgs || vs->dr_errors != 0 ||
+                    vs->dr_orphan != 0 || dr_missing != 0 || dr_duplicates != 0 ||
+                    dr_nonzero != 0) {
+                        dump_full_mismatch_report(vs);
+                        TEST_FAIL(
+                            "0205 idempotent DR invariants failed: "
+                            "dr_total=%d expected_msgs=%d dr_success=%d "
+                            "dr_errors=%d dr_orphan=%d dr_missing=%d "
+                            "dr_duplicates=%d dr_nonzero=%d",
+                            vs->dr_total, vs->expected_msgs, vs->dr_success,
+                            vs->dr_errors, vs->dr_orphan, dr_missing,
+                            dr_duplicates, dr_nonzero);
+                }
         }
 
         // Correctness gate
@@ -1695,15 +1755,19 @@ static void report_verification_state(verify_state_t *vs) {
 }
 
 static void run_correctness_phase(bench_config_t *config,
-                                  profile_t producer_profile) {
+                                  profile_t producer_profile,
+                                  rd_bool_t enable_idempotence) {
         uint64_t testid = test_id_generate();
 
         char suffix[64];
-        rd_snprintf(suffix, sizeof(suffix), "0205_%s",
-                    bench_producer_profile_slug(producer_profile));
+        rd_snprintf(suffix, sizeof(suffix), "0205_%s_%s",
+                    bench_producer_profile_slug(producer_profile),
+                    idempotence_mode_slug(enable_idempotence));
 
         const char *topic = test_mk_topic_name(suffix, 1);
-        rd_kafka_t *rk_temp = create_producer(config, topic, producer_profile);
+        rd_kafka_t *rk_temp =
+            create_producer(config, topic, producer_profile,
+                            enable_idempotence);
         test_create_topic_wait_exists(rk_temp, topic, config->partition_cnt, 1,
                                       30000);
         rd_kafka_destroy(rk_temp);
@@ -1711,9 +1775,10 @@ static void run_correctness_phase(bench_config_t *config,
         verify_state_t *verification_state =
             init_verification_state(config, testid);
         // TODO: get rate from config, capped at 1000 now right now.
-        run_produce_phase(config, verification_state, producer_profile, topic,
-                          1000);
-        run_consume_and_verify_phase(config, verification_state, testid, topic, producer_profile);
+        run_produce_phase(config, verification_state, producer_profile,
+                          enable_idempotence, topic, 1000);
+        run_consume_and_verify_phase(config, verification_state, testid, topic,
+                                     producer_profile, enable_idempotence);
         report_verification_state(verification_state);
         destroy_verify_state(verification_state);
 }
@@ -1722,9 +1787,18 @@ int main_0205_multibatch_correctness(int argc, char **argv) {
         bench_config_t config;
         parse_config(&config);
 
-        run_correctness_phase(&config, PROFILE_V1);
-        run_correctness_phase(&config, PROFILE_V1_MB);
-        run_correctness_phase(&config, PROFILE_V2);
+        run_correctness_phase(&config, PROFILE_V1, rd_false);
+        run_correctness_phase(&config, PROFILE_V1_MB, rd_false);
+        run_correctness_phase(&config, PROFILE_V2, rd_false);
+
+        /* Validate idempotent producer correctness on supported paths. */
+        run_correctness_phase(&config, PROFILE_V1, rd_true);
+        run_correctness_phase(&config, PROFILE_V2, rd_true);
+
+        /* v1+multibatch is intentionally skipped for idempotent mode.
+         * Idempotent producer semantics are validated for v1 and v2 only. */
+        TEST_SAY("Skipping idempotent correctness for profile=%s\n",
+                 bench_producer_profile_name(PROFILE_V1_MB));
 
         return 0;
 }

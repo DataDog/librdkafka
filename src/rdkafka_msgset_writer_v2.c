@@ -828,6 +828,7 @@ static int rd_kafka_msgset_writer_write_msgq_mbv2(rd_kafka_msgset_writer_t *mset
         rd_ts_t MaxTimestamp = 0;
         rd_kafka_msg_t *rkm;
         int msgcnt        = 0;
+        uint64_t expected_last_msgid = 0;
         const rd_ts_t now = rd_clock();
 
         /* Internal latency calculation base.
@@ -840,6 +841,7 @@ static int rd_kafka_msgset_writer_write_msgq_mbv2(rd_kafka_msgset_writer_t *mset
         rd_kafka_assert(NULL, rkm);
         msetw->msetw_firstmsg.timestamp = rkm->rkm_timestamp;
         msetw->msetw_firstmsg.msgid = rkm->rkm_u.producer.msgid;
+        expected_last_msgid = rkm->rkm_u.producer.last_msgid;
 
         /* For multi-partition requests, msgbatch_set_first_msg() should only
          * be called once for the entire request, not once per partition,
@@ -861,8 +863,8 @@ static int rd_kafka_msgset_writer_write_msgq_mbv2(rd_kafka_msgset_writer_t *mset
          * or limit reached.
          */
         do {
-                if (unlikely(msetw->msetw_batch->last_msgid &&
-                             msetw->msetw_batch->last_msgid <
+                if (unlikely(expected_last_msgid &&
+                             expected_last_msgid <
                                  rkm->rkm_u.producer.msgid)) {
                         rd_rkb_dbg(rkb, MSG, "PRODUCE",
                                    "%.*s [%" PRId32
@@ -873,8 +875,8 @@ static int rd_kafka_msgset_writer_write_msgq_mbv2(rd_kafka_msgset_writer_t *mset
                                    "MsgIds %" PRIu64 "..%" PRIu64 ")",
                                    RD_KAFKAP_STR_PR(rktp->rktp_rkt->rkt_topic),
                                    rktp->rktp_partition, msgcnt, len,
-                                   msetw->msetw_batch->first_msgid,
-                                   msetw->msetw_batch->last_msgid);
+                                   msetw->msetw_firstmsg.msgid,
+                                   expected_last_msgid);
                         break;
                 }
 
@@ -954,14 +956,14 @@ static int rd_kafka_msgset_writer_write_msgq_mbv2(rd_kafka_msgset_writer_t *mset
          * in the client implementation.
          * This should not be considered an abortable error for
          * the transactional producer. */
-        if (msgcnt > 0 && msetw->msetw_batch->last_msgid) {
+        if (msgcnt > 0 && expected_last_msgid) {
                 rd_kafka_msg_t *lastmsg;
 
                 lastmsg = rd_kafka_msgq_last(&msetw->msetw_batch->msgq);
                 rd_assert(lastmsg);
 
                 if (unlikely(lastmsg->rkm_u.producer.msgid !=
-                             msetw->msetw_batch->last_msgid)) {
+                             expected_last_msgid)) {
                         rd_kafka_set_fatal_error(
                             rkb->rkb_rk, RD_KAFKA_RESP_ERR__INCONSISTENT,
                             "Unable to reconstruct MessageSet "
@@ -971,8 +973,8 @@ static int rd_kafka_msgset_writer_write_msgq_mbv2(rd_kafka_msgset_writer_t *mset
                             "last message added has msgid %" PRIu64
                             ": "
                             "unable to guarantee consistency",
-                            msgcnt, msetw->msetw_batch->first_msgid,
-                            msetw->msetw_batch->last_msgid,
+                            msgcnt, msetw->msetw_firstmsg.msgid,
+                            expected_last_msgid,
                             lastmsg->rkm_u.producer.msgid);
                         return 0;
                 }
@@ -1026,18 +1028,13 @@ static void rd_kafka_msgset_writer_finalize_MessageSet_v2_header_mbv2(
 
         /* Calculate BaseSequence for this partition's MessageSet.
          * In multibatch requests, each partition needs its own BaseSequence
-         * calculated from the partition's epoch_base_msgid and first message msgid.
-         * Fall back to batch.first_seq if msgid wasn't set (shouldn't happen in normal flow). */
+         * calculated from the partition's epoch_base_msgid and first message msgid. */
         int32_t base_seq = -1;
-        if (rd_kafka_pid_valid(msetw->msetw_pid)) {
-                if (msetw->msetw_firstmsg.msgid != 0) {
-                        /* Calculate per-partition BaseSequence */
-                        base_seq = rd_kafka_seq_wrap(msetw->msetw_firstmsg.msgid -
-                                                     msetw->msetw_epoch_base_msgid);
-                } else {
-                        /* Fallback: use shared batch first_seq */
-                        base_seq = msetw->msetw_batch->first_seq;
-                }
+        if (rd_kafka_pid_valid(msetw->msetw_pid) &&
+            msetw->msetw_firstmsg.msgid != 0) {
+                /* Calculate per-partition BaseSequence */
+                base_seq = rd_kafka_seq_wrap(msetw->msetw_firstmsg.msgid -
+                                             msetw->msetw_epoch_base_msgid);
         }
 
         rd_kafka_buf_update_i32(
@@ -1094,6 +1091,7 @@ rd_kafka_msgset_writer_finalize_mbv2(rd_kafka_msgset_writer_t *msetw,
         rd_kafka_toppar_t *rktp = msetw->msetw_rktp;
         size_t len;
         int cnt;
+        int32_t base_seq = -1;
 
         rd_rkb_dbg(msetw->msetw_rkb, MSG, "MSETW",
                    "%s [%" PRId32 "]: finalize entry",
@@ -1143,6 +1141,11 @@ rd_kafka_msgset_writer_finalize_mbv2(rd_kafka_msgset_writer_t *msetw,
         /* Return final MessageSetSize */
         *MessageSetSizep = msetw->msetw_MessageSetSize;
 
+        if (rd_kafka_pid_valid(msetw->msetw_pid) &&
+            msetw->msetw_firstmsg.msgid != 0)
+                base_seq = rd_kafka_seq_wrap(msetw->msetw_firstmsg.msgid -
+                                             msetw->msetw_epoch_base_msgid);
+
         rd_rkb_dbg(msetw->msetw_rkb, MSG, "PRODUCE",
                    "%s [%" PRId32
                    "]: "
@@ -1153,15 +1156,15 @@ rd_kafka_msgset_writer_finalize_mbv2(rd_kafka_msgset_writer_t *msetw,
                    "BaseSeq %" PRId32 ", %s, %s)",
                    rktp->rktp_rkt->rkt_topic->str, rktp->rktp_partition, cnt,
                    msetw->msetw_MessageSetSize, msetw->msetw_ApiVersion,
-                   msetw->msetw_MsgVersion, msetw->msetw_batch->first_msgid,
-                   msetw->msetw_batch->first_seq,
+                   msetw->msetw_MsgVersion, msetw->msetw_firstmsg.msgid,
+                   base_seq,
                    rd_kafka_pid2str(msetw->msetw_pid),
                    msetw->msetw_compression
                        ? rd_kafka_compression2str(msetw->msetw_compression)
                        : "uncompressed");
 
         rd_kafka_msgq_verify_order(rktp, &msetw->msetw_batch->msgq,
-                                   msetw->msetw_batch->first_msgid, rd_false);
+                                   msetw->msetw_firstmsg.msgid, rd_false);
 
         /* Update per-topic batch metrics for producer stats. */
         rd_avg_add(&rktp->rktp_rkt->rkt_avg_batchcnt, cnt);
@@ -1621,9 +1624,14 @@ int rd_kafka_produce_ctx_append_toppar_mbv2(rd_kafka_produce_ctx_t *rkpc,
         /* Add additional required features */
         rkpc->rkpc_features |= msetw.msetw_features;
 
-        /* Store partition book-keeping data */
-        rkpc->rkpc_active_firstmsg.msgid = msetw.msetw_batch->first_msgid;
-        rkpc->rkpc_active_firstmsg.seq   = msetw.msetw_batch->first_seq;
+        /* Store per-partition first-message data for request bookkeeping. */
+        rkpc->rkpc_active_firstmsg.msgid = msetw.msetw_firstmsg.msgid;
+        rkpc->rkpc_active_firstmsg.seq   = -1;
+        if (rd_kafka_pid_valid(msetw.msetw_pid) &&
+            msetw.msetw_firstmsg.msgid != 0)
+                rkpc->rkpc_active_firstmsg.seq =
+                    rd_kafka_seq_wrap(msetw.msetw_firstmsg.msgid -
+                                      msetw.msetw_epoch_base_msgid);
 
         ++rkpc->rkpc_active_topic_partition_cnt;
         ++rkpc->rkpc_appended_partition_cnt;
