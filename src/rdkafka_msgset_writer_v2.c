@@ -298,7 +298,7 @@ rd_kafka_msgset_writer_select_caps_mbv2(rd_kafka_msgset_writer_t *msetw) {
 
         /* It should not be possible to get a lower version than requested,
          * otherwise the logic in this function is buggy. */
-        // rd_assert(msetw->msetw_ApiVersion >= min_ApiVersion);
+        rd_assert(msetw->msetw_ApiVersion >= min_ApiVersion);
 
         return 0;
 }
@@ -597,8 +597,6 @@ static void rd_kafka_produce_write_topic_header_mbv2(rd_kafka_produce_ctx_t *rkp
         /* PartitionArrayCnt, update later */
         rkpc->rkpc_active_topic_partition_cnt_offset =
             rd_kafka_buf_write_i32(rkbuf, 0);
-
-        // TODO(xvandish): Reset active stuff? Do we need to? Upstream doesn't
 }
 
 static void
@@ -628,6 +626,20 @@ rd_kafka_produce_ctx_rollback_new_topic_header_mbv2(rd_kafka_produce_ctx_t *rkpc
         if (rkpc->rkpc_appended_topic_cnt > 0)
                 --rkpc->rkpc_appended_topic_cnt;
         rd_kafka_produce_ctx_clear_active_topic(rkpc);
+}
+
+static RD_INLINE rd_bool_t
+rd_kafka_produce_ctx_maybe_rollback_empty_new_topic_mbv2(
+    rd_kafka_produce_ctx_t *rkpc,
+    rd_bool_t wrote_new_topic_header,
+    size_t new_topic_header_offset) {
+        if (!(wrote_new_topic_header &&
+              rkpc->rkpc_active_topic_partition_cnt == 0))
+                return rd_false;
+
+        rd_kafka_produce_ctx_rollback_new_topic_header_mbv2(
+            rkpc, new_topic_header_offset);
+        return rd_true;
 }
 
 /**
@@ -672,8 +684,7 @@ static int rd_kafka_msgset_writer_init_mbv2(rd_kafka_msgset_writer_t *msetw,
                                        rd_kafka_pid_t pid,
                                        uint64_t epoch_base_msgid,
                                        rd_kafka_produce_ctx_t *rkpc) {
-        int msgcnt = rd_kafka_msgq_len(
-            rkmq);  // TODO(xvandish): is this the right thing to use?
+        int msgcnt = rd_kafka_msgq_len(rkmq);
 
         if (msgcnt == 0)
                 return 0;
@@ -686,7 +697,7 @@ static int rd_kafka_msgset_writer_init_mbv2(rd_kafka_msgset_writer_t *msetw,
         msetw->msetw_MsgVersion       = rkpc->rkpc_msg_version;
         msetw->msetw_features         = rkpc->rkpc_features;
         msetw->msetw_rkbuf            = rkpc->rkpc_buf;
-        msetw->msetw_msgq             = rkmq;  // TODO(xvandish): What should we use here
+        msetw->msetw_msgq             = rkmq;
         msetw->msetw_pid              = rkpc->rkpc_pid;
         msetw->msetw_epoch_base_msgid = epoch_base_msgid;
 
@@ -1346,8 +1357,6 @@ int rd_kafka_produce_ctx_append_toppar_mbv2(rd_kafka_produce_ctx_t *rkpc,
                 rd_kafka_produce_write_topic_header_mbv2(rkpc);
         }
 
-        /* move msg q before write */
-        // rd_kafka_msgq_move(*msgq, &rkpc->rkpc_buf->rkbuf_ba);
         rd_kafka_msgq_move_unordered_mbv2(
             &msgq, &rkpc->rkpc_buf->rkbuf_u.rkbuf_produce.mbv2.batch.msgq);
 
@@ -1370,22 +1379,16 @@ int rd_kafka_produce_ctx_append_toppar_mbv2(rd_kafka_produce_ctx_t *rkpc,
                 &msetw, rkpc->rkpc_rkb, rktp, &rktp->rktp_xmit_msgq, rkpc->rkpc_pid,
                 epoch_base_msgid,
                 rkpc))) {
-                if (wrote_new_topic_header &&
-                    rkpc->rkpc_active_topic_partition_cnt == 0) {
-                        rd_kafka_produce_ctx_rollback_new_topic_header_mbv2(
-                            rkpc, new_topic_header_offset);
-                }
+                rd_kafka_produce_ctx_maybe_rollback_empty_new_topic_mbv2(
+                    rkpc, wrote_new_topic_header, new_topic_header_offset);
                 return 0;
         }
 
         rd_ts_t first_msg_timeout;
         rd_kafka_msg_t *first_msg = TAILQ_FIRST(&rktp->rktp_xmit_msgq.rkmq_msgs);
         if (unlikely(!first_msg)) {
-                if (wrote_new_topic_header &&
-                    rkpc->rkpc_active_topic_partition_cnt == 0) {
-                        rd_kafka_produce_ctx_rollback_new_topic_header_mbv2(
-                            rkpc, new_topic_header_offset);
-                }
+                rd_kafka_produce_ctx_maybe_rollback_empty_new_topic_mbv2(
+                    rkpc, wrote_new_topic_header, new_topic_header_offset);
                 return 0;
         }
         first_msg_timeout = first_msg->rkm_ts_timeout;
@@ -1419,11 +1422,9 @@ int rd_kafka_produce_ctx_append_toppar_mbv2(rd_kafka_produce_ctx_t *rkpc,
                 /* If we started a new topic but didn't write any messages
                  * (e.g., first message is in backoff), roll back the topic
                  * header to avoid leaving an empty topic in the request. */
-                if (wrote_new_topic_header &&
-                    rkpc->rkpc_active_topic_partition_cnt == 0) {
-                        rd_kafka_produce_ctx_rollback_new_topic_header_mbv2(
-                            rkpc, new_topic_header_offset);
-                } else {
+                if (!rd_kafka_produce_ctx_maybe_rollback_empty_new_topic_mbv2(
+                        rkpc, wrote_new_topic_header,
+                        new_topic_header_offset)) {
                         rd_buf_write_seek(&rkpc->rkpc_buf->rkbuf_buf,
                                           write_offset);
                 }
@@ -1438,7 +1439,7 @@ int rd_kafka_produce_ctx_append_toppar_mbv2(rd_kafka_produce_ctx_t *rkpc,
         /* If the entire queue was not written, then this context is full */
         int queue_message_cnt_appended =
             queue_msg_cnt_start - queue_msg_cnt_end;
-        if (queue_msg_cnt_start != queue_message_cnt_appended) {
+        if (queue_msg_cnt_end > 0) {
                 rkpc->rkpc_full = 1;
         }
 
