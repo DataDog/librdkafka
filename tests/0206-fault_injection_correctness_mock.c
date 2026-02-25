@@ -786,25 +786,51 @@ static void run_produce_phase(bench_config_t *config,
                 msg_verify_t *m      = &vs->msgs[i];
                 produce_opaque_t *op = malloc(sizeof(*op));
                 rd_kafka_headers_t *hdrs;
-                rd_kafka_resp_err_t err_send;
-                op->vs               = vs;
-                op->msgid            = m->msgid;
+                rd_kafka_resp_err_t err_send = RD_KAFKA_RESP_ERR_NO_ERROR;
+                int enqueue_attempts         = 0;
+                int64_t enqueue_deadline_us =
+                    test_clock() + (int64_t)tmout_multip(30000) * 1000;
+
+                TEST_ASSERT(op, "OOM allocating produce opaque");
+                op->vs    = vs;
+                op->msgid = m->msgid;
 
                 hdrs = msg_headers_build_for_produce(m);
-                err_send =
-                    rd_kafka_producev(rk, RD_KAFKA_V_RKT(rkt),
-                                      RD_KAFKA_V_PARTITION(m->expected_partition),
-                                      RD_KAFKA_V_VALUE(m->payload, m->payload_len),
-                                      RD_KAFKA_V_KEY(m->key, m->key_len),
-                                      RD_KAFKA_V_HEADERS(hdrs),
-                                      RD_KAFKA_V_MSGFLAGS(RD_KAFKA_MSG_F_COPY),
-                                      RD_KAFKA_V_OPAQUE(op), RD_KAFKA_V_END);
+                while (1) {
+                        enqueue_attempts++;
+                        err_send =
+                            rd_kafka_producev(rk, RD_KAFKA_V_RKT(rkt),
+                                              RD_KAFKA_V_PARTITION(
+                                                  m->expected_partition),
+                                              RD_KAFKA_V_VALUE(m->payload,
+                                                               m->payload_len),
+                                              RD_KAFKA_V_KEY(m->key, m->key_len),
+                                              RD_KAFKA_V_HEADERS(hdrs),
+                                              RD_KAFKA_V_MSGFLAGS(
+                                                  RD_KAFKA_MSG_F_COPY),
+                                              RD_KAFKA_V_OPAQUE(op),
+                                              RD_KAFKA_V_END);
+                        if (!err_send) {
+                                msg_success++;
+                                break;
+                        }
+
+                        if (err_send != RD_KAFKA_RESP_ERR__QUEUE_FULL ||
+                            test_clock() >= enqueue_deadline_us) {
+                                rd_kafka_headers_destroy(hdrs);
+                                free(op);
+                                msg_fails++;
+                                break;
+                        }
+
+                        rd_kafka_poll(rk, 100);
+                }
                 if (err_send) {
-                        rd_kafka_headers_destroy(hdrs);
-                        free(op);
-                        msg_fails++;
-                } else {
-                        msg_success++;
+                        TEST_SAY(
+                            "PRODUCE enqueue failed msgid=%d partition=%" PRId32
+                            " attempts=%d err=%s\n",
+                            m->msgid, m->expected_partition, enqueue_attempts,
+                            rd_kafka_err2str(err_send));
                 }
 
                 if (config->log_each_message) {
@@ -814,11 +840,12 @@ static void run_produce_phase(bench_config_t *config,
                             "PRODUCE msgid=%d partition=%" PRId32
                             " key_len=%zu payload_len=%zu headers=%zu "
                             "payload_crc=%08x "
-                            "status=%s\n",
+                            "status=%s attempts=%d err=%s\n",
                             m->msgid, m->expected_partition, m->key_len,
                             m->payload_len, m->header_cnt,
                             (unsigned int)payload_crc,
-                            err_send ? "enqueue_failed" : "enqueued");
+                            err_send ? "enqueue_failed" : "enqueued",
+                            enqueue_attempts, rd_kafka_err2str(err_send));
                 }
 
                 if (i % 100 == 0) {

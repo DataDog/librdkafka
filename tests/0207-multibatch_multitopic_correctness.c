@@ -862,26 +862,53 @@ static void run_produce_phase(bench_config_t *config,
                 msg_verify_t *m      = &vs->msgs[i];
                 produce_opaque_t *op = malloc(sizeof(*op));
                 rd_kafka_headers_t *hdrs;
-                rd_kafka_resp_err_t err_send;
+                rd_kafka_resp_err_t err_send = RD_KAFKA_RESP_ERR_NO_ERROR;
+                int enqueue_attempts         = 0;
+                int64_t enqueue_deadline_us =
+                    test_clock() + (int64_t)tmout_multip(30000) * 1000;
                 rd_kafka_topic_t *rkt = rkts[m->expected_topic_idx];
-                op->vs               = vs;
-                op->msgid            = m->msgid;
+
+                TEST_ASSERT(op, "OOM allocating produce opaque");
+                op->vs    = vs;
+                op->msgid = m->msgid;
 
                 hdrs = msg_headers_build_for_produce(m);
-                err_send =
-                    rd_kafka_producev(rk, RD_KAFKA_V_RKT(rkt),
-                                      RD_KAFKA_V_PARTITION(m->expected_partition),
-                                      RD_KAFKA_V_VALUE(m->payload, m->payload_len),
-                                      RD_KAFKA_V_KEY(m->key, m->key_len),
-                                      RD_KAFKA_V_HEADERS(hdrs),
-                                      RD_KAFKA_V_MSGFLAGS(RD_KAFKA_MSG_F_COPY),
-                                      RD_KAFKA_V_OPAQUE(op), RD_KAFKA_V_END);
+                while (1) {
+                        enqueue_attempts++;
+                        err_send =
+                            rd_kafka_producev(rk, RD_KAFKA_V_RKT(rkt),
+                                              RD_KAFKA_V_PARTITION(
+                                                  m->expected_partition),
+                                              RD_KAFKA_V_VALUE(m->payload,
+                                                               m->payload_len),
+                                              RD_KAFKA_V_KEY(m->key, m->key_len),
+                                              RD_KAFKA_V_HEADERS(hdrs),
+                                              RD_KAFKA_V_MSGFLAGS(
+                                                  RD_KAFKA_MSG_F_COPY),
+                                              RD_KAFKA_V_OPAQUE(op),
+                                              RD_KAFKA_V_END);
+                        if (!err_send) {
+                                msg_success++;
+                                break;
+                        }
+
+                        if (err_send != RD_KAFKA_RESP_ERR__QUEUE_FULL ||
+                            test_clock() >= enqueue_deadline_us) {
+                                rd_kafka_headers_destroy(hdrs);
+                                free(op);
+                                msg_fails++;
+                                break;
+                        }
+
+                        rd_kafka_poll(rk, 100);
+                }
                 if (err_send) {
-                        rd_kafka_headers_destroy(hdrs);
-                        free(op);
-                        msg_fails++;
-                } else {
-                        msg_success++;
+                        TEST_SAY(
+                            "PRODUCE enqueue failed msgid=%d topic=%s partition=%"
+                            PRId32 " attempts=%d err=%s\n",
+                            m->msgid, vs->topics[m->expected_topic_idx],
+                            m->expected_partition, enqueue_attempts,
+                            rd_kafka_err2str(err_send));
                 }
 
                 if (config->log_each_message) {
@@ -891,13 +918,14 @@ static void run_produce_phase(bench_config_t *config,
                             "PRODUCE msgid=%d topic=%s partition=%" PRId32
                             " case=%s key_len=%zu payload_len=%zu headers=%zu "
                             "payload_crc=%08x "
-                            "status=%s\n",
+                            "status=%s attempts=%d err=%s\n",
                             m->msgid, vs->topics[m->expected_topic_idx],
                             m->expected_partition,
                             msg_case_name(m->msg_case), m->key_len,
                             m->payload_len, m->header_cnt,
                             (unsigned int)payload_crc,
-                            err_send ? "enqueue_failed" : "enqueued");
+                            err_send ? "enqueue_failed" : "enqueued",
+                            enqueue_attempts, rd_kafka_err2str(err_send));
                 }
 
                 if (i % 100 == 0) {
@@ -909,7 +937,30 @@ static void run_produce_phase(bench_config_t *config,
         }
 
         TEST_SAY("Waiting for delivery confirmations....\n");
-        int remains = rd_kafka_flush(rk, 60000);
+        int outq_len = 0;
+        int flush_attempt = 0;
+        rd_kafka_resp_err_t flush_err = RD_KAFKA_RESP_ERR_NO_ERROR;
+        int64_t flush_deadline_us =
+            test_clock() + ((int64_t)tmout_multip(300000) * 1000);
+        while ((outq_len = rd_kafka_outq_len(rk)) > 0) {
+                flush_err = rd_kafka_flush(rk, 10000);
+                flush_attempt++;
+                outq_len = rd_kafka_outq_len(rk);
+
+                if (outq_len == 0)
+                        break;
+
+                if ((flush_attempt % 6) == 0) {
+                        TEST_SAY(
+                            "Flush waiting: outq_len=%d attempt=%d last=%s\n",
+                            outq_len, flush_attempt, rd_kafka_err2str(flush_err));
+                }
+
+                TEST_ASSERT(
+                    test_clock() < flush_deadline_us,
+                    "Flush did not complete: outq_len=%d attempts=%d last=%s",
+                    outq_len, flush_attempt, rd_kafka_err2str(flush_err));
+        }
         end_ts = test_clock();
 
         /* Get final stats */
@@ -929,8 +980,8 @@ static void run_produce_phase(bench_config_t *config,
         }
 
         vs->produce_errors += msg_fails;
-        if (remains > 0)
-                vs->produce_errors += remains;
+        if (outq_len > 0)
+                vs->produce_errors += outq_len;
 
         vs->total_request_count = end_total_requests - start_total_requests;
         if (vs->total_request_count < 0)
@@ -949,10 +1000,10 @@ static void run_produce_phase(bench_config_t *config,
 
         TEST_SAY(
             "Produce phase summary (%s): success=%d failed=%d dr_total=%d "
-            "flush_remains=%d duration=%.2fs produce_reqs=%" PRId64
+            "flush_outq_len=%d duration=%.2fs produce_reqs=%" PRId64
             " total_reqs=%" PRId64 " msgs/produce_req=%.2f\n",
             bench_producer_profile_name(producer_profile), msg_success, msg_fails,
-            vs->dr_total, remains, (double)(end_ts - start_ts) / 1000000.0,
+            vs->dr_total, outq_len, (double)(end_ts - start_ts) / 1000000.0,
             vs->produce_request_count, vs->total_request_count,
             vs->produce_request_count
                 ? (double)msg_success / (double)vs->produce_request_count
