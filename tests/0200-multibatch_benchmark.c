@@ -44,7 +44,10 @@
  *   ./test-runner 0200
  *
  * Configuration via environment variables:
- *   MAX_PARTITIONS                Number of partitions (default: 1000)
+ *   BENCH_TOPIC_PARTITIONS        Number of topic partitions (default: 1000)
+ *   BENCH_PRODUCE_MAX_PARTITIONS  v2 produce.request.max.partitions override
+ *                                 (default: unset => library default 0/unlimited)
+ *   MAX_PARTITIONS                Legacy alias for BENCH_TOPIC_PARTITIONS
  *   BENCH_MAX_THROUGHPUT_MESSAGES Messages for max throughput test (default: 100000)
  *   BENCH_CONTROLLED_RATES        Comma-separated rates, e.g. "10000,20000,50000" (default: 10000,20000,50000)
  *   BENCH_CONTROLLED_DURATION     Seconds per controlled rate test (default: 60)
@@ -55,6 +58,7 @@
  *   BENCH_OUTPUT_DIR              Output directory (default: ./benchmark_output)
  *   BENCH_SKIP_MAX_THROUGHPUT     Set to "1" to skip max throughput phase
  *   BENCH_SKIP_CONTROLLED         Set to "1" to skip controlled rate phases
+ *   BENCH_V2_ONLY                 Set to "1" to run only v2 in controlled mode
  *   BENCH_V1_LINGER_MS            v1 linger.ms for v0/v0+multibatch profiles (default: 500)
  *
  * Broker-level batching configuration:
@@ -63,7 +67,7 @@
  *   BROKER_BATCH_MAX_BYTES        Early-send byte threshold (-1=disabled, default)
  *
  * Example:
- *   export MAX_PARTITIONS=1000
+ *   export BENCH_TOPIC_PARTITIONS=1000
  *   export BENCH_MAX_THROUGHPUT_MESSAGES=100000
  *   export BENCH_CONTROLLED_RATES="10000,20000"
  *   export BENCH_CONTROLLED_DURATION=30
@@ -113,6 +117,7 @@ typedef struct {
         int controlled_rate_cnt;
         int controlled_duration_sec;
         int skip_controlled;
+        int controlled_v2_only;
 } bench_config_t;
 
 /* Per-message latency tracking */
@@ -464,9 +469,10 @@ static rd_kafka_t *create_producer(bench_config_t *config,
         if ((val = test_getenv("BROKER_BATCH_MAX_BYTES", NULL)))
                 test_conf_set(conf, "broker.batch.max.bytes", val);
 
-        /* Allow produce.request.max.partitions override via environment (v2 only) */
+        /* Optional v2 produce.request.max.partitions override.
+         * If unset, leave library default (0 = unlimited). */
         if (producer_profile == BENCH_PRODUCER_PROFILE_V2 &&
-            (val = test_getenv("MAX_PARTITIONS", NULL)))
+            (val = test_getenv("BENCH_PRODUCE_MAX_PARTITIONS", NULL)))
                 test_conf_set(conf, "produce.request.max.partitions", val);
 
         rk = test_create_handle(RD_KAFKA_PRODUCER, conf);
@@ -614,7 +620,8 @@ static void print_profile_runtime_config(bench_producer_profile_t producer_profi
         const char *batch_size = test_getenv("BENCH_BATCH_SIZE", "1000000");
         const char *enqueue_retry_ms =
             test_getenv("BENCH_ENQUEUE_RETRY_MS", "1000");
-        const char *max_partitions = test_getenv("MAX_PARTITIONS", NULL);
+        const char *max_partitions =
+            test_getenv("BENCH_PRODUCE_MAX_PARTITIONS", NULL);
         const char *v1_linger_ms =
             test_getenv("BENCH_V1_LINGER_MS", broker_linger_ms);
 
@@ -1140,6 +1147,8 @@ static void print_human_readable_summary(const bench_config_t *config) {
         TEST_SAY("  Partitions: %d\n", config->partition_cnt);
         TEST_SAY("  Message size: %d bytes\n", config->message_size);
         TEST_SAY("  Output directory: %s\n", config->output_dir);
+        TEST_SAY("  Controlled profiles: %s\n",
+                 config->controlled_v2_only ? "v2" : "v0,v0+multibatch,v2");
         TEST_SAY("\n");
 
         if (!config->skip_max_throughput)
@@ -1147,7 +1156,10 @@ static void print_human_readable_summary(const bench_config_t *config) {
 
         if (!config->skip_controlled) {
                 print_controlled_rate_table();
-                print_controlled_rate_comparison(config);
+                if (!config->controlled_v2_only)
+                        print_controlled_rate_comparison(config);
+                else
+                        TEST_SAY("CONTROLLED RATE COMPARISON skipped: v0 baseline not selected\n\n");
         }
 
         TEST_SAY("================================================================================\n");
@@ -1169,7 +1181,10 @@ static void output_results(bench_config_t *config) {
  * Parse configuration from environment variables
  *
  * Environment variables:
- *   MAX_PARTITIONS                Number of partitions (default: 1000)
+ *   BENCH_TOPIC_PARTITIONS        Number of topic partitions (default: 1000)
+ *   BENCH_PRODUCE_MAX_PARTITIONS  v2 produce.request.max.partitions override
+ *                                 (default: unset => library default 0/unlimited)
+ *   MAX_PARTITIONS                Legacy alias for BENCH_TOPIC_PARTITIONS
  *   BENCH_MAX_THROUGHPUT_MESSAGES Messages for max throughput test (default: 100000)
  *   BENCH_CONTROLLED_RATES        Comma-separated rates, e.g. "10000,20000,50000" (default: 10000,20000,50000)
  *   BENCH_CONTROLLED_DURATION     Seconds per controlled rate test (default: 60)
@@ -1180,6 +1195,7 @@ static void output_results(bench_config_t *config) {
  *   BENCH_OUTPUT_DIR              Output directory (default: ./benchmark_output)
  *   BENCH_SKIP_MAX_THROUGHPUT     Set to "1" to skip max throughput phase
  *   BENCH_SKIP_CONTROLLED         Set to "1" to skip controlled rate phases
+ *   BENCH_V2_ONLY                 Set to "1" to run only v2 in controlled mode
  *   BENCH_V1_LINGER_MS            v1 linger.ms for v0/v0+multibatch profiles (default: 500)
  */
 static int parse_env_int_in_range(const char *name,
@@ -1249,6 +1265,7 @@ static void parse_config(bench_config_t *config) {
         config->skip_max_throughput = 0;
         config->controlled_duration_sec = 60;
         config->skip_controlled = 0;
+        config->controlled_v2_only = 0;
         config->output_dir = strdup("./benchmark_output");
         TEST_ASSERT(config->output_dir != NULL,
                     "Failed to allocate default output_dir");
@@ -1263,9 +1280,16 @@ static void parse_config(bench_config_t *config) {
         config->controlled_rates[2] = 50000;
 
         /* Override from environment */
-        if ((val = test_getenv("MAX_PARTITIONS", NULL)))
+        if ((val = test_getenv("BENCH_TOPIC_PARTITIONS", NULL)))
+                config->partition_cnt = parse_env_int_in_range(
+                    "BENCH_TOPIC_PARTITIONS", val, 1, INT_MAX);
+        else if ((val = test_getenv("MAX_PARTITIONS", NULL)))
                 config->partition_cnt =
                     parse_env_int_in_range("MAX_PARTITIONS", val, 1, INT_MAX);
+
+        if ((val = test_getenv("BENCH_PRODUCE_MAX_PARTITIONS", NULL)))
+                (void)parse_env_int_in_range(
+                    "BENCH_PRODUCE_MAX_PARTITIONS", val, 0, INT_MAX);
 
         if ((val = test_getenv("BENCH_MAX_THROUGHPUT_MESSAGES", NULL)))
                 config->max_throughput_messages = parse_env_int_in_range(
@@ -1302,6 +1326,10 @@ static void parse_config(bench_config_t *config) {
         if ((val = test_getenv("BENCH_SKIP_CONTROLLED", NULL)))
                 config->skip_controlled =
                     parse_env_bool("BENCH_SKIP_CONTROLLED", val);
+
+        if ((val = test_getenv("BENCH_V2_ONLY", NULL)))
+                config->controlled_v2_only =
+                    parse_env_bool("BENCH_V2_ONLY", val);
 
         TEST_ASSERT(!(config->skip_max_throughput && config->skip_controlled),
                     "Both benchmark phases are disabled, enable at least one phase");
@@ -1355,13 +1383,21 @@ int main_0200_multibatch_benchmark(int argc, char **argv) {
         if (!config.skip_controlled) {
                 for (int i = 0; i < config.controlled_rate_cnt; i++) {
                         int rate = config.controlled_rates[i];
-                        run_controlled_rate_phase(
-                            &config, topic, rate, BENCH_PRODUCER_PROFILE_V0);
-                        run_controlled_rate_phase(
-                            &config, topic, rate,
-                            BENCH_PRODUCER_PROFILE_V0_MULTIBATCH);
-                        run_controlled_rate_phase(
-                            &config, topic, rate, BENCH_PRODUCER_PROFILE_V2);
+                        if (config.controlled_v2_only) {
+                                run_controlled_rate_phase(
+                                    &config, topic, rate,
+                                    BENCH_PRODUCER_PROFILE_V2);
+                        } else {
+                                run_controlled_rate_phase(
+                                    &config, topic, rate,
+                                    BENCH_PRODUCER_PROFILE_V0);
+                                run_controlled_rate_phase(
+                                    &config, topic, rate,
+                                    BENCH_PRODUCER_PROFILE_V0_MULTIBATCH);
+                                run_controlled_rate_phase(
+                                    &config, topic, rate,
+                                    BENCH_PRODUCER_PROFILE_V2);
+                        }
                 }
         }
 
