@@ -435,7 +435,7 @@ static const struct rd_kafka_property rd_kafka_properties[] = {
      "however it is primarily relevant to produce requests. "
      "In particular, note that other mechanisms limit the number "
      "of outstanding consumer fetch request per broker to one.",
-     1, 1000000, 1000000},
+     1, 1000000, 1},
     {_RK_GLOBAL, "max.in.flight", _RK_C_ALIAS,
      .sdef = "max.in.flight.requests.per.connection"},
     {_RK_GLOBAL, "metadata.recovery.strategy", _RK_C_S2I,
@@ -1534,7 +1534,7 @@ static const struct rd_kafka_property rd_kafka_properties[] = {
      0, 1, 1},
     {_RK_GLOBAL | _RK_PRODUCER, "multibatch", _RK_C_BOOL,
      _RK(multibatch), "Batch produce requests across multiple partitions. V1", 0,
-     1, 0},
+     1, 1},
     {_RK_GLOBAL | _RK_PRODUCER, "produce.engine", _RK_C_S2I,
      _RK(produce_engine),
      "Select producer implementation path. "
