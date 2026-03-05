@@ -1,30 +1,26 @@
-# librdkafka-adaptive
-
-After a spike in rtt (possibly from a kafka-cluster downscale or operation)
-it's common to see an increase in queue_depth. Since we don't signal on that
-currently, the queue then stayed elevated for an extended period of time, causing
-messages stuck in the queue for a given partition to stay stuck for an elevated
-period of time. We now attempt to detect this, and when the queue exceeds some threshold
-and rtt has returned to nromal, we try to speed up. We also fix a bug where parameters
-got modified during a disconnect for a broker, because we thought there was 0 contention.
-This had the possibility of causing retry storms.
-
 # librdkafka v2.10.3
 
 librdkafka v2.10.3 is a DataDog fork release with semantically significant producer-path changes.
 
 ## Highlights
 
-* Introduce multibatch produce request construction to improve throughput and queue-drain behavior under hot-partition workloads.
-* Improve adaptive produce-path behavior after transient RTT spikes, reducing sustained queue depth growth and retry storm risk.
-* Tighten producer error and retry handling to avoid false-fatal outcomes in retryable produce scenarios.
-* Keep wire compatibility with Kafka brokers, no broker-side protocol or deployment changes are required.
+* Add explicit producer engine selection with split MBv1/MBv2 produce paths.
+* Improve MBv2 batching, request construction, and response parsing behavior for high-partition and high-rate workloads.
+* Improve adaptive broker-level batching behavior after transient RTT spikes to reduce prolonged queue-depth growth and retry pressure.
+* Add typed statistics callback support and related adaptive metrics/stat surfaces.
+* Keep Kafka wire compatibility, no broker-side protocol or deployment changes are required.
+
+## Configuration changes
+
+* `produce.engine` selects runtime producer path (`v1` or `v2`).
+* `multibatch` applies only to `produce.engine=v1`.
+* Default `max.in.flight.requests.per.connection` is now `1`.
+* Default `multibatch` is now `true` for MBv1.
 
 ## Versioning notes
 
 * This release lane is intentionally fork-specific and distinct from upstream tags.
 * `RD_KAFKA_VERSION` is `0x020a03ff` and `rd_kafka_version_str()` reports `2.10.3`.
-* Runtime logs can unambiguously identify this forked runtime as `2.10.3`.
 
 # librdkafka v2.10.1
 
