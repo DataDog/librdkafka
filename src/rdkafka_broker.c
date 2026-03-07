@@ -297,6 +297,52 @@ finalize:
         return ret;
 }
 
+static void rd_kafka_broker_batch_collector_del_mbv2(rd_kafka_broker_t *rkb,
+                                                     rd_kafka_toppar_t *rktp);
+
+static RD_INLINE rd_bool_t
+rd_kafka_toppar_is_wait_drain(rd_kafka_toppar_t *rktp) {
+        rd_bool_t wait_drain;
+
+        rd_kafka_toppar_lock(rktp);
+        wait_drain = rktp->rktp_eos.wait_drain;
+        rd_kafka_toppar_unlock(rktp);
+
+        return wait_drain;
+}
+
+static void rd_kafka_broker_maybe_collect_toppar_mbv2(rd_kafka_broker_t *rkb,
+                                                      rd_kafka_toppar_t *rktp,
+                                                      int *total_msg_cnt) {
+        rd_kafka_toppar_producer_mbv2_t *tpv2 = rktp->rktp_producer_mbv2;
+        rd_bool_t wait_drain =
+            rd_kafka_is_idempotent(rkb->rkb_rk) &&
+            rd_kafka_toppar_is_wait_drain(rktp);
+        int msgq_len = rd_kafka_msgq_len(&rktp->rktp_xmit_msgq);
+        size_t msgq_bytes = rd_kafka_msgq_size(&rktp->rktp_xmit_msgq);
+
+        /* Update atomic counters for stats visibility */
+        if (tpv2) {
+                rd_atomic32_set(&tpv2->rktp_xmit_msgq_cnt, msgq_len);
+                rd_atomic64_set(&tpv2->rktp_xmit_msgq_bytes, msgq_bytes);
+        }
+
+        if (msgq_len > 0) {
+                if (total_msg_cnt)
+                        *total_msg_cnt += msgq_len;
+
+                if (wait_drain) {
+                        if (tpv2 && tpv2->rktp_in_batch_collector)
+                                rd_kafka_broker_batch_collector_del_mbv2(rkb,
+                                                                         rktp);
+                } else {
+                        rd_kafka_broker_batch_collector_add_mbv2(rkb, rktp);
+                }
+        } else if (wait_drain && tpv2 && tpv2->rktp_in_batch_collector) {
+                rd_kafka_broker_batch_collector_del_mbv2(rkb, rktp);
+        }
+}
+
 
 /*******************************************************************************
  *
@@ -478,6 +524,15 @@ int rd_kafka_broker_batch_collector_send_mbv2(rd_kafka_broker_t *rkb) {
                 if (!next_rktp)
                         next_rktp = TAILQ_FIRST(&col->rkbbcol_toppars);
 
+                if (rd_kafka_is_idempotent(rkb->rkb_rk) &&
+                    rd_kafka_toppar_is_wait_drain(rktp)) {
+                        if (next_rktp == start_rktp)
+                                break;
+
+                        rktp = next_rktp;
+                        continue;
+                }
+
                 if (rd_kafka_msgq_len(&rktp->rktp_xmit_msgq) == 0) {
                     /* Move to next, but stop if we've wrapped back to start */
                     if (next_rktp == start_rktp)
@@ -584,6 +639,10 @@ int rd_kafka_broker_batch_collector_maybe_send_mbv2(rd_kafka_broker_t *rkb,
         rd_kafka_toppar_t *rktp;
 
         TAILQ_FOREACH(rktp, &col->rkbbcol_toppars, rktp_collector_link) {
+            if (rd_kafka_is_idempotent(rkb->rkb_rk) &&
+                rd_kafka_toppar_is_wait_drain(rktp))
+                    continue;
+
             int msgq_len = rd_kafka_msgq_len(&rktp->rktp_xmit_msgq);
             if (msgq_len > 0) {
                 active_partition_cnt++;
@@ -5439,6 +5498,8 @@ static int rd_kafka_toppar_producer_serve_mbv2(rd_kafka_broker_t *rkb,
 
 
         if (rd_kafka_is_idempotent(rkb->rkb_rk)) {
+                inflight = rd_atomic32_get(&rktp->rktp_msgs_inflight);
+
                 if (unlikely(rktp->rktp_eos.wait_drain)) {
                         if (inflight) {
                                 /* Waiting for in-flight requests to
@@ -5724,27 +5785,9 @@ static int rd_kafka_broker_produce_toppars_mbv2(rd_kafka_broker_t *rkb,
                                                do_timeout_scan, may_send,
                                                flushing);
 
-                /* Add partition to broker-level batch collector if it has
-                 * messages ready to send. The collector handles timing based
-                 * on broker.linger.ms - we add regardless of per-partition
-                 * batch_ready status since the collector controls when to send. */
-                {
-                        rd_kafka_toppar_producer_mbv2_t *tpv2 =
-                            rktp->rktp_producer_mbv2;
-                        int msgq_len = rd_kafka_msgq_len(&rktp->rktp_xmit_msgq);
-                        size_t msgq_bytes = rd_kafka_msgq_size(&rktp->rktp_xmit_msgq);
-
-                        /* Update atomic counters for stats visibility */
-                        if (tpv2) {
-                                rd_atomic32_set(&tpv2->rktp_xmit_msgq_cnt, msgq_len);
-                                rd_atomic64_set(&tpv2->rktp_xmit_msgq_bytes, msgq_bytes);
-                        }
-
-                        if (msgq_len > 0) {
-                                total_msg_cnt += msgq_len;
-                                rd_kafka_broker_batch_collector_add_mbv2(rkb, rktp);
-                        }
-                }
+                /* Add sendable partitions to the broker-level collector. */
+                rd_kafka_broker_maybe_collect_toppar_mbv2(rkb, rktp,
+                                                          &total_msg_cnt);
 
                 rd_kafka_set_next_wakeup(&ret_next_wakeup, this_next_wakeup);
 
@@ -7959,10 +8002,201 @@ void rd_kafka_broker_decommission(rd_kafka_t *rk,
  * @{
  *
  */
+static void rd_ut_broker_fill_msgq(rd_kafka_toppar_t *rktp,
+                                   int cnt,
+                                   uint64_t base_msgid) {
+        int i;
+        rd_ts_t now = rd_clock();
+
+        for (i = 0; i < cnt; i++) {
+                rd_kafka_msg_t *rkm = ut_rd_kafka_msg_new(16);
+
+                rkm->rkm_timestamp             = now;
+                rkm->rkm_ts_enq                = now;
+                rkm->rkm_ts_timeout            = now + (30 * 1000 * 1000);
+                rkm->rkm_u.producer.msgid      = base_msgid + (uint64_t)i;
+                rkm->rkm_u.producer.last_msgid = 0;
+                rkm->rkm_rkmessage.rkt         =
+                    rd_kafka_topic_keep(rktp->rktp_rkt);
+                rkm->rkm_rkmessage.partition = rktp->rktp_partition;
+
+                rd_kafka_toppar_lock(rktp);
+                rd_kafka_msgq_enq(&rktp->rktp_msgq, rkm);
+                rd_kafka_toppar_unlock(rktp);
+        }
+}
+
+static int rd_ut_toppar_producer_serve_mbv2_wait_drain(void) {
+        rd_kafka_conf_t *conf;
+        rd_kafka_t *rk;
+        rd_kafka_broker_t *rkb;
+        rd_kafka_toppar_t *rktp;
+        rd_kafka_pid_t pid = RD_KAFKA_PID_INITIALIZER;
+        rd_ts_t next_wakeup = 0;
+        char errstr[512];
+        int r;
+
+        RD_UT_SAY("Verifying MBv2 wait_drain honors in-flight messages");
+
+        conf = rd_kafka_conf_new();
+        RD_UT_ASSERT(rd_kafka_conf_set(conf, "produce.engine", "v2", errstr,
+                                       sizeof(errstr)) == RD_KAFKA_CONF_OK,
+                     "failed to set produce.engine=v2: %s", errstr);
+        RD_UT_ASSERT(
+            rd_kafka_conf_set(conf, "enable.idempotence", "true", errstr,
+                              sizeof(errstr)) == RD_KAFKA_CONF_OK,
+            "failed to enable idempotence: %s", errstr);
+
+        rk = rd_kafka_new(RD_KAFKA_PRODUCER, conf, errstr, sizeof(errstr));
+        RD_UT_ASSERT(rk, "failed to create producer: %s", errstr);
+
+        rkb = rd_kafka_broker_add_logical(rk, "unittest");
+        RD_UT_ASSERT(rkb, "failed to create broker");
+        rkb->rkb_state = RD_KAFKA_BROKER_STATE_UP;
+
+        rktp = rd_kafka_toppar_get2(rk, "uttopic", 0, rd_false, rd_true);
+        RD_UT_ASSERT(rktp, "failed to get toppar");
+        RD_UT_ASSERT(rktp->rktp_producer_mbv2, "expected MBv2 toppar state");
+
+        rd_kafka_toppar_lock(rktp);
+        rktp->rktp_broker         = rkb;
+        rktp->rktp_eos.wait_drain = rd_true;
+        rd_kafka_toppar_unlock(rktp);
+
+        rd_atomic32_set(&rktp->rktp_msgs_inflight, 2);
+
+        r = rd_kafka_toppar_producer_serve_mbv2(
+            rkb, rktp, pid, rd_clock(), &next_wakeup, rd_false, rd_true,
+            rd_false);
+        RD_UT_ASSERT(r == 0, "expected no messages to be produced, got %d", r);
+
+        rd_kafka_toppar_lock(rktp);
+        RD_UT_ASSERT(rktp->rktp_eos.wait_drain,
+                     "wait_drain cleared while messages were still in-flight");
+        rd_kafka_toppar_unlock(rktp);
+
+        rd_atomic32_set(&rktp->rktp_msgs_inflight, 0);
+
+        r = rd_kafka_toppar_producer_serve_mbv2(
+            rkb, rktp, pid, rd_clock(), &next_wakeup, rd_false, rd_true,
+            rd_false);
+        RD_UT_ASSERT(r == 0, "expected no messages to be produced, got %d", r);
+
+        rd_kafka_toppar_lock(rktp);
+        RD_UT_ASSERT(!rktp->rktp_eos.wait_drain,
+                     "wait_drain should clear after in-flight drain");
+        rktp->rktp_broker = NULL;
+        rd_kafka_toppar_unlock(rktp);
+
+        rd_kafka_toppar_destroy(rktp);
+        rd_kafka_broker_destroy(rkb);
+        rd_kafka_destroy(rk);
+
+        return 0;
+}
+
+static int rd_ut_broker_produce_toppars_mbv2_wait_drain_blocks_send(void) {
+        rd_kafka_conf_t *conf;
+        rd_kafka_t *rk;
+        rd_kafka_broker_t *rkb;
+        rd_kafka_toppar_t *rktp;
+        rd_kafka_pid_t pid = {.id = 1000, .epoch = 0};
+        char errstr[512];
+        int sent_msg_cnt;
+        int produced_req_cnt;
+        int xmit_msg_cnt;
+        int inflight;
+
+        RD_UT_SAY("Verifying MBv2 wait_drain blocks collector-driven sends");
+
+        conf = rd_kafka_conf_new();
+        RD_UT_ASSERT(rd_kafka_conf_set(conf, "produce.engine", "v2", errstr,
+                                       sizeof(errstr)) == RD_KAFKA_CONF_OK,
+                     "failed to set produce.engine=v2: %s", errstr);
+        RD_UT_ASSERT(
+            rd_kafka_conf_set(conf, "enable.idempotence", "true", errstr,
+                              sizeof(errstr)) == RD_KAFKA_CONF_OK,
+            "failed to enable idempotence: %s", errstr);
+
+        rk = rd_kafka_new(RD_KAFKA_PRODUCER, conf, errstr, sizeof(errstr));
+        RD_UT_ASSERT(rk, "failed to create producer: %s", errstr);
+
+        rkb = rd_kafka_broker_add_logical(rk, "unittest");
+        RD_UT_ASSERT(rkb, "failed to create broker");
+        rkb->rkb_state = RD_KAFKA_BROKER_STATE_UP;
+
+        rd_kafka_broker_lock(rkb);
+        rkb->rkb_features = RD_KAFKA_FEATURE_UNITTEST | RD_KAFKA_FEATURE_ALL;
+        rd_kafka_broker_unlock(rkb);
+
+        rktp = rd_kafka_toppar_get2(rk, "uttopic", 0, rd_false, rd_true);
+        RD_UT_ASSERT(rktp, "failed to get toppar");
+        RD_UT_ASSERT(rktp->rktp_producer_mbv2, "expected MBv2 toppar state");
+        rd_ut_kafka_topic_set_topic_exists(rktp->rktp_rkt, 1, -1);
+
+        rd_kafka_idemp_set_state(rk, RD_KAFKA_IDEMP_STATE_WAIT_PID);
+        rd_kafka_idemp_pid_update(rkb, pid);
+        pid = rd_kafka_idemp_get_pid(rk);
+        RD_UT_ASSERT(rd_kafka_pid_valid(pid), "PID is invalid");
+
+        rd_ut_broker_fill_msgq(rktp, 1, 1);
+        rd_kafka_toppar_lock(rktp);
+        rd_kafka_msgq_move(&rktp->rktp_xmit_msgq, &rktp->rktp_msgq);
+        rd_kafka_toppar_unlock(rktp);
+
+        RD_UT_ASSERT(rd_kafka_toppar_pid_change(rktp, pid, 1),
+                     "failed to set toppar pid");
+
+        rd_kafka_toppar_lock(rktp);
+        rktp->rktp_eos.wait_drain = rd_true;
+        rd_kafka_toppar_unlock(rktp);
+
+        rkb->rkb_produce_pid = pid;
+        rd_atomic32_set(&rktp->rktp_msgs_inflight, 1);
+
+        rd_kafka_broker_batch_collector_add_mbv2(rkb, rktp);
+        sent_msg_cnt = rd_kafka_broker_batch_collector_send_mbv2(rkb);
+        produced_req_cnt = (int)rd_kafka_bufq_cnt(&rkb->rkb_outbufs);
+        xmit_msg_cnt     = rd_kafka_msgq_len(&rktp->rktp_xmit_msgq);
+        inflight         = rd_atomic32_get(&rktp->rktp_msgs_inflight);
+
+        rd_kafka_toppar_lock(rktp);
+        if (rktp->rktp_producer_mbv2->rktp_in_batch_collector)
+                rd_kafka_broker_batch_collector_del_mbv2(rkb, rktp);
+        rktp->rktp_eos.wait_drain = rd_false;
+        rd_kafka_toppar_unlock(rktp);
+
+        rd_kafka_broker_bufq_purge(rkb, &rkb->rkb_outbufs, RD_KAFKAP_Produce,
+                                   RD_KAFKA_RESP_ERR__PURGE_QUEUE);
+        ut_rd_kafka_msgq_purge(&rktp->rktp_msgq);
+        ut_rd_kafka_msgq_purge(&rktp->rktp_xmit_msgq);
+
+        rd_kafka_toppar_destroy(rktp);
+        rd_kafka_broker_destroy(rkb);
+        rd_kafka_destroy(rk);
+
+        RD_UT_ASSERT(sent_msg_cnt == 0,
+                     "expected wait_drain to block sends, got %d message(s)",
+                     sent_msg_cnt);
+        RD_UT_ASSERT(produced_req_cnt == 0,
+                     "expected no ProduceRequests enqueued, got %d",
+                     produced_req_cnt);
+        RD_UT_ASSERT(xmit_msg_cnt == 1,
+                     "expected message to remain in xmit_msgq, got %d",
+                     xmit_msg_cnt);
+        RD_UT_ASSERT(inflight == 1,
+                     "expected in-flight count to remain 1, got %d",
+                     inflight);
+
+        return 0;
+}
+
 int unittest_broker(void) {
         int fails = 0;
 
         fails += rd_ut_reconnect_backoff();
+        fails += rd_ut_toppar_producer_serve_mbv2_wait_drain();
+        fails += rd_ut_broker_produce_toppars_mbv2_wait_drain_blocks_send();
 
         return fails;
 }
