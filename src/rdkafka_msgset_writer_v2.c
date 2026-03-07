@@ -1189,8 +1189,15 @@ int rd_kafka_produce_calculator_add(rd_kafka_produce_calculator_t *rkpca,
                     rkpca->rkpca_message_set_header_size;
                 size_t pass_msg_overhead =
                     rkpca->rkpca_message_overhead * pass_msg_cnt;
-                size_t pass_msg_size = rd_kafka_msgq_bytes_prefix(
-                    &rktp->rktp_xmit_msgq, pass_msg_cnt);
+                size_t pass_msg_size;
+                if (batch_msg_cnt == 0 && pass_msg_cnt == xmit_msgq_len) {
+                    pass_msg_size =
+                        rd_kafka_msgq_size(&rktp->rktp_xmit_msgq);
+                } else {
+                    pass_msg_size = rd_kafka_msgq_bytes_prefix(
+                        &rktp->rktp_xmit_msgq, pass_msg_cnt);
+                }
+
                 msgset_payload_size =
                     pass_msg_set_header + pass_msg_overhead + pass_msg_size;
                 msgset_size_len =
