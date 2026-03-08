@@ -601,12 +601,24 @@ size_t rd_buf_write_update(rd_buf_t *rbuf,
                            size_t absof,
                            const void *payload,
                            size_t size) {
+        return rd_buf_write_update_hint(rbuf, rbuf->rbuf_wpos, absof, payload,
+                                        size);
+}
+
+/**
+ * @brief Hint-aware variant of rd_buf_write_update().
+ */
+size_t rd_buf_write_update_hint(rd_buf_t *rbuf,
+                                const rd_segment_t *hint,
+                                size_t absof,
+                                const void *payload,
+                                size_t size) {
         rd_segment_t *seg;
         const char *psrc = (const char *)payload;
         size_t of;
 
         /* Find segment for offset */
-        seg = rd_buf_get_segment_at_offset(rbuf, rbuf->rbuf_wpos, absof);
+        seg = rd_buf_get_segment_at_offset(rbuf, hint, absof);
         rd_assert(seg && *"invalid absolute offset");
 
         for (of = 0; of < size; seg = TAILQ_NEXT(seg, seg_link)) {
@@ -747,10 +759,23 @@ size_t rd_buf_erase(rd_buf_t *rbuf, size_t absof, size_t size) {
  * @returns -1 if the offset is out of bounds, else 0.
  */
 int rd_buf_write_seek(rd_buf_t *rbuf, size_t absof) {
+        return rd_buf_write_seek_hint(rbuf, rbuf->rbuf_wpos, absof);
+}
+
+/**
+ * @brief Hint-aware variant of rd_buf_write_seek().
+ *
+ * @warning Any sub-sequent segments will be destroyed.
+ *
+ * @returns -1 if the offset is out of bounds, else 0.
+ */
+int rd_buf_write_seek_hint(rd_buf_t *rbuf,
+                           const rd_segment_t *hint,
+                           size_t absof) {
         rd_segment_t *seg, *next;
         size_t relof;
 
-        seg = rd_buf_get_segment_at_offset(rbuf, rbuf->rbuf_wpos, absof);
+        seg = rd_buf_get_segment_at_offset(rbuf, hint, absof);
         if (unlikely(!seg))
                 return -1;
 
@@ -822,8 +847,6 @@ size_t rd_buf_get_write_iov(const rd_buf_t *rbuf,
         return sum;
 }
 
-
-
 /**
  * @name Slice reader interface
  *
@@ -870,8 +893,23 @@ int rd_slice_init(rd_slice_t *slice,
                   const rd_buf_t *rbuf,
                   size_t absof,
                   size_t size) {
-        const rd_segment_t *seg =
-            rd_buf_get_segment_at_offset(rbuf, NULL, absof);
+        return rd_slice_init_hint(slice, rbuf, NULL, absof, size);
+}
+
+/**
+ * @brief Hint-aware variant of rd_slice_init().
+ *
+ * @returns 0 on success or -1 if there is not at least \p size bytes available
+ *          in the buffer.
+ */
+int rd_slice_init_hint(rd_slice_t *slice,
+                       const rd_buf_t *rbuf,
+                       const rd_segment_t *hint,
+                       size_t absof,
+                       size_t size) {
+        const rd_segment_t *seg;
+
+        seg = rd_buf_get_segment_at_offset(rbuf, hint, absof);
         if (unlikely(!seg))
                 return -1;
 
@@ -1516,9 +1554,9 @@ static int do_unittest_read_verify0(const rd_buf_t *b,
         RD_UT_ASSERT(r == half,
                      "sub read() returned %" PRIusz " expected %" PRIusz
                      " (%" PRIusz " remains)",
-                     r, len, rd_slice_remains(&sub));
+                     r, half, rd_slice_remains(&sub));
 
-        RD_UT_ASSERT(!memcmp(buf, verify, len), "verify");
+        RD_UT_ASSERT(!memcmp(buf, verify + half, half), "verify");
 
         r = rd_slice_offset(&sub);
         RD_UT_ASSERT(r == rd_slice_size(&sub),
@@ -2052,6 +2090,59 @@ static int do_unittest_ensure_contig_orphan(void) {
         RD_UT_PASS();
 }
 
+/**
+ * @brief Verify that hint-aware helpers behave like their non-hinted
+ *        counterparts, both when the hint is before the target offset
+ *        and when it is after the target offset.
+ */
+static int do_unittest_hint_apis(void) {
+        rd_buf_t b;
+        rd_slice_t slice;
+        rd_segment_t *seg2, *seg3;
+        char buf[4];
+        size_t r;
+
+        rd_buf_init(&b, 0, 0);
+
+        rd_buf_write_ensure(&b, 4, 4);
+        rd_buf_write(&b, "abcd", 4);
+        rd_buf_write_ensure(&b, 4, 4);
+        rd_buf_write(&b, "EFGH", 4);
+        rd_buf_write_ensure(&b, 4, 4);
+        rd_buf_write(&b, "IJKL", 4);
+
+        seg2 = rd_buf_get_segment_at_offset(&b, NULL, 4);
+        seg3 = rd_buf_get_segment_at_offset(&b, NULL, 8);
+
+        RD_UT_ASSERT(seg2 != NULL, "seg2 not found");
+        RD_UT_ASSERT(seg3 != NULL, "seg3 not found");
+
+        r = rd_slice_init_hint(&slice, &b, seg2, 8, 4);
+        RD_UT_ASSERT(r == 0, "slice_init_hint() failed: %" PRIusz, r);
+        r = rd_slice_read(&slice, buf, sizeof(buf));
+        RD_UT_ASSERT(r == sizeof(buf),
+                     "slice_read() returned %" PRIusz ", expected %" PRIusz,
+                     r, sizeof(buf));
+        RD_UT_ASSERT(!memcmp(buf, "IJKL", sizeof(buf)),
+                     "slice_init_hint() read wrong payload");
+
+        r = rd_buf_write_update_hint(&b, seg3, 1, "Z", 1);
+        RD_UT_ASSERT(r == 1, "update_hint() returned %" PRIusz, r);
+        do_unittest_read_verify(&b, 0, 12, "aZcdEFGHIJKL");
+
+        r = rd_buf_write_update_hint(&b, seg2, 9, "xyz", 3);
+        RD_UT_ASSERT(r == 3, "update_hint() returned %" PRIusz, r);
+        do_unittest_read_verify(&b, 0, 12, "aZcdEFGHIxyz");
+
+        r = rd_buf_write_seek_hint(&b, seg2, 8);
+        RD_UT_ASSERT(r == 0, "seek_hint() failed: %" PRIusz, r);
+        do_unittest_read_verify(&b, 0, 8, "aZcdEFGH");
+
+        rd_buf_destroy(&b);
+
+        RD_UT_PASS();
+}
+
 
 int unittest_rdbuf(void) {
         int fails = 0;
@@ -2062,6 +2153,7 @@ int unittest_rdbuf(void) {
         fails += do_unittest_write_iov();
         fails += do_unittest_erase();
         fails += do_unittest_ensure_contig_orphan();
+        fails += do_unittest_hint_apis();
 
         return fails;
 }

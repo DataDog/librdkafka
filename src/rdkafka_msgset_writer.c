@@ -536,7 +536,8 @@ int rd_kafka_msgset_writer_compress(rd_kafka_msgset_writer_t *msetw,
         rd_assert(rd_buf_len(rbuf) >= msetw->msetw_firstmsg.of + len);
 
         /* Create buffer slice from firstmsg and onwards */
-        r = rd_slice_init(&slice, rbuf, msetw->msetw_firstmsg.of, len);
+        r = rd_slice_init_hint(&slice, rbuf, msetw->msetw_firstmsg.seg,
+                               msetw->msetw_firstmsg.of, len);
         rd_assert(r == 0 || !*"invalid firstmsg position");
 
         switch (msetw->msetw_compression) {
@@ -586,7 +587,8 @@ int rd_kafka_msgset_writer_compress(rd_kafka_msgset_writer_t *msetw,
         /* Rewind rkbuf to the pre-message checkpoint (firstmsg)
          * and replace the original message(s) with the compressed payload,
          * possibly with version dependent enveloping. */
-        rd_buf_write_seek(rbuf, msetw->msetw_firstmsg.of);
+        rd_buf_write_seek_hint(rbuf, msetw->msetw_firstmsg.seg,
+                               msetw->msetw_firstmsg.of);
 
         rd_kafka_assert(msetw->msetw_rkb->rkb_rk, ciov.iov_len < INT32_MAX);
 
@@ -625,17 +627,19 @@ rd_kafka_msgset_writer_calc_crc_v2(rd_kafka_msgset_writer_t *msetw) {
         rd_slice_t slice;
         int r;
 
-        r = rd_slice_init(&slice, &msetw->msetw_rkbuf->rkbuf_buf,
-                          msetw->msetw_of_CRC + 4,
-                          rd_buf_write_pos(&msetw->msetw_rkbuf->rkbuf_buf) -
-                              msetw->msetw_of_CRC - 4);
+        r = rd_slice_init_hint(
+            &slice, &msetw->msetw_rkbuf->rkbuf_buf, msetw->msetw_seg_crc,
+            msetw->msetw_of_CRC + 4,
+            rd_buf_write_pos(&msetw->msetw_rkbuf->rkbuf_buf) -
+                msetw->msetw_of_CRC - 4);
         rd_assert(!r && *"slice_init failed");
 
         /* CRC32C calculation */
         crc = rd_slice_crc32c(&slice);
 
         /* Update CRC at MessageSet v2 CRC offset */
-        rd_kafka_buf_update_i32(msetw->msetw_rkbuf, msetw->msetw_of_CRC, crc);
+        rd_kafka_buf_update_i32_hint(msetw->msetw_rkbuf, msetw->msetw_seg_crc,
+                                     msetw->msetw_of_CRC, crc);
 }
 
 

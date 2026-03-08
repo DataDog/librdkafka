@@ -146,6 +146,7 @@ set(
     0202-adaptive_batching_baseline.c
     8000-idle.cpp
     8001-fetch_from_follower_mock_manual.c
+    8002-multibatch_perf.c
     test.c
     testcpp.cpp
     rusage.c

@@ -527,6 +527,7 @@ _Static_assert(sizeof(rd_msgset_v2_hdr_t) == RD_KAFKAP_MSGSET_V2_SIZE,
 static void rd_kafka_msgset_writer_write_MessageSet_v2_header_mbv2(
     rd_kafka_msgset_writer_t *msetw) {
         rd_kafka_buf_t *rkbuf = msetw->msetw_rkbuf;
+        rd_segment_t *seg_hint = rkbuf->rkbuf_buf.rbuf_wpos;
         rd_msgset_v2_hdr_t hdr;
 
         rd_kafka_assert(NULL, msetw->msetw_ApiVersion >= 3);
@@ -543,9 +544,11 @@ static void rd_kafka_msgset_writer_write_MessageSet_v2_header_mbv2(
         /* Write entire header in a single operation (replaces 13 separate writes).
          * Store the start offset for later field updates. */
         msetw->msetw_of_start = rd_kafka_buf_write(rkbuf, &hdr, sizeof(hdr));
+        msetw->msetw_seg_start = seg_hint ? seg_hint : rkbuf->rkbuf_buf.rbuf_wpos;
 
         /* Calculate CRC offset for later update */
         msetw->msetw_of_CRC = msetw->msetw_of_start + RD_KAFKAP_MSGSET_V2_OF_CRC;
+        msetw->msetw_seg_crc = msetw->msetw_seg_start;
 }
 
 
@@ -604,9 +607,9 @@ rd_kafka_produce_finalize_topic_header_mbv2(rd_kafka_produce_ctx_t *rkpc) {
         rd_kafka_buf_t *rkbuf = rkpc->rkpc_buf;
 
         /* Update PartitionArrayCnt (handles both regular and compact arrays) */
-        rd_kafka_buf_finalize_arraycnt(rkbuf,
-                                       rkpc->rkpc_active_topic_partition_cnt_offset,
-                                       rkpc->rkpc_active_topic_partition_cnt);
+        rd_kafka_buf_finalize_arraycnt(
+            rkbuf, rkpc->rkpc_active_topic_partition_cnt_offset,
+            rkpc->rkpc_active_topic_partition_cnt);
 
         /* Topic tags (written after all partitions for this topic) */
         rd_kafka_buf_write_tags_empty(rkbuf);
@@ -720,6 +723,7 @@ static int rd_kafka_msgset_writer_init_mbv2(rd_kafka_msgset_writer_t *msetw,
          * in case of compression. */
         msetw->msetw_firstmsg.of =
             rd_buf_write_pos(&msetw->msetw_rkbuf->rkbuf_buf);
+        msetw->msetw_firstmsg.seg = msetw->msetw_rkbuf->rkbuf_buf.rbuf_wpos;
 
         /* NOTE: msgbatch is NOT initialized per-partition in multi-partition requests.
          * The msgbatch structure is designed for single-partition batches only.
@@ -892,8 +896,9 @@ static void rd_kafka_msgset_writer_finalize_MessageSet_v2_header_mbv2(
 
         /* MessageSet.Length is the same as
          * MessageSetSize minus field widths for FirstOffset+Length */
-        rd_kafka_buf_update_i32(
-            rkbuf, msetw->msetw_of_start + RD_KAFKAP_MSGSET_V2_OF_Length,
+        rd_kafka_buf_update_i32_hint(
+            rkbuf, msetw->msetw_seg_start,
+            msetw->msetw_of_start + RD_KAFKAP_MSGSET_V2_OF_Length,
             (int32_t)msetw->msetw_MessageSetSize - (8 + 4));
 
         msetw->msetw_Attributes |= RD_KAFKA_MSG_ATTR_CREATE_TIME;
@@ -902,21 +907,24 @@ static void rd_kafka_msgset_writer_finalize_MessageSet_v2_header_mbv2(
                 msetw->msetw_Attributes |=
                     RD_KAFKA_MSGSET_V2_ATTR_TRANSACTIONAL;
 
-        rd_kafka_buf_update_i16(
-            rkbuf, msetw->msetw_of_start + RD_KAFKAP_MSGSET_V2_OF_Attributes,
+        rd_kafka_buf_update_i16_hint(
+            rkbuf, msetw->msetw_seg_start,
+            msetw->msetw_of_start + RD_KAFKAP_MSGSET_V2_OF_Attributes,
             msetw->msetw_Attributes);
 
-        rd_kafka_buf_update_i32(rkbuf,
-                                msetw->msetw_of_start +
-                                    RD_KAFKAP_MSGSET_V2_OF_LastOffsetDelta,
-                                msgcnt - 1);
+        rd_kafka_buf_update_i32_hint(
+            rkbuf, msetw->msetw_seg_start,
+            msetw->msetw_of_start + RD_KAFKAP_MSGSET_V2_OF_LastOffsetDelta,
+            msgcnt - 1);
 
-        rd_kafka_buf_update_i64(
-            rkbuf, msetw->msetw_of_start + RD_KAFKAP_MSGSET_V2_OF_BaseTimestamp,
+        rd_kafka_buf_update_i64_hint(
+            rkbuf, msetw->msetw_seg_start,
+            msetw->msetw_of_start + RD_KAFKAP_MSGSET_V2_OF_BaseTimestamp,
             msetw->msetw_firstmsg.timestamp);
 
-        rd_kafka_buf_update_i64(
-            rkbuf, msetw->msetw_of_start + RD_KAFKAP_MSGSET_V2_OF_MaxTimestamp,
+        rd_kafka_buf_update_i64_hint(
+            rkbuf, msetw->msetw_seg_start,
+            msetw->msetw_of_start + RD_KAFKAP_MSGSET_V2_OF_MaxTimestamp,
             msetw->msetw_MaxTimestamp);
 
         /* Calculate BaseSequence for this partition's MessageSet.
@@ -930,12 +938,14 @@ static void rd_kafka_msgset_writer_finalize_MessageSet_v2_header_mbv2(
                                              msetw->msetw_epoch_base_msgid);
         }
 
-        rd_kafka_buf_update_i32(
-            rkbuf, msetw->msetw_of_start + RD_KAFKAP_MSGSET_V2_OF_BaseSequence,
+        rd_kafka_buf_update_i32_hint(
+            rkbuf, msetw->msetw_seg_start,
+            msetw->msetw_of_start + RD_KAFKAP_MSGSET_V2_OF_BaseSequence,
             base_seq);
 
-        rd_kafka_buf_update_i32(
-            rkbuf, msetw->msetw_of_start + RD_KAFKAP_MSGSET_V2_OF_RecordCount,
+        rd_kafka_buf_update_i32_hint(
+            rkbuf, msetw->msetw_seg_start,
+            msetw->msetw_of_start + RD_KAFKAP_MSGSET_V2_OF_RecordCount,
             msgcnt);
 
         rd_kafka_msgset_writer_calc_crc_v2(msetw);
@@ -957,9 +967,9 @@ rd_kafka_msgset_writer_finalize_MessageSet_mbv2(rd_kafka_msgset_writer_t *msetw)
                     RD_KAFKAP_MSGSET_V0_SIZE + msetw->msetw_messages_len;
 
         /* Update MessageSetSize */
-        rd_kafka_buf_finalize_arraycnt(msetw->msetw_rkbuf,
-                                       msetw->msetw_of_MessageSetSize,
-                                       (int32_t)msetw->msetw_MessageSetSize);
+        rd_kafka_buf_finalize_arraycnt(
+            msetw->msetw_rkbuf, msetw->msetw_of_MessageSetSize,
+            (int32_t)msetw->msetw_MessageSetSize);
 }
 
 
