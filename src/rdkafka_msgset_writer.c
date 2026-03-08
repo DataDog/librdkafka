@@ -110,7 +110,81 @@ rd_kafka_msgset_writer_write_msg_headers(rd_kafka_msgset_writer_t *msetw,
         return written;
 }
 
+/**
+ * @brief Fast path for MsgVersion 2 records with no key and no headers.
+ *
+ * Collapses the fixed metadata prefix into a single buffer write, leaving
+ * only the payload path and trailing zero HeaderCount write.
+ */
+static size_t
+rd_kafka_msgset_writer_write_msg_v2_nokey_nohdr(
+    rd_kafka_msgset_writer_t *msetw,
+    rd_kafka_msg_t *rkm,
+    int64_t Offset,
+    void (*free_cb)(void *)) {
+        rd_kafka_buf_t *rkbuf = msetw->msetw_rkbuf;
+        char varint_Length[RD_UVARINT_ENC_SIZEOF(int64_t)];
+        char varint_TimestampDelta[RD_UVARINT_ENC_SIZEOF(int64_t)];
+        char varint_OffsetDelta[RD_UVARINT_ENC_SIZEOF(int64_t)];
+        char varint_KeyLen[RD_UVARINT_ENC_SIZEOF(int32_t)];
+        char varint_ValueLen[RD_UVARINT_ENC_SIZEOF(int32_t)];
+        char varint_HeaderCount[RD_UVARINT_ENC_SIZEOF(int32_t)];
+        char prefix[RD_UVARINT_ENC_SIZEOF(int64_t) + 1 +
+                    RD_UVARINT_ENC_SIZEOF(int64_t) +
+                    RD_UVARINT_ENC_SIZEOF(int64_t) +
+                    RD_UVARINT_ENC_SIZEOF(int32_t) +
+                    RD_UVARINT_ENC_SIZEOF(int32_t)];
+        char *p = prefix;
+        size_t MessageSize;
+        size_t sz_Length;
+        size_t sz_TimestampDelta;
+        size_t sz_OffsetDelta;
+        size_t sz_KeyLen;
+        size_t sz_ValueLen;
+        size_t sz_HeaderCount;
 
+        sz_TimestampDelta = rd_uvarint_enc_i64(
+            varint_TimestampDelta, sizeof(varint_TimestampDelta),
+            rkm->rkm_timestamp - msetw->msetw_firstmsg.timestamp);
+        sz_OffsetDelta = rd_uvarint_enc_i64(varint_OffsetDelta,
+                                            sizeof(varint_OffsetDelta), Offset);
+        sz_KeyLen = rd_uvarint_enc_i32(varint_KeyLen, sizeof(varint_KeyLen),
+                                       (int32_t)RD_KAFKAP_BYTES_LEN_NULL);
+        sz_ValueLen = rd_uvarint_enc_i32(
+            varint_ValueLen, sizeof(varint_ValueLen),
+            rkm->rkm_payload ? (int32_t)rkm->rkm_len
+                             : (int32_t)RD_KAFKAP_BYTES_LEN_NULL);
+        sz_HeaderCount =
+            rd_uvarint_enc_i32(varint_HeaderCount, sizeof(varint_HeaderCount), 0);
+
+        MessageSize = 1 /* MsgAttributes */ + sz_TimestampDelta +
+                      sz_OffsetDelta + sz_KeyLen + sz_ValueLen + rkm->rkm_len +
+                      sz_HeaderCount;
+
+        sz_Length = rd_uvarint_enc_i64(varint_Length, sizeof(varint_Length),
+                                       MessageSize);
+
+        memcpy(p, varint_Length, sz_Length);
+        p += sz_Length;
+        *p++ = 0; /* Attributes */
+        memcpy(p, varint_TimestampDelta, sz_TimestampDelta);
+        p += sz_TimestampDelta;
+        memcpy(p, varint_OffsetDelta, sz_OffsetDelta);
+        p += sz_OffsetDelta;
+        memcpy(p, varint_KeyLen, sz_KeyLen);
+        p += sz_KeyLen;
+        memcpy(p, varint_ValueLen, sz_ValueLen);
+        p += sz_ValueLen;
+
+        rd_kafka_buf_write(rkbuf, prefix, (size_t)(p - prefix));
+
+        if (rkm->rkm_payload)
+                rd_kafka_msgset_writer_write_msg_payload(msetw, rkm, free_cb);
+
+        rd_kafka_buf_write(rkbuf, varint_HeaderCount, sz_HeaderCount);
+
+        return MessageSize + sz_Length;
+}
 
 /**
  * @brief Write message to messageset buffer with MsgVersion 0 or 1.
@@ -207,6 +281,13 @@ rd_kafka_msgset_writer_write_msg_v2(rd_kafka_msgset_writer_t *msetw,
         size_t sz_HeaderCount;
         int HeaderCount   = 0;
         size_t HeaderSize = 0;
+
+        if (likely(!rkm->rkm_key &&
+                   (!rkm->rkm_headers ||
+                    rkm->rkm_headers->rkhdrs_list.rl_cnt == 0))) {
+                return rd_kafka_msgset_writer_write_msg_v2_nokey_nohdr(
+                    msetw, rkm, Offset, free_cb);
+        }
 
         if (rkm->rkm_headers) {
                 HeaderCount = rkm->rkm_headers->rkhdrs_list.rl_cnt;
