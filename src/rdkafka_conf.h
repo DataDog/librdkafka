@@ -465,10 +465,13 @@ struct rd_kafka_conf_s {
         rd_bool_t adaptive_batching_enabled; /**< adaptive.batching.enable */
         double adaptive_alpha;          /**< adaptive.alpha - low threshold */
         double adaptive_beta;           /**< adaptive.beta - high threshold */
+        double adaptive_linger_min_ms_dbl; /**< adaptive.linger.min.ms configured value */
+        double adaptive_linger_max_ms_dbl; /**< adaptive.linger.max.ms configured value */
         rd_ts_t adaptive_linger_min_us; /**< adaptive.linger.min.ms in us */
         rd_ts_t adaptive_linger_max_us; /**< adaptive.linger.max.ms in us */
-        int64_t adaptive_batch_min_bytes; /**< adaptive.batch.min.bytes */
-        int64_t adaptive_batch_max_bytes; /**< adaptive.batch.max.bytes */
+        int adaptive_batch_min_bytes; /**< adaptive.batch.min.bytes */
+        int adaptive_batch_max_bytes; /**< adaptive.batch.max.bytes */
+        double adaptive_adjustment_interval_ms_dbl; /**< adaptive.adjustment.interval.ms configured value */
         rd_ts_t adaptive_adjustment_interval_us; /**< adaptive.adjustment.interval.ms */
 
         /* Message delivery report callback.

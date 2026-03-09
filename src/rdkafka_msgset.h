@@ -101,7 +101,7 @@ struct rd_kafka_produce_ctx_s {
         int rkpc_topic_max;     /* Max topics which can be added to batch. */
         int rkpc_partition_max; /* Max partitions which can be added to batch.
                                  */
-        int rkpc_message_max; /* Max partitions which can be added to batch. */
+        int rkpc_message_max; /* Estimated total messages in request. */
         size_t rkpc_message_bytes_size; /* Max message bytes which can be added
                                            to batch. */
         void *rkpc_opaque; /* User data associated with the request. */

@@ -97,6 +97,8 @@ typedef struct rd_kafka_broker_batch_collector_s {
  */
 typedef struct rd_kafka_broker_producer_mbv2_s {
         rd_kafka_broker_batch_collector_t rkbp_collector;
+        /* Adaptive state is updated by the broker thread and read by stats
+         * under rkb_lock. */
         rd_kafka_adaptive_state_t rkbp_adaptive_state;
         rd_kafka_adaptive_params_t rkbp_adaptive_params;
         rd_avg_t rkbp_avg_produce_partitions;

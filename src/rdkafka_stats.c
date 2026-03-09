@@ -244,6 +244,7 @@ static void rd_kafka_stats_partition_populate(rd_kafka_partition_stats_t *dst,
 static int rd_kafka_stats_topic_populate(rd_kafka_topic_stats_t *dst,
                                           rd_kafka_topic_t *rkt,
                                           rd_kafka_partition_stats_t **part_ptr,
+                                          rd_kafka_partition_stats_t *part_end,
                                           rd_kafka_t *rk,
                                           rd_ts_t now,
                                           int64_t *txmsgs_total,
@@ -253,6 +254,8 @@ static int rd_kafka_stats_topic_populate(rd_kafka_topic_stats_t *dst,
         int i, j;
         rd_kafka_toppar_t *rktp;
         int partition_idx = 0;
+        size_t part_cap =
+            part_end > *part_ptr ? (size_t)(part_end - *part_ptr) : 0;
 
         rd_kafka_topic_rdlock(rkt);
 
@@ -267,19 +270,13 @@ static int rd_kafka_stats_topic_populate(rd_kafka_topic_stats_t *dst,
         rd_kafka_stats_avg_populate(&dst->batchsize, &rkt->rkt_avg_batchsize);
         rd_kafka_stats_avg_populate(&dst->batchcnt, &rkt->rkt_avg_batchcnt);
 
-        /* Count partitions for this topic */
-        dst->partition_cnt = rkt->rkt_partition_cnt;
-        RD_LIST_FOREACH(rktp, &rkt->rkt_desp, j) {
-                dst->partition_cnt++;
-        }
-        if (rkt->rkt_ua)
-                dst->partition_cnt++;
-
         /* Set partition array pointer */
         dst->partitions = *part_ptr;
 
         /* Populate regular partitions */
         for (i = 0; i < rkt->rkt_partition_cnt; i++) {
+                if (unlikely((size_t)partition_idx >= part_cap))
+                        break;
                 rd_kafka_stats_partition_populate(
                     &dst->partitions[partition_idx++], rkt->rkt_p[i], rk, now,
                     txmsgs_total, txmsg_bytes_total, rxmsgs_total,
@@ -288,6 +285,8 @@ static int rd_kafka_stats_topic_populate(rd_kafka_topic_stats_t *dst,
 
         /* Populate desired partitions */
         RD_LIST_FOREACH(rktp, &rkt->rkt_desp, j) {
+                if (unlikely((size_t)partition_idx >= part_cap))
+                        break;
                 rd_kafka_stats_partition_populate(
                     &dst->partitions[partition_idx++], rktp, rk, now,
                     txmsgs_total, txmsg_bytes_total, rxmsgs_total,
@@ -296,10 +295,15 @@ static int rd_kafka_stats_topic_populate(rd_kafka_topic_stats_t *dst,
 
         /* Populate unknown/unassigned partition */
         if (rkt->rkt_ua) {
-                rd_kafka_stats_partition_populate(
-                    &dst->partitions[partition_idx++], rkt->rkt_ua, rk, now,
-                    NULL, NULL, NULL, NULL); /* Don't count UA in totals */
+                if (likely((size_t)partition_idx < part_cap))
+                        rd_kafka_stats_partition_populate(
+                            &dst->partitions[partition_idx++], rkt->rkt_ua, rk,
+                            now, NULL, NULL, NULL,
+                            NULL); /* Don't count UA in totals */
         }
+
+        /* partition_cnt must match the number of entries actually written. */
+        dst->partition_cnt = partition_idx;
 
         rd_kafka_topic_rdunlock(rkt);
 
@@ -494,6 +498,7 @@ rd_kafka_stats_t *rd_kafka_stats_new(rd_kafka_t *rk) {
         int broker_idx   = 0;
         int topic_idx    = 0;
         rd_kafka_partition_stats_t *part_ptr;
+        rd_kafka_partition_stats_t *part_end;
         rd_kafka_broker_toppar_ref_t *toppar_ptr;
         rd_kafka_broker_toppar_ref_t *toppar_end;
         rd_kafka_req_count_t *req_ptr;
@@ -534,6 +539,7 @@ rd_kafka_stats_t *rd_kafka_stats_new(rd_kafka_t *rk) {
 
         part_ptr = (rd_kafka_partition_stats_t *)ptr;
         ptr += counts.total_partitions * sizeof(rd_kafka_partition_stats_t);
+        part_end = part_ptr + counts.total_partitions;
 
         toppar_ptr = (rd_kafka_broker_toppar_ref_t *)ptr;
         ptr += counts.total_broker_toppars * sizeof(rd_kafka_broker_toppar_ref_t);
@@ -584,7 +590,7 @@ rd_kafka_stats_t *rd_kafka_stats_new(rd_kafka_t *rk) {
         /* Populate topics */
         TAILQ_FOREACH(rkt, &rk->rk_topics, rkt_link) {
                 rd_kafka_stats_topic_populate(
-                    &stats->topics[topic_idx++], rkt, &part_ptr, rk, now,
+                    &stats->topics[topic_idx++], rkt, &part_ptr, part_end, rk, now,
                     &stats->txmsgs, &stats->txmsg_bytes, &stats->rxmsgs,
                     &stats->rxmsg_bytes);
         }

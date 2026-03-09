@@ -1599,17 +1599,17 @@ static const struct rd_kafka_property rd_kafka_properties[] = {
      "larger batches). Range: 0.0-1.0. Should be greater than adaptive.alpha.",
      .dmin = 0.0, .dmax = 1.0, .ddef = 0.3},
 
-    {_RK_GLOBAL | _RK_PRODUCER, "adaptive.linger.min.ms", _RK_C_INT,
-     _RK(adaptive_linger_min_us),
+    {_RK_GLOBAL | _RK_PRODUCER, "adaptive.linger.min.ms", _RK_C_DBL,
+     _RK(adaptive_linger_min_ms_dbl),
      "Minimum linger time in milliseconds for adaptive batching. "
      "The adaptive algorithm will not reduce linger below this value.",
-     0, 60000, 5},
+     .dmin = 0, .dmax = 60000, .ddef = 5.0},
 
-    {_RK_GLOBAL | _RK_PRODUCER, "adaptive.linger.max.ms", _RK_C_INT,
-     _RK(adaptive_linger_max_us),
+    {_RK_GLOBAL | _RK_PRODUCER, "adaptive.linger.max.ms", _RK_C_DBL,
+     _RK(adaptive_linger_max_ms_dbl),
      "Maximum linger time in milliseconds for adaptive batching. "
      "The adaptive algorithm will not increase linger above this value.",
-     0, 60000, 500},
+     .dmin = 0, .dmax = 60000, .ddef = 500.0},
 
     {_RK_GLOBAL | _RK_PRODUCER, "adaptive.batch.min.bytes", _RK_C_INT,
      _RK(adaptive_batch_min_bytes),
@@ -1623,11 +1623,11 @@ static const struct rd_kafka_property rd_kafka_properties[] = {
      "The adaptive algorithm will not increase batch size above this value.",
      0, INT_MAX, 10485760},
 
-    {_RK_GLOBAL | _RK_PRODUCER, "adaptive.adjustment.interval.ms", _RK_C_INT,
-     _RK(adaptive_adjustment_interval_us),
+    {_RK_GLOBAL | _RK_PRODUCER, "adaptive.adjustment.interval.ms", _RK_C_DBL,
+     _RK(adaptive_adjustment_interval_ms_dbl),
      "How often in milliseconds to check congestion and adjust batching "
      "parameters. Lower values are more responsive but may cause oscillation.",
-     10, 10000, 100},
+     .dmin = 10, .dmax = 10000, .ddef = 100.0},
 
 
     /*
@@ -4223,11 +4223,13 @@ const char *rd_kafka_conf_finalize(rd_kafka_type_t cltype,
                     (rd_ts_t)(conf->broker_linger_ms_dbl * 1000);
         }
 
-        /* Convert adaptive batching ms configs to internal us values.
-         * The config parser stores ms values as int, we need to convert to us. */
-        conf->adaptive_linger_min_us *= 1000;
-        conf->adaptive_linger_max_us *= 1000;
-        conf->adaptive_adjustment_interval_us *= 1000;
+        /* Convert adaptive batching ms configs to internal us values. */
+        conf->adaptive_linger_min_us =
+            (rd_ts_t)(conf->adaptive_linger_min_ms_dbl * 1000);
+        conf->adaptive_linger_max_us =
+            (rd_ts_t)(conf->adaptive_linger_max_ms_dbl * 1000);
+        conf->adaptive_adjustment_interval_us =
+            (rd_ts_t)(conf->adaptive_adjustment_interval_ms_dbl * 1000);
 
         return NULL;
 }

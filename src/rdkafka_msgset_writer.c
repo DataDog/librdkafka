@@ -536,7 +536,8 @@ int rd_kafka_msgset_writer_compress(rd_kafka_msgset_writer_t *msetw,
         rd_assert(rd_buf_len(rbuf) >= msetw->msetw_firstmsg.of + len);
 
         /* Create buffer slice from firstmsg and onwards */
-        r = rd_slice_init(&slice, rbuf, msetw->msetw_firstmsg.of, len);
+        r = rd_slice_init_hint(&slice, rbuf, msetw->msetw_firstmsg.seg,
+                               msetw->msetw_firstmsg.of, len);
         rd_assert(r == 0 || !*"invalid firstmsg position");
 
         switch (msetw->msetw_compression) {
@@ -586,7 +587,8 @@ int rd_kafka_msgset_writer_compress(rd_kafka_msgset_writer_t *msetw,
         /* Rewind rkbuf to the pre-message checkpoint (firstmsg)
          * and replace the original message(s) with the compressed payload,
          * possibly with version dependent enveloping. */
-        rd_buf_write_seek(rbuf, msetw->msetw_firstmsg.of);
+        rd_buf_write_seek_hint(rbuf, msetw->msetw_firstmsg.seg,
+                               msetw->msetw_firstmsg.of);
 
         rd_kafka_assert(msetw->msetw_rkb->rkb_rk, ciov.iov_len < INT32_MAX);
 
@@ -625,17 +627,19 @@ rd_kafka_msgset_writer_calc_crc_v2(rd_kafka_msgset_writer_t *msetw) {
         rd_slice_t slice;
         int r;
 
-        r = rd_slice_init(&slice, &msetw->msetw_rkbuf->rkbuf_buf,
-                          msetw->msetw_of_CRC + 4,
-                          rd_buf_write_pos(&msetw->msetw_rkbuf->rkbuf_buf) -
-                              msetw->msetw_of_CRC - 4);
+        r = rd_slice_init_hint(
+            &slice, &msetw->msetw_rkbuf->rkbuf_buf, msetw->msetw_seg_crc,
+            msetw->msetw_of_CRC + 4,
+            rd_buf_write_pos(&msetw->msetw_rkbuf->rkbuf_buf) -
+                msetw->msetw_of_CRC - 4);
         rd_assert(!r && *"slice_init failed");
 
         /* CRC32C calculation */
         crc = rd_slice_crc32c(&slice);
 
         /* Update CRC at MessageSet v2 CRC offset */
-        rd_kafka_buf_update_i32(msetw->msetw_rkbuf, msetw->msetw_of_CRC, crc);
+        rd_kafka_buf_update_i32_hint(msetw->msetw_rkbuf, msetw->msetw_seg_crc,
+                                     msetw->msetw_of_CRC, crc);
 }
 
 
@@ -835,6 +839,12 @@ static int unittest_msgset_writer_config_values(void) {
         rd_kafka_conf_set(conf, "produce.request.max.partitions", "123", NULL, 0);
         rd_kafka_conf_set(conf, "batch.num.messages", "456", NULL, 0);
         rd_kafka_conf_set(conf, "produce.engine", "v2", NULL, 0);
+        rd_kafka_conf_set(conf, "adaptive.linger.min.ms", "1.5", NULL, 0);
+        rd_kafka_conf_set(conf, "adaptive.linger.max.ms", "250.25", NULL, 0);
+        rd_kafka_conf_set(conf, "adaptive.batch.min.bytes", "12345", NULL, 0);
+        rd_kafka_conf_set(conf, "adaptive.batch.max.bytes", "67890", NULL, 0);
+        rd_kafka_conf_set(conf, "adaptive.adjustment.interval.ms", "12.5",
+                          NULL, 0);
         rk = rd_kafka_new(RD_KAFKA_PRODUCER, conf, NULL, 0);
         if (!rk)
                 RD_UT_FAIL("Failed to create producer");
@@ -849,8 +859,66 @@ static int unittest_msgset_writer_config_values(void) {
         RD_UT_ASSERT(rk->rk_conf.batch_num_messages == 456,
                      "batch.num.messages should be 456, got %d",
                      rk->rk_conf.batch_num_messages);
+        RD_UT_ASSERT(rk->rk_conf.adaptive_linger_min_us == 1500,
+                     "adaptive.linger.min.ms should convert to 1500us, got %"
+                     PRId64,
+                     (int64_t)rk->rk_conf.adaptive_linger_min_us);
+        RD_UT_ASSERT(rk->rk_conf.adaptive_linger_max_us == 250250,
+                     "adaptive.linger.max.ms should convert to 250250us, got %"
+                     PRId64,
+                     (int64_t)rk->rk_conf.adaptive_linger_max_us);
+        RD_UT_ASSERT(rk->rk_conf.adaptive_batch_min_bytes == 12345,
+                     "adaptive.batch.min.bytes should be 12345, got %d",
+                     rk->rk_conf.adaptive_batch_min_bytes);
+        RD_UT_ASSERT(rk->rk_conf.adaptive_batch_max_bytes == 67890,
+                     "adaptive.batch.max.bytes should be 67890, got %d",
+                     rk->rk_conf.adaptive_batch_max_bytes);
+        RD_UT_ASSERT(
+            rk->rk_conf.adaptive_adjustment_interval_us == 12500,
+            "adaptive.adjustment.interval.ms should convert to 12500us, got %"
+            PRId64,
+            (int64_t)rk->rk_conf.adaptive_adjustment_interval_us);
 
         /* Cleanup */
+        rd_kafka_destroy(rk);
+
+        RD_UT_PASS();
+}
+
+static int unittest_msgset_writer_ctx_init_preserves_total_message_max(void) {
+        rd_kafka_conf_t *conf;
+        rd_kafka_t *rk;
+        rd_kafka_broker_t *rkb;
+        rd_kafka_produce_ctx_t ctx;
+        rd_kafka_pid_t pid = RD_ZERO_INIT;
+
+        RD_UT_BEGIN();
+
+        conf = rd_kafka_conf_new();
+        rd_kafka_conf_set(conf, "batch.num.messages", "10", NULL, 0);
+        rd_kafka_conf_set(conf, "produce.engine", "v2", NULL, 0);
+
+        rk = rd_kafka_new(RD_KAFKA_PRODUCER, conf, NULL, 0);
+        if (!rk)
+                RD_UT_FAIL("Failed to create producer");
+
+        rkb = rd_kafka_broker_add_logical(rk, "unittest");
+        RD_UT_ASSERT(rkb, "failed to create broker");
+
+        rd_kafka_broker_lock(rkb);
+        rkb->rkb_features = RD_KAFKA_FEATURE_UNITTEST | RD_KAFKA_FEATURE_ALL;
+        rd_kafka_broker_unlock(rkb);
+
+        RD_UT_ASSERT(rd_kafka_produce_ctx_init_mbv2(&ctx, rkb, 2, 3, 25, 4096,
+                                                    1, 1000, pid, NULL),
+                     "produce_ctx_init_mbv2 failed");
+        RD_UT_ASSERT(ctx.rkpc_message_max == 25,
+                     "rkpc_message_max should preserve total request estimate, "
+                     "got %d",
+                     ctx.rkpc_message_max);
+
+        rd_kafka_buf_destroy(ctx.rkpc_buf);
+        rd_kafka_broker_destroy(rkb);
         rd_kafka_destroy(rk);
 
         RD_UT_PASS();
@@ -1512,6 +1580,7 @@ int unittest_msgset_writer(void) {
         int fails = 0;
 
         fails += unittest_msgset_writer_config_values();
+        fails += unittest_msgset_writer_ctx_init_preserves_total_message_max();
         fails += unittest_msgset_writer_empty_partition();
         fails += unittest_msgset_writer_add_partition();
         fails += unittest_msgset_writer_partition_limit();

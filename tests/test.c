@@ -279,6 +279,7 @@ _TEST_DECL(0207_multibatch_multitopic_correctness);
 /* Manual tests */
 _TEST_DECL(8000_idle);
 _TEST_DECL(8001_fetch_from_follower_mock_manual);
+_TEST_DECL(8002_multibatch_perf);
 
 
 /* Define test resource usage thresholds if the default limits
@@ -551,6 +552,7 @@ struct test tests[] = {
     /* Manual tests */
     _TEST(8000_idle, TEST_F_MANUAL),
     _TEST(8001_fetch_from_follower_mock_manual, TEST_F_MANUAL),
+    _TEST(8002_multibatch_perf, TEST_F_MANUAL),
 
     {NULL}};
 

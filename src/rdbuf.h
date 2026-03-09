@@ -368,6 +368,21 @@ int rd_slice_narrow_copy_relative(const rd_slice_t *orig,
 
 void rd_slice_dump(const rd_slice_t *slice, int do_hexdump);
 
+int rd_slice_init_hint(rd_slice_t *slice,
+                        const rd_buf_t *buf,
+                        const rd_segment_t *hint,
+                        size_t absof,
+                        size_t size);
+size_t rd_buf_write_update_hint(rd_buf_t *rbuf,
+                                const rd_segment_t *hint,
+                                size_t absof,
+                                const void *payload,
+                                size_t size);
+int rd_buf_write_seek_hint(rd_buf_t *rbuf,
+                            const rd_segment_t *hint,
+                            size_t absof);
+
+
 
 /**@}*/
 

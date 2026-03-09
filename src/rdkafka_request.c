@@ -6130,6 +6130,36 @@ static void rd_kafka_msgbatch_handle_Produce_result_record_errors_mbv2(
 
 
 /**
+ * @brief Wake the current broker when a wait_drain partition reaches
+ *        zero in-flight messages.
+ *
+ * Produce responses may be handled on an old broker thread after leadership
+ * changed, while the partition is already delegated to a different broker and
+ * waiting there for in-flight requests to drain. Nudge the current broker so
+ * it can promptly observe the drained state and resume serving the partition.
+ */
+static void
+rd_kafka_toppar_maybe_wakeup_wait_drain_broker(rd_kafka_toppar_t *rktp,
+                                               const char *reason) {
+        rd_kafka_broker_t *curr_rkb = NULL;
+
+        rd_kafka_toppar_lock(rktp);
+        if (rktp->rktp_eos.wait_drain && rktp->rktp_broker &&
+            rktp->rktp_broker->rkb_source != RD_KAFKA_INTERNAL) {
+                curr_rkb = rktp->rktp_broker;
+                rd_kafka_broker_keep(curr_rkb);
+        }
+        rd_kafka_toppar_unlock(rktp);
+
+        if (!curr_rkb)
+                return;
+
+        rd_kafka_broker_wakeup(curr_rkb, reason);
+        rd_kafka_broker_destroy(curr_rkb);
+}
+
+
+/**
  * @brief Handle ProduceRequest result for a message batch.
  *
  * @warning \p request may be NULL.
@@ -6217,8 +6247,11 @@ static void rd_kafka_msgbatch_handle_Produce_result_mbv1(
                 rd_kafka_dr_msgq0(rktp->rktp_rkt, &batch->msgq, err, presult);
         }
 
-        if (rd_kafka_is_idempotent(rk) && last_inflight)
+        if (rd_kafka_is_idempotent(rk) && last_inflight) {
                 rd_kafka_idemp_inflight_toppar_sub(rk, rktp);
+                rd_kafka_toppar_maybe_wakeup_wait_drain_broker(
+                    rktp, "partition drain complete");
+        }
 }
 
 /**
@@ -6327,8 +6360,11 @@ static void rd_kafka_msgbatch_handle_Produce_result_mbv2(
                 rd_kafka_dr_msgq0(rktp->rktp_rkt, &batch->msgq, err, presult);
         }
 
-        if (rd_kafka_is_idempotent(rk) && last_inflight)
+        if (rd_kafka_is_idempotent(rk) && last_inflight) {
                 rd_kafka_idemp_inflight_toppar_sub(rk, rktp);
+                rd_kafka_toppar_maybe_wakeup_wait_drain_broker(
+                    rktp, "partition drain complete");
+        }
 }
 
 
@@ -7195,17 +7231,6 @@ int rd_kafka_ProduceRequest_finalize_mbv2(rd_kafka_produce_ctx_t *rkpc) {
                            rkpc->rkpc_appended_message_cnt);
                 rd_avg_add(&bp->rkbp_avg_produce_reqsize, (int64_t)req_size);
                 rd_avg_add(&bp->rkbp_avg_produce_fill, fill_permille);
-        }
-
-        /* Temporary debug: log a few samples to verify reqsize/fill recording. */
-        static int log_reqsize_samples = 5;
-        if (log_reqsize_samples-- > 0) {
-                rd_rkb_dbg(rkpc->rkpc_rkb, MSG, "PRODUCE",
-                           "ProduceRequest stats sample: topics=%d partitions=%d "
-                           "messages=%d req_size=%" PRIusz " fill_permille=%" PRId64,
-                           rkprc->rkprc_topic_cnt, rkprc->rkprc_toppar_cnt,
-                           rkpc->rkpc_appended_message_cnt, req_size,
-                           fill_permille);
         }
 
         if (!rkpc->rkpc_request_required_acks)
@@ -9183,7 +9208,6 @@ static int unittest_idempotent_producer(void) {
         rd_kafka_toppar_pid_change(rktp, pid, msgid);
 
         remaining_batches = _BATCH_CNT;
-        RD_UT_SAY("HELLOOOOO");
 
         /* Create a ProduceRequest for each batch */
         for (rcnt = 0; rcnt < remaining_batches; rcnt++) {
@@ -9556,6 +9580,38 @@ static int unittest_handle_Produce_orphaned_msg_drain(void) {
         return 0;
 }
 
+static int unittest_produce_ctx_init_mbv2_requires_api_version(void) {
+        rd_kafka_t *rk;
+        rd_kafka_conf_t *conf;
+        rd_kafka_broker_t *rkb;
+        rd_kafka_produce_ctx_t ctx;
+        rd_kafka_pid_t pid = RD_ZERO_INIT;
+
+        RD_UT_SAY("Verifying mbv2 produce ctx init rejects invalid ApiVersion");
+
+        conf = rd_kafka_conf_new();
+        rk   = rd_kafka_new(RD_KAFKA_PRODUCER, conf, NULL, 0);
+        RD_UT_ASSERT(rk, "failed to create producer");
+
+        rkb = rd_kafka_broker_add_logical(rk, "unittest");
+        RD_UT_ASSERT(rkb, "failed to create broker");
+
+        rd_kafka_broker_lock(rkb);
+        rkb->rkb_features        = RD_KAFKA_FEATURE_MSGVER2;
+        rkb->rkb_ApiVersions_cnt = 0;
+        rd_kafka_broker_unlock(rkb);
+
+        RD_UT_ASSERT(!rd_kafka_produce_ctx_init_mbv2(&ctx, rkb, 1, 1, 1, 16, 1,
+                                                     1000, pid, NULL),
+                     "expected produce_ctx_init_mbv2 to fail");
+        RD_UT_ASSERT(!ctx.rkpc_buf, "expected no request buffer on failure");
+
+        rd_kafka_broker_destroy(rkb);
+        rd_kafka_destroy(rk);
+
+        return 0;
+}
+
 /**
  * @brief Request/response unit tests
  */
@@ -9565,6 +9621,7 @@ int unittest_request(void) {
         fails += unittest_idempotent_producer();
         fails += unittest_handle_GetTelemetrySubscriptions();
         fails += unittest_handle_Produce_orphaned_msg_drain();
+        fails += unittest_produce_ctx_init_mbv2_requires_api_version();
 
         return fails;
 }

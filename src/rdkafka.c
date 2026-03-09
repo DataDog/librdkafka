@@ -59,10 +59,6 @@
 #include "rdkafka_sasl_oauthbearer.h"
 #include "rdkafka_stats.h"
 
-/* Internal stats functions declared in rdkafka_stats.c */
-rd_kafka_stats_t *rd_kafka_stats_new(rd_kafka_t *rk);
-void rd_kafka_stats_destroy(rd_kafka_stats_t *stats);
-
 #if WITH_OAUTHBEARER_OIDC
 #include "rdkafka_sasl_oauthbearer_oidc.h"
 #endif
@@ -2360,7 +2356,6 @@ rd_kafka_t *rd_kafka_new(rd_kafka_type_t type,
         rd_kafka_resp_err_t ret_err = RD_KAFKA_RESP_ERR_NO_ERROR;
         int ret_errno               = 0;
         const char *conf_err;
-        static int dd_identity_once = 0;
 #ifndef _WIN32
         sigset_t newset, oldset;
 #endif
@@ -2369,15 +2364,12 @@ rd_kafka_t *rd_kafka_new(rd_kafka_type_t type,
 
         rd_kafka_global_init();
 
-        if (unlikely(!dd_identity_once)) {
-                dd_identity_once = 1;
-                fprintf(stderr,
-                        "[DDSUBPROBE_20260211A] identity "
-                        "librdkafka=%s rd_kafka_subscribe=%p rd_kafka_new=%p\n",
-                        rd_kafka_version_str(), (void *)&rd_kafka_subscribe,
-                        (void *)&rd_kafka_new);
-                fflush(stderr);
-        }
+        fprintf(stderr,
+                "[DDSUBPROBE_20260211A] identity "
+                "librdkafka=%s rd_kafka_subscribe=%p rd_kafka_new=%p\n",
+                rd_kafka_version_str(), (void *)&rd_kafka_subscribe,
+                (void *)&rd_kafka_new);
+        fflush(stderr);
 
         /* rd_kafka_new() takes ownership of the provided \p app_conf
          * object if rd_kafka_new() succeeds.

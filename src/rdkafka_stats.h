@@ -329,24 +329,4 @@ typedef struct rd_kafka_stats_s {
         int32_t _pad7;
 } rd_kafka_stats_t;
 
-/* Forward declaration */
-struct rd_kafka_s;
-
-/**
- * @brief Allocate and populate a stats structure from the client state.
- *
- * @param rk The Kafka client handle.
- * @returns A new stats structure, or NULL on allocation failure.
- *          The caller must free with rd_kafka_stats_destroy().
- */
-rd_kafka_stats_t *rd_kafka_stats_new(struct rd_kafka_s *rk);
-
-/**
- * @brief Free a stats structure.
- *
- * @param stats The stats structure to free (may be NULL).
- */
-void rd_kafka_stats_destroy(rd_kafka_stats_t *stats);
-
-
 #endif /* _RDKAFKA_STATS_H_ */

@@ -78,6 +78,9 @@ struct rd_kafka_s;
 struct rd_kafka_topic_s;
 struct rd_kafka_msg_s;
 struct rd_kafka_broker_s;
+
+rd_kafka_stats_t *rd_kafka_stats_new(struct rd_kafka_s *rk);
+void rd_kafka_stats_destroy(rd_kafka_stats_t *stats);
 struct rd_kafka_toppar_s;
 typedef struct rd_kafka_metadata_internal_s rd_kafka_metadata_internal_t;
 typedef struct rd_kafka_toppar_s rd_kafka_toppar_t;

@@ -116,12 +116,22 @@ void rd_kafka_adaptive_destroy(rd_kafka_broker_t *rkb) {
  * - Baseline (minimum) RTT with slow decay
  */
 void rd_kafka_adaptive_record_rtt(rd_kafka_broker_t *rkb, rd_ts_t rtt_us) {
-        rd_kafka_adaptive_state_t *state = ADAPT_STATE(rkb);
-        rd_kafka_adaptive_rtt_stats_t *stats = state ? &state->rtt_stats : NULL;
+        rd_kafka_adaptive_state_t *state;
+        rd_kafka_adaptive_rtt_stats_t *stats;
         rd_ts_t now                          = rd_clock();
 
-        if (!stats || rtt_us <= 0)
+        if (rtt_us <= 0)
                 return;
+
+        rd_kafka_broker_lock(rkb);
+
+        state = ADAPT_STATE(rkb);
+        stats = state ? &state->rtt_stats : NULL;
+
+        if (!stats) {
+                rd_kafka_broker_unlock(rkb);
+                return;
+        }
 
         /* Add to circular buffer */
         stats->rtt_samples[stats->rtt_sample_idx] = rtt_us;
@@ -157,6 +167,8 @@ void rd_kafka_adaptive_record_rtt(rd_kafka_broker_t *rkb, rd_ts_t rtt_us) {
         }
 
         stats->rtt_last_update = now;
+
+        rd_kafka_broker_unlock(rkb);
 }
 
 
@@ -168,13 +180,22 @@ void rd_kafka_adaptive_record_rtt(rd_kafka_broker_t *rkb, rd_ts_t rtt_us) {
  */
 void rd_kafka_adaptive_record_int_latency(rd_kafka_broker_t *rkb,
                                           rd_ts_t int_latency_us) {
-        rd_kafka_adaptive_state_t *state = ADAPT_STATE(rkb);
-        rd_kafka_adaptive_int_latency_stats_t *stats =
-            state ? &state->int_lat_stats : NULL;
+        rd_kafka_adaptive_state_t *state;
+        rd_kafka_adaptive_int_latency_stats_t *stats;
         rd_ts_t now = rd_clock();
 
-        if (!stats || int_latency_us <= 0)
+        if (int_latency_us <= 0)
                 return;
+
+        rd_kafka_broker_lock(rkb);
+
+        state = ADAPT_STATE(rkb);
+        stats = state ? &state->int_lat_stats : NULL;
+
+        if (!stats) {
+                rd_kafka_broker_unlock(rkb);
+                return;
+        }
 
         /* Update EWMA smoothed internal latency */
         if (stats->int_lat_current == 0) {
@@ -204,6 +225,8 @@ void rd_kafka_adaptive_record_int_latency(rd_kafka_broker_t *rkb,
         }
 
         stats->int_lat_last_update = now;
+
+        rd_kafka_broker_unlock(rkb);
 }
 
 
@@ -219,12 +242,8 @@ void rd_kafka_adaptive_record_int_latency(rd_kafka_broker_t *rkb,
  *
  * TODO: Re-enable int_latency with EWMA baseline + floor once RTT-only is stable.
  */
-double rd_kafka_adaptive_calc_congestion(rd_kafka_broker_t *rkb) {
-        rd_kafka_adaptive_state_t *state = ADAPT_STATE(rkb);
-
-        if (!state)
-                return 0.0;
-
+static double
+rd_kafka_adaptive_calc_congestion0(rd_kafka_adaptive_state_t *state) {
         /* Signal 1: RTT-based (Vegas) - authoritative, stable baseline */
         double rtt_congestion = 0.0;
         if (state->rtt_stats.rtt_base > 0 &&
@@ -255,6 +274,25 @@ double rd_kafka_adaptive_calc_congestion(rd_kafka_broker_t *rkb) {
 
         /* Use RTT signal only for now */
         return RD_MAX(0.0, rtt_congestion);
+}
+
+double rd_kafka_adaptive_calc_congestion(rd_kafka_broker_t *rkb) {
+        rd_kafka_adaptive_state_t *state;
+        double congestion;
+
+        rd_kafka_broker_lock(rkb);
+
+        state = ADAPT_STATE(rkb);
+        if (!state) {
+                rd_kafka_broker_unlock(rkb);
+                return 0.0;
+        }
+
+        congestion = rd_kafka_adaptive_calc_congestion0(state);
+
+        rd_kafka_broker_unlock(rkb);
+
+        return congestion;
 }
 
 
@@ -316,35 +354,51 @@ rd_kafka_adaptive_check_covariance(rd_kafka_broker_t *rkb,
  * we increase BOTH linger AND batch limits together.
  */
 void rd_kafka_adaptive_adjust(rd_kafka_broker_t *rkb) {
-        rd_kafka_adaptive_state_t *state   = ADAPT_STATE(rkb);
-        rd_kafka_adaptive_params_t *params = ADAPT_PARAMS(rkb);
-        rd_ts_t old_linger                 = params->linger_us;
-        int64_t old_batch                  = params->batch_max_bytes;
+        rd_kafka_adaptive_state_t *state;
+        rd_kafka_adaptive_params_t *params;
+        rd_ts_t old_linger;
+        int64_t old_batch;
         const char *action;
         rd_ts_t now = rd_clock();
+        int queue_depth;
 
-        if (!state || !params)
+        queue_depth = rd_kafka_curr_msgs_cnt(rkb->rkb_rk);
+
+        rd_kafka_broker_lock(rkb);
+
+        state  = ADAPT_STATE(rkb);
+        params = ADAPT_PARAMS(rkb);
+
+        if (!state || !params) {
+                rd_kafka_broker_unlock(rkb);
                 return;
+        }
+
+        old_linger = params->linger_us;
+        old_batch  = params->batch_max_bytes;
 
         /* Don't adjust if broker is not connected */
-        if (rkb->rkb_state != RD_KAFKA_BROKER_STATE_UP)
+        if (rkb->rkb_state != RD_KAFKA_BROKER_STATE_UP) {
+                rd_kafka_broker_unlock(rkb);
                 return;
+        }
 
         /* Don't adjust if RTT data is stale (no recent samples).
          * This prevents speeding up when broker is disconnected or
          * just reconnected but hasn't received responses yet. */
         if ((now - state->rtt_stats.rtt_last_update) >
-            RD_KAFKA_ADAPTIVE_STALENESS_THRESHOLD_US)
+            RD_KAFKA_ADAPTIVE_STALENESS_THRESHOLD_US) {
+                rd_kafka_broker_unlock(rkb);
                 return;
+        }
 
         /* Calculate congestion from both signals */
-        double congestion       = rd_kafka_adaptive_calc_congestion(rkb);
+        double congestion       = rd_kafka_adaptive_calc_congestion0(state);
         state->congestion_score = congestion;
 
         /* Check for backlog that needs draining.
          * If queue is large but RTT has recovered (congestion low),
          * speed up to drain faster using normal adjustment step. */
-        int queue_depth = rd_kafka_curr_msgs_cnt(rkb->rkb_rk);
         if (queue_depth > RD_KAFKA_ADAPTIVE_BACKLOG_THRESHOLD &&
             congestion < state->alpha) {
                 /* Backlog with healthy RTT - speed up to drain it */
@@ -380,6 +434,7 @@ void rd_kafka_adaptive_adjust(rd_kafka_broker_t *rkb) {
                 }
 
                 state->last_adjustment = now;
+                rd_kafka_broker_unlock(rkb);
                 return;
         }
 
@@ -463,6 +518,8 @@ void rd_kafka_adaptive_adjust(rd_kafka_broker_t *rkb) {
                            state->int_lat_stats.int_lat_base,
                            state->int_lat_stats.int_lat_current);
         }
+
+        rd_kafka_broker_unlock(rkb);
 }
 
 

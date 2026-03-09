@@ -297,6 +297,52 @@ finalize:
         return ret;
 }
 
+static void rd_kafka_broker_batch_collector_del_mbv2(rd_kafka_broker_t *rkb,
+                                                     rd_kafka_toppar_t *rktp);
+
+static RD_INLINE rd_bool_t
+rd_kafka_toppar_is_wait_drain(rd_kafka_toppar_t *rktp) {
+        rd_bool_t wait_drain;
+
+        rd_kafka_toppar_lock(rktp);
+        wait_drain = rktp->rktp_eos.wait_drain;
+        rd_kafka_toppar_unlock(rktp);
+
+        return wait_drain;
+}
+
+static void rd_kafka_broker_maybe_collect_toppar_mbv2(rd_kafka_broker_t *rkb,
+                                                      rd_kafka_toppar_t *rktp,
+                                                      int *total_msg_cnt) {
+        rd_kafka_toppar_producer_mbv2_t *tpv2 = rktp->rktp_producer_mbv2;
+        rd_bool_t wait_drain =
+            rd_kafka_is_idempotent(rkb->rkb_rk) &&
+            rd_kafka_toppar_is_wait_drain(rktp);
+        int msgq_len = rd_kafka_msgq_len(&rktp->rktp_xmit_msgq);
+        size_t msgq_bytes = rd_kafka_msgq_size(&rktp->rktp_xmit_msgq);
+
+        /* Update atomic counters for stats visibility */
+        if (tpv2) {
+                rd_atomic32_set(&tpv2->rktp_xmit_msgq_cnt, msgq_len);
+                rd_atomic64_set(&tpv2->rktp_xmit_msgq_bytes, msgq_bytes);
+        }
+
+        if (msgq_len > 0) {
+                if (total_msg_cnt)
+                        *total_msg_cnt += msgq_len;
+
+                if (wait_drain) {
+                        if (tpv2 && tpv2->rktp_in_batch_collector)
+                                rd_kafka_broker_batch_collector_del_mbv2(rkb,
+                                                                         rktp);
+                } else {
+                        rd_kafka_broker_batch_collector_add_mbv2(rkb, rktp);
+                }
+        } else if (wait_drain && tpv2 && tpv2->rktp_in_batch_collector) {
+                rd_kafka_broker_batch_collector_del_mbv2(rkb, rktp);
+        }
+}
+
 
 /*******************************************************************************
  *
@@ -326,6 +372,47 @@ void rd_kafka_broker_batch_collector_init_mbv2(rd_kafka_broker_t *rkb) {
         col->rkbbcol_total_bytes   = 0;
         col->rkbbcol_next          = NULL;
 }
+
+#if ENABLE_DEVEL
+static rd_bool_t rd_kafka_broker_batch_collector_contains_mbv2(
+    rd_kafka_broker_batch_collector_t *col,
+    const rd_kafka_toppar_t *rktp) {
+        const rd_kafka_toppar_t *it;
+
+        TAILQ_FOREACH(it, &col->rkbbcol_toppars, rktp_collector_link) {
+                if (it == rktp)
+                        return rd_true;
+        }
+
+        return rd_false;
+}
+
+static void
+rd_kafka_broker_batch_collector_verify_mbv2(rd_kafka_broker_t *rkb) {
+        rd_kafka_broker_batch_collector_t *col =
+            &rkb->rkb_producer_mbv2->rkbp_collector;
+        rd_kafka_toppar_t *rktp;
+        rd_bool_t next_found = col->rkbbcol_next == NULL;
+        int count            = 0;
+
+        TAILQ_FOREACH(rktp, &col->rkbbcol_toppars, rktp_collector_link) {
+                rd_dassert(rktp->rktp_producer_mbv2 != NULL);
+                rd_dassert(rktp->rktp_producer_mbv2->rktp_in_batch_collector);
+
+                if (rktp == col->rkbbcol_next)
+                        next_found = rd_true;
+
+                count++;
+        }
+
+        if (count == 0)
+                rd_dassert(col->rkbbcol_next == NULL);
+        else
+                rd_dassert(next_found);
+}
+#else
+#define rd_kafka_broker_batch_collector_verify_mbv2(rkb) do { } while (0)
+#endif
 
 /**
  * @brief Add a partition to the broker's batch collector.
@@ -370,7 +457,14 @@ void rd_kafka_broker_batch_collector_add_mbv2(rd_kafka_broker_t *rkb,
                                ? rd_kafka_broker_name(rktp->rktp_broker)
                                : "none",
                            rd_kafka_broker_name(rkb));
+#if ENABLE_DEVEL
+        } else {
+                rd_dassert(
+                    rd_kafka_broker_batch_collector_contains_mbv2(col, rktp));
+#endif
         }
+
+        rd_kafka_broker_batch_collector_verify_mbv2(rkb);
 }
 
 /**
@@ -394,6 +488,10 @@ static void rd_kafka_broker_batch_collector_del_mbv2(rd_kafka_broker_t *rkb,
         if (!tpv2 || !tpv2->rktp_in_batch_collector)
                 return;
 
+#if ENABLE_DEVEL
+        rd_dassert(rd_kafka_broker_batch_collector_contains_mbv2(col, rktp));
+#endif
+
         TAILQ_FOREACH(it, &col->rkbbcol_toppars, rktp_collector_link) {
                 if (it != rktp)
                         continue;
@@ -401,13 +499,15 @@ static void rd_kafka_broker_batch_collector_del_mbv2(rd_kafka_broker_t *rkb,
                 if (col->rkbbcol_next == rktp) {
                         rd_kafka_toppar_t *next =
                             TAILQ_NEXT(rktp, rktp_collector_link);
-                        if (!next)
-                                next = TAILQ_FIRST(&col->rkbbcol_toppars);
-                        col->rkbbcol_next = next;
-                }
 
-                TAILQ_REMOVE(&col->rkbbcol_toppars, rktp,
-                             rktp_collector_link);
+                        TAILQ_REMOVE(&col->rkbbcol_toppars, rktp,
+                                     rktp_collector_link);
+                        col->rkbbcol_next =
+                            next ? next : TAILQ_FIRST(&col->rkbbcol_toppars);
+                } else {
+                        TAILQ_REMOVE(&col->rkbbcol_toppars, rktp,
+                                     rktp_collector_link);
+                }
                 tpv2->rktp_in_batch_collector = rd_false;
                 rd_rkb_dbg(rkb, BATCHCOL, "BATCHCOL",
                            "Collector remove: %s [%" PRId32
@@ -415,6 +515,7 @@ static void rd_kafka_broker_batch_collector_del_mbv2(rd_kafka_broker_t *rkb,
                            rktp->rktp_rkt->rkt_topic->str,
                            rktp->rktp_partition, rktp,
                            rd_kafka_broker_name(rkb));
+                rd_kafka_broker_batch_collector_verify_mbv2(rkb);
                 return;
         }
 
@@ -424,6 +525,7 @@ static void rd_kafka_broker_batch_collector_del_mbv2(rd_kafka_broker_t *rkb,
                    "] rktp %p not in list, clearing flag (broker=%s)",
                    rktp->rktp_rkt->rkt_topic->str, rktp->rktp_partition, rktp,
                    rd_kafka_broker_name(rkb));
+        rd_kafka_broker_batch_collector_verify_mbv2(rkb);
 }
 
 /**
@@ -477,6 +579,15 @@ int rd_kafka_broker_batch_collector_send_mbv2(rd_kafka_broker_t *rkb) {
                 next_rktp = TAILQ_NEXT(rktp, rktp_collector_link);
                 if (!next_rktp)
                         next_rktp = TAILQ_FIRST(&col->rkbbcol_toppars);
+
+                if (rd_kafka_is_idempotent(rkb->rkb_rk) &&
+                    rd_kafka_toppar_is_wait_drain(rktp)) {
+                        if (next_rktp == start_rktp)
+                                break;
+
+                        rktp = next_rktp;
+                        continue;
+                }
 
                 if (rd_kafka_msgq_len(&rktp->rktp_xmit_msgq) == 0) {
                     /* Move to next, but stop if we've wrapped back to start */
@@ -547,6 +658,7 @@ done:
                 total_msg_cnt +=
                     rd_kafka_broker_produce_batch_send(&batch, rkb);
 
+        rd_kafka_broker_batch_collector_verify_mbv2(rkb);
         return total_msg_cnt;
 }
 
@@ -584,6 +696,10 @@ int rd_kafka_broker_batch_collector_maybe_send_mbv2(rd_kafka_broker_t *rkb,
         rd_kafka_toppar_t *rktp;
 
         TAILQ_FOREACH(rktp, &col->rkbbcol_toppars, rktp_collector_link) {
+            if (rd_kafka_is_idempotent(rkb->rkb_rk) &&
+                rd_kafka_toppar_is_wait_drain(rktp))
+                    continue;
+
             int msgq_len = rd_kafka_msgq_len(&rktp->rktp_xmit_msgq);
             if (msgq_len > 0) {
                 active_partition_cnt++;
@@ -3921,396 +4037,6 @@ static rd_kafka_resp_err_t rd_kafka_broker_destroy_error(rd_kafka_t *rk) {
  * @locks none
  */
 static RD_WARN_UNUSED_RESULT rd_bool_t
-RD_UNUSED rd_kafka_broker_op_serve_v1(rd_kafka_broker_t *rkb,
-                                      rd_kafka_op_t *rko) {
-        rd_kafka_toppar_t *rktp;
-        rd_kafka_resp_err_t topic_err;
-        rd_bool_t wakeup = rd_false;
-
-        rd_kafka_assert(rkb->rkb_rk, thrd_is_current(rkb->rkb_thread));
-
-        switch (rko->rko_type) {
-        case RD_KAFKA_OP_NODE_UPDATE: {
-                rd_bool_t updated = rd_false;
-                char brokername[RD_KAFKA_NODENAME_SIZE];
-
-                /* Need kafka_wrlock for updating rk_broker_by_id */
-                rd_kafka_wrlock(rkb->rkb_rk);
-                rd_kafka_broker_lock(rkb);
-
-                if (strcmp(rkb->rkb_nodename, rko->rko_u.node.nodename)) {
-                        rd_rkb_dbg(rkb, BROKER, "UPDATE",
-                                   "Nodename changed from %s to %s",
-                                   rkb->rkb_nodename, rko->rko_u.node.nodename);
-                        rd_strlcpy(rkb->rkb_nodename, rko->rko_u.node.nodename,
-                                   sizeof(rkb->rkb_nodename));
-                        rkb->rkb_nodename_epoch++;
-                        updated = rd_true;
-                }
-
-                rd_kafka_mk_brokername(brokername, sizeof(brokername),
-                                       rkb->rkb_proto, rkb->rkb_nodename,
-                                       rkb->rkb_nodeid, RD_KAFKA_LEARNED);
-                if (strcmp(rkb->rkb_name, brokername)) {
-                        /* Udate the name copy used for logging. */
-                        rd_kafka_broker_set_logname(rkb, brokername);
-
-                        rd_rkb_dbg(rkb, BROKER, "UPDATE",
-                                   "Name changed from %s to %s", rkb->rkb_name,
-                                   brokername);
-                        rd_strlcpy(rkb->rkb_name, brokername,
-                                   sizeof(rkb->rkb_name));
-                }
-                rd_kafka_broker_unlock(rkb);
-                rd_kafka_wrunlock(rkb->rkb_rk);
-
-                if (updated) {
-                        rd_kafka_broker_fail(rkb, LOG_DEBUG,
-                                             RD_KAFKA_RESP_ERR__TRANSPORT,
-                                             "Broker hostname updated");
-                }
-
-                rd_kafka_brokers_broadcast_state_change(rkb->rkb_rk);
-                break;
-        }
-
-        case RD_KAFKA_OP_XMIT_BUF:
-                rd_kafka_broker_buf_enq2(rkb, rko->rko_u.xbuf.rkbuf);
-                rko->rko_u.xbuf.rkbuf = NULL; /* buffer now owned by broker */
-                if (rko->rko_replyq.q) {
-                        /* Op will be reused for forwarding response. */
-                        rko = NULL;
-                }
-                break;
-
-        case RD_KAFKA_OP_XMIT_RETRY:
-                rd_kafka_broker_buf_retry(rkb, rko->rko_u.xbuf.rkbuf);
-                rko->rko_u.xbuf.rkbuf = NULL;
-                break;
-
-        case RD_KAFKA_OP_PARTITION_JOIN:
-                /*
-                 * Add partition to broker toppars
-                 */
-                rktp = rko->rko_rktp;
-                rd_kafka_toppar_lock(rktp);
-
-                /* Abort join if instance is terminating */
-                if (rd_kafka_broker_or_instance_terminating(rkb) ||
-                    (rktp->rktp_flags & RD_KAFKA_TOPPAR_F_REMOVE)) {
-                        rd_rkb_dbg(
-                            rkb, BROKER | RD_KAFKA_DBG_TOPIC, "TOPBRK",
-                            "Topic %s [%" PRId32
-                            "]: not joining broker: "
-                            "%s",
-                            rktp->rktp_rkt->rkt_topic->str,
-                            rktp->rktp_partition,
-                            rd_kafka_terminating(rkb->rkb_rk)
-                                ? "instance is terminating"
-                            : rd_kafka_broker_termination_in_progress(rkb)
-                                ? "broker is terminating"
-                                : "partition removed");
-
-                        rd_kafka_broker_destroy(rktp->rktp_next_broker);
-                        rktp->rktp_next_broker = NULL;
-                        rd_kafka_toppar_unlock(rktp);
-                        break;
-                }
-
-                /* See if we are still the next broker */
-                if (rktp->rktp_next_broker != rkb) {
-                        rd_rkb_dbg(
-                            rkb, BROKER | RD_KAFKA_DBG_TOPIC, "TOPBRK",
-                            "Topic %s [%" PRId32
-                            "]: not joining broker "
-                            "(next broker %s)",
-                            rktp->rktp_rkt->rkt_topic->str,
-                            rktp->rktp_partition,
-                            rktp->rktp_next_broker
-                                ? rd_kafka_broker_name(rktp->rktp_next_broker)
-                                : "(none)");
-
-                        /* Need temporary refcount so we can safely unlock
-                         * after q_enq(). */
-                        rd_kafka_toppar_keep(rktp);
-
-                        /* No, forward this op to the new next broker. */
-                        rd_kafka_q_enq(rktp->rktp_next_broker->rkb_ops, rko);
-                        rko = NULL;
-
-                        rd_kafka_toppar_unlock(rktp);
-                        rd_kafka_toppar_destroy(rktp);
-
-                        break;
-                }
-
-                rd_rkb_dbg(rkb, BROKER | RD_KAFKA_DBG_TOPIC, "TOPBRK",
-                           "Topic %s [%" PRId32
-                           "]: joining broker "
-                           "(rktp %p, %d message(s) queued)",
-                           rktp->rktp_rkt->rkt_topic->str, rktp->rktp_partition,
-                           rktp, rd_kafka_msgq_len(&rktp->rktp_msgq));
-
-                rd_kafka_assert(NULL,
-                                !(rktp->rktp_flags & RD_KAFKA_TOPPAR_F_ON_RKB));
-                rktp->rktp_flags |= RD_KAFKA_TOPPAR_F_ON_RKB;
-                rd_kafka_toppar_keep(rktp);
-                rd_kafka_broker_lock(rkb);
-                TAILQ_INSERT_TAIL(&rkb->rkb_toppars, rktp, rktp_rkblink);
-                rkb->rkb_toppar_cnt++;
-                rd_kafka_broker_unlock(rkb);
-                rktp->rktp_broker = rkb;
-                rktp->rktp_broker_id = rkb->rkb_nodeid;
-                rd_assert(!rktp->rktp_msgq_wakeup_q);
-                rktp->rktp_msgq_wakeup_q = rd_kafka_q_keep(rkb->rkb_ops);
-                rd_kafka_broker_keep(rkb);
-
-                if (rkb->rkb_rk->rk_type == RD_KAFKA_PRODUCER) {
-                        rd_kafka_broker_active_toppar_add(rkb, rktp, "joining");
-
-                        if (rd_kafka_is_idempotent(rkb->rkb_rk)) {
-                                /* Wait for all outstanding requests from
-                                 * the previous leader to finish before
-                                 * producing anything to this new leader. */
-                                rd_kafka_idemp_drain_toppar(
-                                    rktp,
-                                    "wait for outstanding requests to "
-                                    "finish before producing to "
-                                    "new leader");
-                        }
-                } else if (rkb->rkb_rk->rk_type == RD_KAFKA_CONSUMER) {
-                        rktp->rktp_ts_fetch_backoff = 0;
-                }
-
-                rd_kafka_broker_destroy(rktp->rktp_next_broker);
-                rktp->rktp_next_broker = NULL;
-
-                rd_kafka_toppar_unlock(rktp);
-
-                rd_kafka_brokers_broadcast_state_change(rkb->rkb_rk);
-                break;
-
-        case RD_KAFKA_OP_PARTITION_LEAVE:
-                /*
-                 * Remove partition from broker toppars
-                 */
-                rktp = rko->rko_rktp;
-
-                /* If there is a topic-wide error, use it as error code
-                 * when failing messages below. */
-                topic_err = rd_kafka_topic_get_error(rktp->rktp_rkt);
-
-                rd_kafka_toppar_lock(rktp);
-
-                /* Multiple PARTITION_LEAVEs are possible during partition
-                 * migration, make sure we're supposed to handle this one. */
-                if (unlikely(rktp->rktp_broker != rkb)) {
-                        rd_rkb_dbg(rkb, BROKER | RD_KAFKA_DBG_TOPIC, "TOPBRK",
-                                   "Topic %s [%" PRId32
-                                   "]: "
-                                   "ignoring PARTITION_LEAVE: "
-                                   "not delegated to broker (%s)",
-                                   rktp->rktp_rkt->rkt_topic->str,
-                                   rktp->rktp_partition,
-                                   rktp->rktp_broker
-                                       ? rd_kafka_broker_name(rktp->rktp_broker)
-                                       : "none");
-                        rd_kafka_toppar_unlock(rktp);
-                        break;
-                }
-                rd_kafka_toppar_unlock(rktp);
-
-                /* Remove from fetcher list */
-                rd_kafka_toppar_fetch_decide(rktp, rkb, 1 /*force remove*/);
-
-                if (rkb->rkb_rk->rk_type == RD_KAFKA_PRODUCER) {
-                        /* Purge any ProduceRequests for this toppar
-                         * in the output queue. */
-                        rd_kafka_broker_bufq_purge_by_toppar_mbv1(
-                            rkb, &rkb->rkb_outbufs, RD_KAFKAP_Produce, rktp,
-                            RD_KAFKA_RESP_ERR__RETRY);
-                }
-
-
-                rd_kafka_toppar_lock(rktp);
-
-                rd_rkb_dbg(rkb, BROKER | RD_KAFKA_DBG_TOPIC, "TOPBRK",
-                           "Topic %s [%" PRId32
-                           "]: leaving broker "
-                           "(%d messages in xmitq, next broker %s, rktp %p)",
-                           rktp->rktp_rkt->rkt_topic->str, rktp->rktp_partition,
-                           rd_kafka_msgq_len(&rktp->rktp_xmit_msgq),
-                           rktp->rktp_next_broker
-                               ? rd_kafka_broker_name(rktp->rktp_next_broker)
-                               : "(none)",
-                           rktp);
-
-                /* Insert xmitq(broker-local) messages to the msgq(global)
-                 * at their sorted position to maintain ordering. */
-                rd_kafka_msgq_insert_msgq(
-                    &rktp->rktp_msgq, &rktp->rktp_xmit_msgq,
-                    rktp->rktp_rkt->rkt_conf.msg_order_cmp);
-
-                if (rkb->rkb_rk->rk_type == RD_KAFKA_PRODUCER)
-                        rd_kafka_broker_active_toppar_del(rkb, rktp, "leaving");
-
-                rd_kafka_broker_lock(rkb);
-                TAILQ_REMOVE(&rkb->rkb_toppars, rktp, rktp_rkblink);
-                rkb->rkb_toppar_cnt--;
-                rd_kafka_broker_unlock(rkb);
-                rd_kafka_broker_destroy(rktp->rktp_broker);
-                if (rktp->rktp_msgq_wakeup_q) {
-                        rd_kafka_q_destroy(rktp->rktp_msgq_wakeup_q);
-                        rktp->rktp_msgq_wakeup_q = NULL;
-                }
-                rktp->rktp_broker = NULL;
-                rktp->rktp_broker_id = -1;
-
-                rd_assert(rktp->rktp_flags & RD_KAFKA_TOPPAR_F_ON_RKB);
-                rktp->rktp_flags &= ~RD_KAFKA_TOPPAR_F_ON_RKB;
-
-                if (rktp->rktp_next_broker) {
-                        /* There is a next broker we need to migrate to. */
-                        rko->rko_type = RD_KAFKA_OP_PARTITION_JOIN;
-                        rd_kafka_q_enq(rktp->rktp_next_broker->rkb_ops, rko);
-                        rko = NULL;
-                } else {
-                        rd_rkb_dbg(rkb, BROKER | RD_KAFKA_DBG_TOPIC, "TOPBRK",
-                                   "Topic %s [%" PRId32
-                                   "]: no next broker, "
-                                   "failing %d message(s) in partition queue",
-                                   rktp->rktp_rkt->rkt_topic->str,
-                                   rktp->rktp_partition,
-                                   rd_kafka_msgq_len(&rktp->rktp_msgq));
-                        rd_kafka_assert(NULL, rd_kafka_msgq_len(
-                                                  &rktp->rktp_xmit_msgq) == 0);
-                        rd_kafka_dr_msgq(
-                            rktp->rktp_rkt, &rktp->rktp_msgq,
-                            rd_kafka_terminating(rkb->rkb_rk)
-                                ? RD_KAFKA_RESP_ERR__DESTROY
-                                : (topic_err
-                                       ? topic_err
-                                       : RD_KAFKA_RESP_ERR__UNKNOWN_PARTITION));
-
-                        if (rkb->rkb_rk->rk_type == RD_KAFKA_CONSUMER) {
-                                rd_kafka_toppar_purge_internal_fetch_queue_maybe(
-                                    rktp);
-                        }
-                }
-
-                rd_kafka_toppar_unlock(rktp);
-                rd_kafka_toppar_destroy(rktp); /* from JOIN */
-
-                rd_kafka_brokers_broadcast_state_change(rkb->rkb_rk);
-                break;
-
-        case RD_KAFKA_OP_TERMINATE:
-                /* nop: just a wake-up. */
-                rd_rkb_dbg(rkb, BROKER, "TERM",
-                           "Received TERMINATE op in state %s: "
-                           "%d refcnts, %d toppar(s), %d active toppar(s), "
-                           "%d outbufs, %d waitresps, %d retrybufs",
-                           rd_kafka_broker_state_names[rkb->rkb_state],
-                           rd_refcnt_get(&rkb->rkb_refcnt), rkb->rkb_toppar_cnt,
-                           rkb->rkb_active_toppar_cnt,
-                           (int)rd_kafka_bufq_cnt(&rkb->rkb_outbufs),
-                           (int)rd_kafka_bufq_cnt(&rkb->rkb_waitresps),
-                           (int)rd_kafka_bufq_cnt(&rkb->rkb_retrybufs));
-                /* Expedite termination by bringing down the broker
-                 * and trigger a state change.
-                 * This makes sure any eonce dependent on state changes
-                 * are triggered. */
-                rd_kafka_broker_fail(rkb, LOG_DEBUG,
-                                     rd_kafka_broker_destroy_error(rkb->rkb_rk),
-                                     "Decommissioning this broker");
-
-                rd_kafka_broker_prepare_destroy(rkb);
-                /* Release main thread reference here */
-                rd_kafka_broker_destroy(rkb);
-                wakeup = rd_true;
-                break;
-
-        case RD_KAFKA_OP_WAKEUP:
-                wakeup = rd_true;
-                break;
-
-        case RD_KAFKA_OP_PURGE:
-                rd_kafka_broker_handle_purge_queues(rkb, rko);
-                rko = NULL; /* the rko is reused for the reply */
-                break;
-
-        case RD_KAFKA_OP_CONNECT:
-                /* Sparse connections: connection requested, transition
-                 * to TRY_CONNECT state to trigger new connection. */
-                if (rkb->rkb_state == RD_KAFKA_BROKER_STATE_INIT) {
-                        rd_rkb_dbg(rkb, BROKER, "CONNECT",
-                                   "Received CONNECT op");
-                        rkb->rkb_persistconn.internal++;
-                        rd_kafka_broker_lock(rkb);
-                        rd_kafka_broker_set_state(
-                            rkb, RD_KAFKA_BROKER_STATE_TRY_CONNECT);
-                        rd_kafka_broker_unlock(rkb);
-
-                } else if (rkb->rkb_state >=
-                           RD_KAFKA_BROKER_STATE_TRY_CONNECT) {
-                        rd_bool_t do_disconnect = rd_false;
-
-                        /* If the nodename was changed since the last connect,
-                         * close the current connection. */
-
-                        rd_kafka_broker_lock(rkb);
-                        do_disconnect =
-                            (rkb->rkb_connect_epoch != rkb->rkb_nodename_epoch);
-                        rd_kafka_broker_unlock(rkb);
-
-                        if (do_disconnect)
-                                rd_kafka_broker_fail(
-                                    rkb, LOG_DEBUG,
-                                    RD_KAFKA_RESP_ERR__TRANSPORT,
-                                    "Closing connection due to "
-                                    "nodename change");
-                }
-
-                /* Expedite next reconnect */
-                rkb->rkb_ts_reconnect = 0;
-
-                wakeup = rd_true;
-                break;
-
-        case RD_KAFKA_OP_SASL_REAUTH:
-                rd_rkb_dbg(rkb, BROKER, "REAUTH", "Received REAUTH op");
-
-                /* We don't need a lock for rkb_max_inflight. It's changed only
-                 * on the broker thread. */
-                rkb->rkb_max_inflight = 1;
-
-                rd_kafka_broker_lock(rkb);
-                rd_kafka_broker_set_state(rkb, RD_KAFKA_BROKER_STATE_REAUTH);
-                rd_kafka_broker_unlock(rkb);
-
-                wakeup = rd_true;
-                break;
-
-        default:
-                rd_kafka_assert(rkb->rkb_rk, !*"unhandled op type");
-                break;
-        }
-
-        if (rko)
-                rd_kafka_op_reply(rko, RD_KAFKA_RESP_ERR_NO_ERROR);
-
-        return wakeup;
-}
-
-/**
- * @brief Serve a broker op (an op posted by another thread to be handled by
- *        this broker's thread).
- *
- * @returns true if calling op loop should break out, else false to continue.
- * @locality broker thread
- * @locks none
- */
-static RD_WARN_UNUSED_RESULT rd_bool_t
 rd_kafka_broker_op_serve_v2(rd_kafka_broker_t *rkb, rd_kafka_op_t *rko) {
         rd_kafka_toppar_t *rktp;
         rd_kafka_resp_err_t topic_err;
@@ -4684,10 +4410,6 @@ rd_kafka_broker_op_serve_v2(rd_kafka_broker_t *rkb, rd_kafka_op_t *rko) {
 
         return wakeup;
 }
-
-
-
-
 
 /**
  * @brief Serve broker ops.
@@ -5439,6 +5161,8 @@ static int rd_kafka_toppar_producer_serve_mbv2(rd_kafka_broker_t *rkb,
 
 
         if (rd_kafka_is_idempotent(rkb->rkb_rk)) {
+                inflight = rd_atomic32_get(&rktp->rktp_msgs_inflight);
+
                 if (unlikely(rktp->rktp_eos.wait_drain)) {
                         if (inflight) {
                                 /* Waiting for in-flight requests to
@@ -5724,27 +5448,9 @@ static int rd_kafka_broker_produce_toppars_mbv2(rd_kafka_broker_t *rkb,
                                                do_timeout_scan, may_send,
                                                flushing);
 
-                /* Add partition to broker-level batch collector if it has
-                 * messages ready to send. The collector handles timing based
-                 * on broker.linger.ms - we add regardless of per-partition
-                 * batch_ready status since the collector controls when to send. */
-                {
-                        rd_kafka_toppar_producer_mbv2_t *tpv2 =
-                            rktp->rktp_producer_mbv2;
-                        int msgq_len = rd_kafka_msgq_len(&rktp->rktp_xmit_msgq);
-                        size_t msgq_bytes = rd_kafka_msgq_size(&rktp->rktp_xmit_msgq);
-
-                        /* Update atomic counters for stats visibility */
-                        if (tpv2) {
-                                rd_atomic32_set(&tpv2->rktp_xmit_msgq_cnt, msgq_len);
-                                rd_atomic64_set(&tpv2->rktp_xmit_msgq_bytes, msgq_bytes);
-                        }
-
-                        if (msgq_len > 0) {
-                                total_msg_cnt += msgq_len;
-                                rd_kafka_broker_batch_collector_add_mbv2(rkb, rktp);
-                        }
-                }
+                /* Add sendable partitions to the broker-level collector. */
+                rd_kafka_broker_maybe_collect_toppar_mbv2(rkb, rktp,
+                                                          &total_msg_cnt);
 
                 rd_kafka_set_next_wakeup(&ret_next_wakeup, this_next_wakeup);
 
@@ -7959,10 +7665,251 @@ void rd_kafka_broker_decommission(rd_kafka_t *rk,
  * @{
  *
  */
+static void rd_ut_broker_fill_msgq(rd_kafka_toppar_t *rktp,
+                                   int cnt,
+                                   uint64_t base_msgid) {
+        int i;
+        rd_ts_t now = rd_clock();
+
+        for (i = 0; i < cnt; i++) {
+                rd_kafka_msg_t *rkm = ut_rd_kafka_msg_new(16);
+
+                rkm->rkm_timestamp             = now;
+                rkm->rkm_ts_enq                = now;
+                rkm->rkm_ts_timeout            = now + (30 * 1000 * 1000);
+                rkm->rkm_u.producer.msgid      = base_msgid + (uint64_t)i;
+                rkm->rkm_u.producer.last_msgid = 0;
+                rkm->rkm_rkmessage.rkt         =
+                    rd_kafka_topic_keep(rktp->rktp_rkt);
+                rkm->rkm_rkmessage.partition = rktp->rktp_partition;
+
+                rd_kafka_toppar_lock(rktp);
+                rd_kafka_msgq_enq(&rktp->rktp_msgq, rkm);
+                rd_kafka_toppar_unlock(rktp);
+        }
+}
+
+static int rd_ut_toppar_producer_serve_mbv2_wait_drain(void) {
+        rd_kafka_conf_t *conf;
+        rd_kafka_t *rk;
+        rd_kafka_broker_t *rkb;
+        rd_kafka_toppar_t *rktp;
+        rd_kafka_pid_t pid = RD_KAFKA_PID_INITIALIZER;
+        rd_ts_t next_wakeup = 0;
+        char errstr[512];
+        int r;
+
+        RD_UT_SAY("Verifying MBv2 wait_drain honors in-flight messages");
+
+        conf = rd_kafka_conf_new();
+        RD_UT_ASSERT(rd_kafka_conf_set(conf, "produce.engine", "v2", errstr,
+                                       sizeof(errstr)) == RD_KAFKA_CONF_OK,
+                     "failed to set produce.engine=v2: %s", errstr);
+        RD_UT_ASSERT(
+            rd_kafka_conf_set(conf, "enable.idempotence", "true", errstr,
+                              sizeof(errstr)) == RD_KAFKA_CONF_OK,
+            "failed to enable idempotence: %s", errstr);
+
+        rk = rd_kafka_new(RD_KAFKA_PRODUCER, conf, errstr, sizeof(errstr));
+        RD_UT_ASSERT(rk, "failed to create producer: %s", errstr);
+
+        rkb = rd_kafka_broker_add_logical(rk, "unittest");
+        RD_UT_ASSERT(rkb, "failed to create broker");
+        rkb->rkb_state = RD_KAFKA_BROKER_STATE_UP;
+
+        rktp = rd_kafka_toppar_get2(rk, "uttopic", 0, rd_false, rd_true);
+        RD_UT_ASSERT(rktp, "failed to get toppar");
+        RD_UT_ASSERT(rktp->rktp_producer_mbv2, "expected MBv2 toppar state");
+
+        rd_kafka_toppar_lock(rktp);
+        rktp->rktp_broker         = rkb;
+        rktp->rktp_eos.wait_drain = rd_true;
+        rd_kafka_toppar_unlock(rktp);
+
+        rd_atomic32_set(&rktp->rktp_msgs_inflight, 2);
+
+        r = rd_kafka_toppar_producer_serve_mbv2(
+            rkb, rktp, pid, rd_clock(), &next_wakeup, rd_false, rd_true,
+            rd_false);
+        RD_UT_ASSERT(r == 0, "expected no messages to be produced, got %d", r);
+
+        rd_kafka_toppar_lock(rktp);
+        RD_UT_ASSERT(rktp->rktp_eos.wait_drain,
+                     "wait_drain cleared while messages were still in-flight");
+        rd_kafka_toppar_unlock(rktp);
+
+        rd_atomic32_set(&rktp->rktp_msgs_inflight, 0);
+
+        r = rd_kafka_toppar_producer_serve_mbv2(
+            rkb, rktp, pid, rd_clock(), &next_wakeup, rd_false, rd_true,
+            rd_false);
+        RD_UT_ASSERT(r == 0, "expected no messages to be produced, got %d", r);
+
+        rd_kafka_toppar_lock(rktp);
+        RD_UT_ASSERT(!rktp->rktp_eos.wait_drain,
+                     "wait_drain should clear after in-flight drain");
+        rktp->rktp_broker = NULL;
+        rd_kafka_toppar_unlock(rktp);
+
+        rd_kafka_toppar_destroy(rktp);
+        rd_kafka_broker_destroy(rkb);
+        rd_kafka_destroy(rk);
+
+        return 0;
+}
+
+static int rd_ut_broker_produce_toppars_mbv2_wait_drain_blocks_send(void) {
+        rd_kafka_conf_t *conf;
+        rd_kafka_t *rk;
+        rd_kafka_broker_t *rkb;
+        rd_kafka_toppar_t *rktp;
+        rd_kafka_pid_t pid = {.id = 1000, .epoch = 0};
+        char errstr[512];
+        int sent_msg_cnt;
+        int produced_req_cnt;
+        int xmit_msg_cnt;
+        int inflight;
+
+        RD_UT_SAY("Verifying MBv2 wait_drain blocks collector-driven sends");
+
+        conf = rd_kafka_conf_new();
+        RD_UT_ASSERT(rd_kafka_conf_set(conf, "produce.engine", "v2", errstr,
+                                       sizeof(errstr)) == RD_KAFKA_CONF_OK,
+                     "failed to set produce.engine=v2: %s", errstr);
+        RD_UT_ASSERT(
+            rd_kafka_conf_set(conf, "enable.idempotence", "true", errstr,
+                              sizeof(errstr)) == RD_KAFKA_CONF_OK,
+            "failed to enable idempotence: %s", errstr);
+
+        rk = rd_kafka_new(RD_KAFKA_PRODUCER, conf, errstr, sizeof(errstr));
+        RD_UT_ASSERT(rk, "failed to create producer: %s", errstr);
+
+        rkb = rd_kafka_broker_add_logical(rk, "unittest");
+        RD_UT_ASSERT(rkb, "failed to create broker");
+        rkb->rkb_state = RD_KAFKA_BROKER_STATE_UP;
+
+        rd_kafka_broker_lock(rkb);
+        rkb->rkb_features = RD_KAFKA_FEATURE_UNITTEST | RD_KAFKA_FEATURE_ALL;
+        rd_kafka_broker_unlock(rkb);
+
+        rktp = rd_kafka_toppar_get2(rk, "uttopic", 0, rd_false, rd_true);
+        RD_UT_ASSERT(rktp, "failed to get toppar");
+        RD_UT_ASSERT(rktp->rktp_producer_mbv2, "expected MBv2 toppar state");
+        rd_ut_kafka_topic_set_topic_exists(rktp->rktp_rkt, 1, -1);
+
+        rd_kafka_idemp_set_state(rk, RD_KAFKA_IDEMP_STATE_WAIT_PID);
+        rd_kafka_idemp_pid_update(rkb, pid);
+        pid = rd_kafka_idemp_get_pid(rk);
+        RD_UT_ASSERT(rd_kafka_pid_valid(pid), "PID is invalid");
+
+        rd_ut_broker_fill_msgq(rktp, 1, 1);
+        rd_kafka_toppar_lock(rktp);
+        rd_kafka_msgq_move(&rktp->rktp_xmit_msgq, &rktp->rktp_msgq);
+        rd_kafka_toppar_unlock(rktp);
+
+        RD_UT_ASSERT(rd_kafka_toppar_pid_change(rktp, pid, 1),
+                     "failed to set toppar pid");
+
+        rd_kafka_toppar_lock(rktp);
+        rktp->rktp_eos.wait_drain = rd_true;
+        rd_kafka_toppar_unlock(rktp);
+
+        rkb->rkb_produce_pid = pid;
+        rd_atomic32_set(&rktp->rktp_msgs_inflight, 1);
+
+        rd_kafka_broker_batch_collector_add_mbv2(rkb, rktp);
+        sent_msg_cnt = rd_kafka_broker_batch_collector_send_mbv2(rkb);
+        produced_req_cnt = (int)rd_kafka_bufq_cnt(&rkb->rkb_outbufs);
+        xmit_msg_cnt     = rd_kafka_msgq_len(&rktp->rktp_xmit_msgq);
+        inflight         = rd_atomic32_get(&rktp->rktp_msgs_inflight);
+
+        rd_kafka_toppar_lock(rktp);
+        if (rktp->rktp_producer_mbv2->rktp_in_batch_collector)
+                rd_kafka_broker_batch_collector_del_mbv2(rkb, rktp);
+        rktp->rktp_eos.wait_drain = rd_false;
+        rd_kafka_toppar_unlock(rktp);
+
+        rd_kafka_broker_bufq_purge(rkb, &rkb->rkb_outbufs, RD_KAFKAP_Produce,
+                                   RD_KAFKA_RESP_ERR__PURGE_QUEUE);
+        ut_rd_kafka_msgq_purge(&rktp->rktp_msgq);
+        ut_rd_kafka_msgq_purge(&rktp->rktp_xmit_msgq);
+
+        rd_kafka_toppar_destroy(rktp);
+        rd_kafka_broker_destroy(rkb);
+        rd_kafka_destroy(rk);
+
+        RD_UT_ASSERT(sent_msg_cnt == 0,
+                     "expected wait_drain to block sends, got %d message(s)",
+                     sent_msg_cnt);
+        RD_UT_ASSERT(produced_req_cnt == 0,
+                     "expected no ProduceRequests enqueued, got %d",
+                     produced_req_cnt);
+        RD_UT_ASSERT(xmit_msg_cnt == 1,
+                     "expected message to remain in xmit_msgq, got %d",
+                     xmit_msg_cnt);
+        RD_UT_ASSERT(inflight == 1,
+                     "expected in-flight count to remain 1, got %d",
+                     inflight);
+
+        return 0;
+}
+
+static int rd_ut_broker_batch_collector_del_clears_singleton_next(void) {
+        rd_kafka_conf_t *conf;
+        rd_kafka_t *rk;
+        rd_kafka_broker_t *rkb;
+        rd_kafka_toppar_t *rktp;
+        rd_kafka_broker_batch_collector_t *col;
+        char errstr[512];
+
+        RD_UT_SAY("Verifying singleton collector removal clears rkbbcol_next");
+
+        conf = rd_kafka_conf_new();
+        RD_UT_ASSERT(rd_kafka_conf_set(conf, "produce.engine", "v2", errstr,
+                                       sizeof(errstr)) == RD_KAFKA_CONF_OK,
+                     "failed to set produce.engine=v2: %s", errstr);
+
+        rk = rd_kafka_new(RD_KAFKA_PRODUCER, conf, errstr, sizeof(errstr));
+        RD_UT_ASSERT(rk, "failed to create producer: %s", errstr);
+
+        rkb = rd_kafka_broker_add_logical(rk, "unittest");
+        RD_UT_ASSERT(rkb, "failed to create broker");
+        RD_UT_ASSERT(rkb->rkb_producer_mbv2, "expected MBv2 broker state");
+
+        rktp = rd_kafka_toppar_get2(rk, "uttopic", 0, rd_false, rd_true);
+        RD_UT_ASSERT(rktp, "failed to get toppar");
+        RD_UT_ASSERT(rktp->rktp_producer_mbv2, "expected MBv2 toppar state");
+
+        rd_kafka_broker_batch_collector_add_mbv2(rkb, rktp);
+
+        col               = &rkb->rkb_producer_mbv2->rkbp_collector;
+        col->rkbbcol_next = rktp;
+
+        rd_kafka_broker_batch_collector_del_mbv2(rkb, rktp);
+
+        RD_UT_ASSERT(TAILQ_FIRST(&col->rkbbcol_toppars) == NULL,
+                     "expected collector list to be empty");
+        RD_UT_ASSERT(col->rkbbcol_next == NULL,
+                     "expected rkbbcol_next cleared after singleton removal, "
+                     "got %p",
+                     (void *)col->rkbbcol_next);
+        RD_UT_ASSERT(!rktp->rktp_producer_mbv2->rktp_in_batch_collector,
+                     "expected in-collector flag cleared");
+
+        rd_kafka_toppar_destroy(rktp);
+        rd_kafka_broker_destroy(rkb);
+        rd_kafka_destroy(rk);
+
+        return 0;
+}
+
 int unittest_broker(void) {
         int fails = 0;
 
         fails += rd_ut_reconnect_backoff();
+        fails += rd_ut_toppar_producer_serve_mbv2_wait_drain();
+        fails += rd_ut_broker_produce_toppars_mbv2_wait_drain_blocks_send();
+        fails += rd_ut_broker_batch_collector_del_clears_singleton_next();
 
         return fails;
 }

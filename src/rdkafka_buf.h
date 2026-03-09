@@ -1118,6 +1118,18 @@ static RD_INLINE void rd_kafka_buf_update(rd_kafka_buf_t *rkbuf,
 }
 
 /**
+ * Hint-aware variant of rd_kafka_buf_update().
+ */
+static RD_INLINE void rd_kafka_buf_update_hint(rd_kafka_buf_t *rkbuf,
+                                               const rd_segment_t *hint,
+                                               size_t of,
+                                               const void *data,
+                                               size_t len) {
+        rd_kafka_assert(NULL, !(rkbuf->rkbuf_flags & RD_KAFKA_OP_F_CRC));
+        rd_buf_write_update_hint(&rkbuf->rkbuf_buf, hint, of, data, len);
+}
+
+/**
  * Write int8_t to buffer.
  */
 static RD_INLINE size_t rd_kafka_buf_write_i8(rd_kafka_buf_t *rkbuf, int8_t v) {
@@ -1154,6 +1166,17 @@ rd_kafka_buf_update_i16(rd_kafka_buf_t *rkbuf, size_t of, int16_t v) {
 }
 
 /**
+ * Hint-aware variant of rd_kafka_buf_update_i16().
+ */
+static RD_INLINE void rd_kafka_buf_update_i16_hint(rd_kafka_buf_t *rkbuf,
+                                                   const rd_segment_t *hint,
+                                                   size_t of,
+                                                   int16_t v) {
+        v = htobe16(v);
+        rd_kafka_buf_update_hint(rkbuf, hint, of, &v, sizeof(v));
+}
+
+/**
  * Write int32_t to buffer.
  * The value will be endian-swapped before write.
  */
@@ -1171,6 +1194,17 @@ static RD_INLINE void
 rd_kafka_buf_update_i32(rd_kafka_buf_t *rkbuf, size_t of, int32_t v) {
         v = htobe32(v);
         rd_kafka_buf_update(rkbuf, of, &v, sizeof(v));
+}
+
+/**
+ * Hint-aware variant of rd_kafka_buf_update_i32().
+ */
+static RD_INLINE void rd_kafka_buf_update_i32_hint(rd_kafka_buf_t *rkbuf,
+                                                   const rd_segment_t *hint,
+                                                   size_t of,
+                                                   int32_t v) {
+        v = htobe32(v);
+        rd_kafka_buf_update_hint(rkbuf, hint, of, &v, sizeof(v));
 }
 
 /**
@@ -1300,6 +1334,17 @@ static RD_INLINE void
 rd_kafka_buf_update_i64(rd_kafka_buf_t *rkbuf, size_t of, int64_t v) {
         v = htobe64(v);
         rd_kafka_buf_update(rkbuf, of, &v, sizeof(v));
+}
+
+/**
+ * Hint-aware variant of rd_kafka_buf_update_i64().
+ */
+static RD_INLINE void rd_kafka_buf_update_i64_hint(rd_kafka_buf_t *rkbuf,
+                                                   const rd_segment_t *hint,
+                                                   size_t of,
+                                                   int64_t v) {
+        v = htobe64(v);
+        rd_kafka_buf_update_hint(rkbuf, hint, of, &v, sizeof(v));
 }
 
 /**

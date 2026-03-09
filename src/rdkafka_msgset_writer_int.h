@@ -38,6 +38,7 @@ typedef struct rd_kafka_msgset_writer_s {
         size_t msetw_MessageSetSize;    /* Current MessageSetSize value */
         size_t msetw_of_MessageSetSize; /* offset of MessageSetSize */
         size_t msetw_of_start;          /* offset of MessageSet */
+        rd_segment_t *msetw_seg_start;  /* segment at/before MessageSet */
 
         int msetw_relative_offsets; /* Bool: use relative offsets */
 
@@ -45,6 +46,7 @@ typedef struct rd_kafka_msgset_writer_s {
         int msetw_Attributes;       /* MessageSet Attributes */
         int64_t msetw_MaxTimestamp; /* Maximum timestamp in batch */
         size_t msetw_of_CRC;        /* offset of MessageSet.CRC */
+        rd_segment_t *msetw_seg_crc; /* segment at/before MessageSet.CRC */
 
         rd_kafka_msgbatch_t *msetw_batch; /**< Convenience pointer to
                                            *   rkbuf_u.rkbuf_produce.*.batch */
@@ -52,6 +54,7 @@ typedef struct rd_kafka_msgset_writer_s {
         /* First message information */
         struct {
                 size_t of; /* rkbuf's first message position */
+                rd_segment_t *seg; /* segment at/before first message */
                 int64_t timestamp;
                 uint64_t msgid; /**< First message's msgid for sequence calculation */
         } msetw_firstmsg;

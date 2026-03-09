@@ -5870,26 +5870,6 @@ const rd_kafka_stats_t *rd_kafka_event_stats_typed(rd_kafka_event_t *rkev);
 
 
 /**
- * @name Statistics state name arrays
- * @{
- *
- * Static arrays for converting integer enum values in rd_kafka_stats_t
- * to human-readable strings.
- */
-
-#define RD_KAFKA_BROKER_STATE_COUNT 8
-#define RD_KAFKA_FETCH_STATE_COUNT  6
-
-/** Broker state names. Index with rd_kafka_broker_stats_t.state */
-RD_EXPORT extern const char *rd_kafka_broker_state_names[];
-
-/** Partition fetch state names. Index with rd_kafka_partition_stats_t.fetch_state */
-RD_EXPORT extern const char *rd_kafka_fetch_states[];
-
-/**@}*/
-
-
-/**
  * @returns the topic partition list from the event.
  *
  * @remark The list MUST NOT be freed with

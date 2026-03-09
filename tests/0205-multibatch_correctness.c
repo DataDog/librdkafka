@@ -99,6 +99,8 @@ typedef struct {
 typedef enum {
         MSG_CASE_BASE = 0,
         MSG_CASE_NO_HEADERS,
+        MSG_CASE_NO_KEY_HEADERS,
+        MSG_CASE_NO_KEY_NO_HEADERS,
         MSG_CASE_EMPTY_HEADER_VALUE,
         MSG_CASE_NULL_HEADER_VALUE,
         MSG_CASE_EMPTY_PAYLOAD,
@@ -111,6 +113,10 @@ static const char *msg_case_name(msg_case_t msg_case) {
                 return "base";
         case MSG_CASE_NO_HEADERS:
                 return "no_headers";
+        case MSG_CASE_NO_KEY_HEADERS:
+                return "no_key_headers";
+        case MSG_CASE_NO_KEY_NO_HEADERS:
+                return "no_key_no_headers";
         case MSG_CASE_EMPTY_HEADER_VALUE:
                 return "empty_header_value";
         case MSG_CASE_NULL_HEADER_VALUE:
@@ -170,6 +176,7 @@ typedef struct {
         int msgid;
         int32_t expected_partition;
         msg_case_t msg_case;
+        rd_bool_t has_key;
 
         size_t seen_cnt;
         size_t seen_cap;
@@ -250,6 +257,9 @@ typedef struct {
         int64_t total_request_count;
 } verify_state_t;
 
+#define PAYLOAD_ID_MAGIC       0x30323035U
+#define PAYLOAD_ID_PREFIX_SIZE 20U
+
 static void mm_flags_to_str(mm_flags_t flags, char *dst, size_t dst_size);
 static void dump_bytes_hex(const char *label,
                            const unsigned char *bytes,
@@ -259,6 +269,20 @@ static void dump_bytes_preview(const char *label,
                                size_t len,
                                size_t max_bytes);
 static uint32_t message_crc32(const void *bytes, size_t len);
+static void payload_id_prefix_write(unsigned char *dst,
+                                    uint64_t testid,
+                                    int32_t partition,
+                                    int msgid);
+static rd_bool_t parse_payload_identity(const void *payload,
+                                        size_t payload_len,
+                                        uint64_t *testidp,
+                                        int32_t *partitionp,
+                                        int *msgidp);
+static rd_bool_t parse_key_bytes(const void *key,
+                                 size_t key_len,
+                                 uint64_t *testidp,
+                                 int32_t *partitionp,
+                                 int *msgidp);
 static rd_bool_t should_log_this_message(const verify_state_t *vs,
                                          mm_flags_t flags);
 static void log_verify_payloads(const verify_state_t *vs,
@@ -410,7 +434,12 @@ static void fill_random_bytes_stored(unsigned char *dst, size_t len) {
 
 static rd_kafka_headers_t *
 msg_headers_build_for_produce(const msg_verify_t *m) {
-        rd_kafka_headers_t *hdrs = rd_kafka_headers_new(m->header_cnt);
+        rd_kafka_headers_t *hdrs;
+
+        if (m->header_cnt == 0)
+                return NULL;
+
+        hdrs = rd_kafka_headers_new(m->header_cnt);
 
         for (size_t i = 0; i < m->header_cnt; i++) {
                 const msg_header_t *h = &m->headers[i];
@@ -544,19 +573,26 @@ static verify_state_t *init_verification_state(bench_config_t *config,
                 m->msgid              = msgid;
                 m->expected_partition = part;
                 m->msg_case           = msg_case;
+                m->has_key            = !(msg_case == MSG_CASE_NO_KEY_HEADERS ||
+                               msg_case == MSG_CASE_NO_KEY_NO_HEADERS);
                 vs->expected_per_partition[part]++;
 
                 // ----------------
                 // generate a key and store it
-                char keybuf[128];
-                int klen   = rd_snprintf(keybuf, sizeof(keybuf),
-                                         "testid=%" PRIu64 ",partition=%" PRId32
-                                         ",msg=%d\n",
-                                         testid, part, msgid);
-                m->key_len = klen;
-                m->key     = malloc(m->key_len);
-                TEST_ASSERT(m->key, "OOM allocating key");
-                memcpy(m->key, keybuf, m->key_len);
+                if (m->has_key) {
+                        char keybuf[128];
+                        int klen = rd_snprintf(keybuf, sizeof(keybuf),
+                                               "testid=%" PRIu64
+                                               ",partition=%" PRId32 ",msg=%d\n",
+                                               testid, part, msgid);
+                        m->key_len = (size_t)klen;
+                        m->key     = malloc(m->key_len);
+                        TEST_ASSERT(m->key, "OOM allocating key");
+                        memcpy(m->key, keybuf, m->key_len);
+                } else {
+                        m->key_len = 0;
+                        m->key     = NULL;
+                }
 
                 // -------------
                 // generate a payload and store it
@@ -568,19 +604,30 @@ static verify_state_t *init_verification_state(bench_config_t *config,
                         ((unsigned char *)m->payload)[0] = 0;
                         vs->size_by_msgid[msgid]         = 0;
                 } else {
-                        m->payload_len           = sz;
-                        m->payload               = malloc(sz);
-                        vs->size_by_msgid[msgid] = sz;
+                        size_t payload_len = sz;
+
+                        if (!m->has_key && payload_len < PAYLOAD_ID_PREFIX_SIZE)
+                                payload_len = PAYLOAD_ID_PREFIX_SIZE;
+
+                        m->payload_len           = payload_len;
+                        m->payload               = malloc(payload_len);
+                        vs->size_by_msgid[msgid] = payload_len;
                         TEST_ASSERT(m->payload, "OOM allocating payload");
 
                         // seed ties payload uniquely to this message identity
                         uint64_t seed = ((uint64_t)msgid << 32) ^
                                         (uint64_t)part ^
                                         (testid * 0x9e3779b97f4a7c15ULL);
-                        fill_random_bytes(m->payload, sz, seed);
+                        fill_random_bytes(m->payload, payload_len, seed);
+
+                        if (!m->has_key) {
+                                payload_id_prefix_write(
+                                    m->payload, testid, part, msgid);
+                        }
                 }
 
-                if (msg_case == MSG_CASE_NO_HEADERS) {
+                if (msg_case == MSG_CASE_NO_HEADERS ||
+                    msg_case == MSG_CASE_NO_KEY_NO_HEADERS) {
                         m->header_cnt = 0;
                         m->headers    = NULL;
                         continue;
@@ -849,18 +896,47 @@ static void run_produce_phase(bench_config_t *config,
                 hdrs = msg_headers_build_for_produce(m);
                 while (1) {
                         enqueue_attempts++;
-                        err_send =
-                            rd_kafka_producev(rk, RD_KAFKA_V_RKT(rkt),
-                                              RD_KAFKA_V_PARTITION(
-                                                  m->expected_partition),
-                                              RD_KAFKA_V_VALUE(m->payload,
-                                                               m->payload_len),
-                                              RD_KAFKA_V_KEY(m->key, m->key_len),
-                                              RD_KAFKA_V_HEADERS(hdrs),
-                                              RD_KAFKA_V_MSGFLAGS(
-                                                  RD_KAFKA_MSG_F_COPY),
-                                              RD_KAFKA_V_OPAQUE(op),
-                                              RD_KAFKA_V_END);
+                        if (m->has_key && hdrs) {
+                                err_send = rd_kafka_producev(
+                                    rk, RD_KAFKA_V_RKT(rkt),
+                                    RD_KAFKA_V_PARTITION(
+                                        m->expected_partition),
+                                    RD_KAFKA_V_VALUE(m->payload,
+                                                     m->payload_len),
+                                    RD_KAFKA_V_KEY(m->key, m->key_len),
+                                    RD_KAFKA_V_HEADERS(hdrs),
+                                    RD_KAFKA_V_MSGFLAGS(RD_KAFKA_MSG_F_COPY),
+                                    RD_KAFKA_V_OPAQUE(op), RD_KAFKA_V_END);
+                        } else if (m->has_key) {
+                                err_send = rd_kafka_producev(
+                                    rk, RD_KAFKA_V_RKT(rkt),
+                                    RD_KAFKA_V_PARTITION(
+                                        m->expected_partition),
+                                    RD_KAFKA_V_VALUE(m->payload,
+                                                     m->payload_len),
+                                    RD_KAFKA_V_KEY(m->key, m->key_len),
+                                    RD_KAFKA_V_MSGFLAGS(RD_KAFKA_MSG_F_COPY),
+                                    RD_KAFKA_V_OPAQUE(op), RD_KAFKA_V_END);
+                        } else if (hdrs) {
+                                err_send = rd_kafka_producev(
+                                    rk, RD_KAFKA_V_RKT(rkt),
+                                    RD_KAFKA_V_PARTITION(
+                                        m->expected_partition),
+                                    RD_KAFKA_V_VALUE(m->payload,
+                                                     m->payload_len),
+                                    RD_KAFKA_V_HEADERS(hdrs),
+                                    RD_KAFKA_V_MSGFLAGS(RD_KAFKA_MSG_F_COPY),
+                                    RD_KAFKA_V_OPAQUE(op), RD_KAFKA_V_END);
+                        } else {
+                                err_send = rd_kafka_producev(
+                                    rk, RD_KAFKA_V_RKT(rkt),
+                                    RD_KAFKA_V_PARTITION(
+                                        m->expected_partition),
+                                    RD_KAFKA_V_VALUE(m->payload,
+                                                     m->payload_len),
+                                    RD_KAFKA_V_MSGFLAGS(RD_KAFKA_MSG_F_COPY),
+                                    RD_KAFKA_V_OPAQUE(op), RD_KAFKA_V_END);
+                        }
                         if (!err_send) {
                                 msg_success++;
                                 break;
@@ -997,6 +1073,87 @@ static int first_diff(const unsigned char *expected,
         return -1;
 }
 
+static void payload_id_prefix_write(unsigned char *dst,
+                                    uint64_t testid,
+                                    int32_t partition,
+                                    int msgid) {
+        uint32_t magic = PAYLOAD_ID_MAGIC;
+        uint32_t part  = (uint32_t)partition;
+        uint32_t mid   = (uint32_t)msgid;
+
+        dst[0] = (unsigned char)(magic >> 24);
+        dst[1] = (unsigned char)(magic >> 16);
+        dst[2] = (unsigned char)(magic >> 8);
+        dst[3] = (unsigned char)magic;
+
+        dst[4]  = (unsigned char)(testid >> 56);
+        dst[5]  = (unsigned char)(testid >> 48);
+        dst[6]  = (unsigned char)(testid >> 40);
+        dst[7]  = (unsigned char)(testid >> 32);
+        dst[8]  = (unsigned char)(testid >> 24);
+        dst[9]  = (unsigned char)(testid >> 16);
+        dst[10] = (unsigned char)(testid >> 8);
+        dst[11] = (unsigned char)testid;
+
+        dst[12] = (unsigned char)(part >> 24);
+        dst[13] = (unsigned char)(part >> 16);
+        dst[14] = (unsigned char)(part >> 8);
+        dst[15] = (unsigned char)part;
+
+        dst[16] = (unsigned char)(mid >> 24);
+        dst[17] = (unsigned char)(mid >> 16);
+        dst[18] = (unsigned char)(mid >> 8);
+        dst[19] = (unsigned char)mid;
+}
+
+static rd_bool_t parse_payload_identity(const void *payload,
+                                        size_t payload_len,
+                                        uint64_t *testidp,
+                                        int32_t *partitionp,
+                                        int *msgidp) {
+        const unsigned char *src = (const unsigned char *)payload;
+        uint32_t magic;
+        uint64_t testid;
+        uint32_t part;
+        uint32_t mid;
+
+        if (!src || payload_len < PAYLOAD_ID_PREFIX_SIZE || !testidp ||
+            !partitionp || !msgidp)
+                return rd_false;
+
+        magic = ((uint32_t)src[0] << 24) | ((uint32_t)src[1] << 16) |
+                ((uint32_t)src[2] << 8) | (uint32_t)src[3];
+        if (magic != PAYLOAD_ID_MAGIC)
+                return rd_false;
+
+        testid = ((uint64_t)src[4] << 56) | ((uint64_t)src[5] << 48) |
+                 ((uint64_t)src[6] << 40) | ((uint64_t)src[7] << 32) |
+                 ((uint64_t)src[8] << 24) | ((uint64_t)src[9] << 16) |
+                 ((uint64_t)src[10] << 8) | (uint64_t)src[11];
+        part = ((uint32_t)src[12] << 24) | ((uint32_t)src[13] << 16) |
+               ((uint32_t)src[14] << 8) | (uint32_t)src[15];
+        mid = ((uint32_t)src[16] << 24) | ((uint32_t)src[17] << 16) |
+              ((uint32_t)src[18] << 8) | (uint32_t)src[19];
+
+        *testidp    = testid;
+        *partitionp = (int32_t)part;
+        *msgidp     = (int)mid;
+
+        return rd_true;
+}
+
+static rd_bool_t parse_message_identity(const rd_kafka_message_t *rkmsg,
+                                        uint64_t *testidp,
+                                        int32_t *partitionp,
+                                        int *msgidp) {
+        if (parse_key_bytes(rkmsg->key, rkmsg->key_len, testidp, partitionp,
+                            msgidp))
+                return rd_true;
+
+        return parse_payload_identity(rkmsg->payload, (size_t)rkmsg->len,
+                                      testidp, partitionp, msgidp);
+}
+
 static rd_bool_t parse_key_bytes(const void *key,
                                  size_t key_len,
                                  uint64_t *testidp,
@@ -1063,12 +1220,12 @@ static rd_bool_t verify_consumed_message(verify_state_t *vs,
                 memcpy(rec.payload, rkmsg->payload, rkmsg->len);
         }
 
-        // Parse key: "testid=<u64>,partition=<i32>,msg=<int>\n"
+        /* Parse identity from key when present, otherwise from the payload
+         * prefix used by the explicit no-key test cases. */
         uint64_t in_testid;
         int32_t in_part;
         int in_msgid;
-        if (!parse_key_bytes(rkmsg->key, rkmsg->key_len, &in_testid, &in_part,
-                             &in_msgid)) {
+        if (!parse_message_identity(rkmsg, &in_testid, &in_part, &in_msgid)) {
                 rec.flags |= MM_PARSE_KEY;
                 if (should_log_this_message(vs, rec.flags)) {
                         uint32_t got_crc =
@@ -1172,7 +1329,8 @@ static rd_bool_t verify_consumed_message(verify_state_t *vs,
         if (rkmsg->key_len != m->key_len) {
                 rec.flags |= MM_KEY_LEN;
                 vs->key_len_mismatches++;
-        } else if (memcmp(rkmsg->key, m->key, m->key_len) != 0) {
+        } else if (m->key_len > 0 &&
+                   memcmp(rkmsg->key, m->key, m->key_len) != 0) {
                 rec.flags |= MM_KEY_BYTES;
                 vs->key_byte_mismatches++;
                 rec.first_key_diff_idx =
