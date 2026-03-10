@@ -213,8 +213,12 @@ do_test_idempo_possibly_persisted_not_causing_fatal_error(size_t n) {
 
         SUB_TEST_QUICK();
 
+        /* This case needs overlapping Produce requests so a later batch can
+         * interact with the retried possibly-persisted head batch. */
         rk = create_idempo_producer(&mcluster, 1, "batch.num.messages", "1",
-                                    "linger.ms", "0", NULL);
+                                    "linger.ms", "0",
+                                    "max.in.flight.requests.per.connection",
+                                    "5", NULL);
         test_curr->ignore_dr_err = rd_true;
         test_curr->is_fatal_cb   = error_is_fatal_cb;
         /* Only allow an error from the disconnection below. */

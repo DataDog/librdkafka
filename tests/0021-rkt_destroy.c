@@ -55,6 +55,7 @@ static void test_rkt_destroy_engine(const char *engine_name) {
 
         test_conf_init(&pconf, NULL, 10);
         test_conf_set(pconf, "produce.engine", engine_name);
+        rd_kafka_conf_set_dr_msg_cb(pconf, test_dr_msg_cb);
 
         testid = test_id_generate();
         rk     = test_create_handle(RD_KAFKA_PRODUCER, pconf);

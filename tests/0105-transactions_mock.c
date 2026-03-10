@@ -2238,6 +2238,9 @@ static void do_test_txn_coord_req_multi_find(void) {
                                                        * can trigger coord_req_fsm events
                                                        * by toggling connections. */
                                                       "enable.sparse.connections", "false",
+                                                      /* This test needs multiple coordinator
+                                                       * requests to be able to progress. */
+                                                      "max.in.flight.requests.per.connection", "5",
                                                       /* Set up on_response_received interceptor */
                                                       "on_response_received", "", NULL);
 
@@ -2697,7 +2700,10 @@ static void do_test_out_of_order_seq(void) {
 
         SUB_TEST_QUICK();
 
+        /* This scenario needs multiple Produce requests in flight to hit the
+         * out-of-order sequencing path it is trying to validate. */
         rk = create_txn_producer(&mcluster, txnid, 3, "batch.num.messages", "1",
+                                 "max.in.flight.requests.per.connection", "5",
                                  NULL);
 
         rd_kafka_mock_coordinator_set(mcluster, "transaction", txnid,

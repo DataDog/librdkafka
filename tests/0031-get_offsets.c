@@ -63,6 +63,7 @@ void test_query_watermark_offsets_timeout(const char *engine_name) {
         test_conf_init(&conf, NULL, 30);
         test_conf_set(conf, "bootstrap.servers", bootstraps);
         test_conf_set(conf, "produce.engine", engine_name);
+        test_conf_set(conf, "max.in.flight.requests.per.connection", "1");
         rk = test_create_handle(RD_KAFKA_PRODUCER, conf);
 
 

@@ -3773,7 +3773,16 @@ static void rd_kafka_query_wmark_offsets_resp_cb(rd_kafka_t *rk,
 
         state->offidx++;
 
-        if (err || state->offidx == 2) /* Error or Done */
+        /*
+         * query_watermark_offsets() issues two sibling ListOffsets requests.
+         * With max.in.flight.requests.per.connection=1 the first request can
+         * time out in flight while the second is still queued, causing the
+         * second one to complete as _TIMED_OUT_QUEUE after the disconnect.
+         * Preserve the first terminal error so a derivative queue timeout
+         * does not overwrite the root failure for the logical API call.
+         */
+        if (state->err == RD_KAFKA_RESP_ERR__IN_PROGRESS &&
+            (err || state->offidx == 2)) /* Error or Done */
                 state->err = err;
 
         rd_kafka_topic_partition_list_destroy(offsets);

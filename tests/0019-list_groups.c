@@ -165,6 +165,7 @@ static void do_test_list_groups(const char *engine_name) {
         /* Handle for group listings */
         test_conf_init(&pconf, NULL, 0);
         test_conf_set(pconf, "produce.engine", engine_name);
+        rd_kafka_conf_set_dr_msg_cb(pconf, test_dr_msg_cb);
         rk = test_create_handle(RD_KAFKA_PRODUCER, pconf);
 
         /* Produce messages so that topic is auto created */
