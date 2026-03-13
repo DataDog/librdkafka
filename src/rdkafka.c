@@ -2364,12 +2364,12 @@ rd_kafka_t *rd_kafka_new(rd_kafka_type_t type,
 
         rd_kafka_global_init();
 
-        fprintf(stderr,
+        fprintf(stdout,
                 "[DDSUBPROBE_20260211A] identity "
                 "librdkafka=%s rd_kafka_subscribe=%p rd_kafka_new=%p\n",
                 rd_kafka_version_str(), (void *)&rd_kafka_subscribe,
                 (void *)&rd_kafka_new);
-        fflush(stderr);
+        fflush(stdout);
 
         /* rd_kafka_new() takes ownership of the provided \p app_conf
          * object if rd_kafka_new() succeeds.
