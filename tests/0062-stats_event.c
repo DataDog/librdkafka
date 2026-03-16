@@ -146,12 +146,13 @@ static void test_stats_event_typed_only(const char *engine_name) {
         if (!rkev)
                 TEST_FAIL("Expected stats event but none received\n");
 
-        if (!rd_kafka_event_stats_typed(rkev))
-                TEST_FAIL("Expected typed stats for stats event\n");
-
-        if (rd_kafka_event_stats(rkev) != NULL)
+        if (rd_kafka_event_stats_typed(rkev) != NULL)
                 TEST_FAIL(
-                    "Expected JSON stats to be NULL when no JSON callback is set\n");
+                    "Expected typed stats to be NULL when no typed callback is set\n");
+
+        if (!rd_kafka_event_stats(rkev))
+                TEST_FAIL(
+                    "Expected JSON stats to be present when stats events are enabled\n");
 
         rd_kafka_event_destroy(rkev);
         rd_kafka_queue_destroy(rkqu);

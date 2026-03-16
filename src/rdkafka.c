@@ -1738,11 +1738,11 @@ static void rd_kafka_stats_emit_all(rd_kafka_t *rk) {
         rd_kafka_stats_t *typed_stats = NULL;
 
         /* Determine what stats formats are needed.
-         * - JSON: only if JSON callback is set
-         * - Typed: if typed callback is set OR events include STATS */
-        need_json  = rk->rk_conf.stats_cb != NULL;
-        need_typed = rk->rk_conf.stats_cb_typed != NULL ||
+         * - JSON: if JSON callback is set OR events include STATS
+         * - Typed: only if typed callback is set */
+        need_json  = rk->rk_conf.stats_cb != NULL ||
                      (rk->rk_conf.enabled_events & RD_KAFKA_EVENT_STATS);
+        need_typed = rk->rk_conf.stats_cb_typed != NULL;
 
         /* Early return if no stats are needed */
         if (!need_json && !need_typed)
