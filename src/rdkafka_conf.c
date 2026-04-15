@@ -1114,6 +1114,14 @@ static const struct rd_kafka_property rd_kafka_properties[] = {
      "ProduceResponse handler: "
      "rd_kafka_resp_err_t (*cb) (rd_kafka_t *rk, "
      "int32_t brokerid, uint64_t msgid, rd_kafka_resp_err_t err)"},
+    {_RK_GLOBAL | _RK_HIDDEN, "ut.compression.zstd.dict.path", _RK_C_STR,
+     _RK(ut.zstd_compression_dict_path),
+     "Path to a zstd dictionary used for outer batch compression. "
+     "For tests only."},
+    {_RK_GLOBAL | _RK_HIDDEN, "ut.compression.zstd.sample.dump.path",
+     _RK_C_STR, _RK(ut.zstd_compression_sample_dump_path),
+     "Path to a batch-sample corpus file used to dump pre-zstd outer batch "
+     "bytes. For tests only."},
 
     /* Global consumer group properties */
     {_RK_GLOBAL | _RK_CGRP | _RK_HIGH, "group.id", _RK_C_STR, _RK(group_id_str),

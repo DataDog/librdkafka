@@ -275,6 +275,8 @@ _TEST_DECL(0203_producer_reconnect_mock);
 _TEST_DECL(0205_multibatch_correctness);
 _TEST_DECL(0206_fault_injection_correctness_mock);
 _TEST_DECL(0207_multibatch_multitopic_correctness);
+_TEST_DECL(0208_payload_dict_mock);
+_TEST_DECL(0209_points_tags_replay_real);
 
 /* Manual tests */
 _TEST_DECL(8000_idle);
@@ -547,6 +549,8 @@ struct test tests[] = {
     _TEST(0205_multibatch_correctness, TEST_F_LOCAL),
     _TEST(0206_fault_injection_correctness_mock, TEST_F_LOCAL),
     _TEST(0207_multibatch_multitopic_correctness, TEST_F_LOCAL),
+    _TEST(0208_payload_dict_mock, TEST_F_LOCAL | TEST_F_MANUAL),
+    _TEST(0209_points_tags_replay_real, TEST_F_LOCAL | TEST_F_MANUAL),
 
 
     /* Manual tests */

@@ -510,7 +510,13 @@ static int rd_kafka_msgset_writer_compress_zstd(rd_kafka_msgset_writer_t *msetw,
         rd_kafka_resp_err_t err;
         int comp_level =
             msetw->msetw_rktp->rktp_rkt->rkt_conf.compression_level;
+        const char *dict_path =
+            msetw->msetw_rkb->rkb_rk->rk_conf.ut.zstd_compression_dict_path;
+        const char *sample_dump_path =
+            msetw->msetw_rkb->rkb_rk->rk_conf.ut
+                .zstd_compression_sample_dump_path;
         err = rd_kafka_zstd_compress(msetw->msetw_rkb, comp_level, slice,
+                                     dict_path, sample_dump_path,
                                      &ciov->iov_base, &ciov->iov_len);
         return (err ? -1 : 0);
 }

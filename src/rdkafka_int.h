@@ -39,6 +39,7 @@ typedef int mode_t;
 #endif
 
 #include <fcntl.h>
+#include <stdio.h>
 
 
 #include "rdsysqueue.h"
@@ -331,6 +332,12 @@ struct rd_kafka_s {
         struct rd_kafka_cgrp_s *rk_cgrp;
 
         rd_kafka_conf_t rk_conf;
+        struct {
+                mtx_t lock;
+                FILE *zstd_sample_dump_fp;
+                uint32_t zstd_sample_dump_count;
+                rd_bool_t zstd_sample_dump_failed;
+        } rk_ut;
         rd_kafka_q_t *rk_logq; /* Log queue if `log.queue` set */
         char rk_name[128];
         rd_kafkap_str_t *rk_client_id;

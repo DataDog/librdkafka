@@ -605,6 +605,12 @@ struct rd_kafka_conf_s {
                     int32_t brokerid,
                     uint64_t msgid,
                     rd_kafka_resp_err_t err);
+                /** Optional zstd dictionary path for outer batch compression.
+                 *  Tests only. */
+                char *zstd_compression_dict_path;
+                /** Optional output path for dumping pre-zstd outer batch
+                 *  samples in batch-corpus format. Tests only. */
+                char *zstd_compression_sample_dump_path;
         } ut;
 
         char *sw_name;    /**< Software/client name */

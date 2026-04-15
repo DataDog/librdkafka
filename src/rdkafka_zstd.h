@@ -51,6 +51,8 @@ rd_kafka_resp_err_t rd_kafka_zstd_decompress(rd_kafka_broker_t *rkb,
 rd_kafka_resp_err_t rd_kafka_zstd_compress(rd_kafka_broker_t *rkb,
                                            int comp_level,
                                            rd_slice_t *slice,
+                                           const char *dict_path,
+                                           const char *sample_dump_path,
                                            void **outbuf,
                                            size_t *outlenp);
 

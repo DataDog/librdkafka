@@ -144,6 +144,8 @@ set(
     0200-multibatch_benchmark.c
     0201-multibatch_limits_mock.c
     0202-adaptive_batching_baseline.c
+    0208-payload_dict_mock.c
+    0209-points_tags_replay_real.c
     8000-idle.cpp
     8001-fetch_from_follower_mock_manual.c
     8002-multibatch_perf.c

@@ -1021,6 +1021,11 @@ void rd_kafka_destroy_final(rd_kafka_t *rk) {
         rd_list_destroy(&rk->rk_conf.ssl.loaded_providers);
 #endif
 
+        if (rk->rk_ut.zstd_sample_dump_fp) {
+                fclose(rk->rk_ut.zstd_sample_dump_fp);
+                rk->rk_ut.zstd_sample_dump_fp = NULL;
+        }
+
         /* It is not safe to log after this point. */
         rd_kafka_dbg(rk, GENERIC, "TERMINATE",
                      "Termination done: freeing resources");
@@ -1056,6 +1061,7 @@ void rd_kafka_destroy_final(rd_kafka_t *rk) {
         rd_list_destroy(&rk->rk_broker_by_id);
 
         mtx_destroy(&rk->rk_conf.sasl.lock);
+        mtx_destroy(&rk->rk_ut.lock);
         rwlock_destroy(&rk->rk_lock);
 
         rd_free(rk);
@@ -2427,6 +2433,10 @@ rd_kafka_t *rd_kafka_new(rd_kafka_type_t type,
 
         rwlock_init(&rk->rk_lock);
         mtx_init(&rk->rk_conf.sasl.lock, mtx_plain);
+        mtx_init(&rk->rk_ut.lock, mtx_plain);
+        rk->rk_ut.zstd_sample_dump_fp     = NULL;
+        rk->rk_ut.zstd_sample_dump_count  = 0;
+        rk->rk_ut.zstd_sample_dump_failed = rd_false;
         mtx_init(&rk->rk_internal_rkb_lock, mtx_plain);
 
         cnd_init(&rk->rk_broker_state_change_cnd);

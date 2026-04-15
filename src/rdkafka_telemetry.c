@@ -317,9 +317,9 @@ rd_kafka_push_telemetry_payload_compress(rd_kafka_t *rk,
 #if WITH_ZSTD
                 case RD_KAFKA_COMPRESSION_ZSTD:
                         /* TODO: Using 0 for compression level for now. */
-                        r = rd_kafka_zstd_compress(rkb, 0, &payload_slice,
-                                                   compressed_payload,
-                                                   compressed_payload_size);
+                        r = rd_kafka_zstd_compress(
+                            rkb, 0, &payload_slice, NULL, NULL,
+                            compressed_payload, compressed_payload_size);
                         compression_used = RD_KAFKA_COMPRESSION_ZSTD;
                         break;
 #endif
