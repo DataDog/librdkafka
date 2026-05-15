@@ -326,13 +326,16 @@ static void rd_kafka_assignment_handle_OffsetFetch(rd_kafka_t *rk,
                 }
         }
 
-        /* Request-level coordinator errors return without per-partition
-         * results, so apply_offsets() below would never iterate the
-         * .queried partitions and they would be orphaned indefinitely.
-         * Move them back to .pending so the next assignment_serve_pending()
-         * — triggered when the cgrp re-enters STATE_UP via the
-         * rd_kafka_cgrp_coord_dead() path scheduled from
-         * rd_kafka_handle_OffsetFetch() — re-issues the OffsetFetch. */
+        /* Request-level coordinator errors do not provide usable
+         * per-partition offsets. Move the queried partitions back to .pending
+         * so the next assignment_serve_pending(), triggered when the cgrp
+         * re-enters STATE_UP via the rd_kafka_cgrp_coord_dead() path scheduled
+         * from rd_kafka_handle_OffsetFetch(), re-issues the OffsetFetch.
+         *
+         * Do not fall through to apply_offsets(): a response may still contain
+         * partition entries with the request-level error, which would make
+         * apply_offsets() serve the assignment immediately while the stale
+         * coordinator is still UP. */
         if ((err == RD_KAFKA_RESP_ERR_NOT_COORDINATOR ||
              err == RD_KAFKA_RESP_ERR_COORDINATOR_NOT_AVAILABLE) &&
             rk->rk_consumer.assignment.queried->cnt > 0) {
@@ -350,6 +353,8 @@ static void rd_kafka_assignment_handle_OffsetFetch(rd_kafka_t *rk,
                 }
                 rd_kafka_topic_partition_list_clear(
                     rk->rk_consumer.assignment.queried);
+                rd_kafka_topic_partition_list_destroy(offsets);
+                return;
         }
 
         /* Apply the fetched offsets to the assignment */

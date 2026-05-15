@@ -30,6 +30,66 @@
 
 #include "../src/rdkafka_protocol.h"
 
+
+static void assert_offset_fetch_retries_require_coord_query(
+    rd_kafka_mock_cluster_t *mcluster,
+    int num_errs) {
+        rd_kafka_mock_request_t **requests;
+        size_t request_cnt;
+        int offset_fetch_cnt          = 0;
+        int find_coord_cnt            = 0;
+        int finds_since_offset_fetch  = 0;
+        rd_bool_t seen_offset_fetch   = rd_false;
+        rd_bool_t relevant_req_logged = rd_false;
+        size_t i;
+
+        requests = rd_kafka_mock_get_requests(mcluster, &request_cnt);
+
+        TEST_SAY("Relevant request sequence after assign:");
+        for (i = 0; i < request_cnt; i++) {
+                int16_t api_key = rd_kafka_mock_request_api_key(requests[i]);
+
+                if (api_key != RD_KAFKAP_OffsetFetch &&
+                    api_key != RD_KAFKAP_FindCoordinator)
+                        continue;
+
+                TEST_SAY("%s%s", relevant_req_logged ? " -> " : " ",
+                         api_key == RD_KAFKAP_OffsetFetch ? "OffsetFetch"
+                                                           : "FindCoordinator");
+                relevant_req_logged = rd_true;
+
+                if (api_key == RD_KAFKAP_FindCoordinator) {
+                        find_coord_cnt++;
+                        if (seen_offset_fetch)
+                                finds_since_offset_fetch++;
+                        continue;
+                }
+
+                offset_fetch_cnt++;
+                if (seen_offset_fetch) {
+                        TEST_ASSERT(finds_since_offset_fetch > 0,
+                                    "OffsetFetch retry #%d was issued without "
+                                    "a preceding FindCoordinator request",
+                                    offset_fetch_cnt);
+                }
+
+                seen_offset_fetch          = rd_true;
+                finds_since_offset_fetch   = 0;
+        }
+        TEST_SAY("\n");
+
+        TEST_ASSERT(offset_fetch_cnt == num_errs + 1,
+                    "Expected %d OffsetFetch request(s), got %d",
+                    num_errs + 1, offset_fetch_cnt);
+
+        TEST_ASSERT(find_coord_cnt >= num_errs,
+                    "Expected at least %d FindCoordinator request(s), got %d",
+                    num_errs, find_coord_cnt);
+
+        rd_kafka_mock_request_destroy_array(requests, request_cnt);
+}
+
+
 /**
  * @brief Regression test: static assign() + OFFSET_STORED + OffsetFetch
  *        returning request-level NOT_COORDINATOR must recover, not hang.
@@ -50,7 +110,7 @@
  *    → UP, which calls rd_kafka_assignment_serve() and re-issues the
  *    OffsetFetch, picking up the committed offset.
  */
-static void do_test_static_assign_recovers_from_not_coordinator(
+static void do_test_static_assign_with_stored_offset(
     rd_kafka_resp_err_t err_to_inject,
     int num_errs) {
         const char *bootstraps;
@@ -99,6 +159,8 @@ static void do_test_static_assign_recovers_from_not_coordinator(
         rktpar->offset = committed_offset;
         TEST_CALL_ERR__(rd_kafka_commit(c, commit_offsets, 0 /*sync*/));
         rd_kafka_topic_partition_list_destroy(commit_offsets);
+
+        rd_kafka_mock_start_request_tracking(mcluster);
 
         /* Inject the request-level coordinator error onto the next
          * OffsetFetch requests (these are the ones the static assign() path
@@ -153,6 +215,8 @@ static void do_test_static_assign_recovers_from_not_coordinator(
                     " (the committed offset), got %" PRId64,
                     committed_offset, first_offset);
 
+        assert_offset_fetch_retries_require_coord_query(mcluster, num_errs);
+
         rd_kafka_consumer_close(c);
         rd_kafka_destroy(c);
         test_mock_cluster_destroy(mcluster);
@@ -171,12 +235,15 @@ int main_0153_offset_fetch_not_coordinator(int argc, char **argv) {
                 return 0;
         }
 
+        /* Normal OFFSET_STORED path without injected coordinator errors. */
+        do_test_static_assign_with_stored_offset(RD_KAFKA_RESP_ERR_NO_ERROR, 0);
+
         /* Primary scenario from the incident: NOT_COORDINATOR. */
-        do_test_static_assign_recovers_from_not_coordinator(
+        do_test_static_assign_with_stored_offset(
             RD_KAFKA_RESP_ERR_NOT_COORDINATOR, 3);
 
         /* The equivalent coordinator-class error must also recover. */
-        do_test_static_assign_recovers_from_not_coordinator(
+        do_test_static_assign_with_stored_offset(
             RD_KAFKA_RESP_ERR_COORDINATOR_NOT_AVAILABLE, 3);
 
         return 0;
