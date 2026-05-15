@@ -1,7 +1,7 @@
 /*
- * librdkafka - The Apache Kafka C/C++ library
+ * librdkafka - Apache Kafka C library
  *
- * Copyright (c) 2026, Datadog, Inc.
+ * Copyright (c) 2026, Confluent Inc.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -16,7 +16,7 @@
  * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
  * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
  * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
- * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
+ * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE
  * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
  * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
  * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
@@ -34,18 +34,15 @@
  * @brief Regression test: static assign() + OFFSET_STORED + OffsetFetch
  *        returning request-level NOT_COORDINATOR must recover, not hang.
  *
- *  - Investigation reference: Datadog Bits AI investigation
- *    efd73b36-6029-4339-86eb-6129aa6ce8e4 (iris-node-go consumer hung 30 min
- *    after partition assignment, until an external watchdog killed the
- *    process).
- *
- *  - Before the fix: librdkafka's OffsetFetch error handler emitted only a
- *    soft RD_KAFKA_OP_COORD_QUERY for a NOT_COORDINATOR response. The
+ *  - Before the fix: the OffsetFetch error handler emitted only a soft
+ *    RD_KAFKA_OP_COORD_QUERY for a NOT_COORDINATOR response. The
  *    follow-up FindCoordinator typically returned the same broker, so
  *    rd_kafka_cgrp_coord_update() short-circuited, the cgrp stayed in
  *    STATE_UP, and the queried partitions were left orphaned on
  *    .queried — rd_kafka_assignment_serve_pending() short-circuited
- *    forever on `.queried->cnt == 0`.
+ *    forever on `.queried->cnt == 0`. Consumers using static
+ *    rd_kafka_assign() without rd_kafka_subscribe() (no heartbeat path
+ *    to nudge the coord state) hung indefinitely.
  *
  *  - After the fix: NOT_COORDINATOR escalates to coord_dead (clearing
  *    coord_id and curr_coord), and the queried partitions are moved back
@@ -89,8 +86,8 @@ static void do_test_static_assign_recovers_from_not_coordinator(
         test_conf_set(conf, "group.id", groupid);
         test_conf_set(conf, "auto.offset.reset", "earliest");
         test_conf_set(conf, "enable.auto.commit", "false");
-        /* Match iris-node-go: a low coord query interval so the periodic
-         * cgrp coordinator-query timer fires quickly. */
+        /* Low coord query interval so the periodic cgrp coordinator-query
+         * timer fires quickly within the test deadline. */
         test_conf_set(conf, "coordinator.query.interval.ms", "2000");
 
         c = test_create_consumer(groupid, NULL, conf, NULL);
@@ -112,9 +109,9 @@ static void do_test_static_assign_recovers_from_not_coordinator(
                                                   err_to_inject);
         }
 
-        /* Static assign — never call subscribe(). This mirrors the
-         * iris-node-go consumer path (okc/consumer.go:161): Assign() with
-         * OFFSET_STORED to fetch the committed position. */
+        /* Static assign — never call subscribe(). Use OFFSET_STORED so
+         * librdkafka has to issue an OffsetFetch to discover the starting
+         * position. */
         parts = rd_kafka_topic_partition_list_new(1);
         rktpar = rd_kafka_topic_partition_list_add(parts, topic, 0);
         rktpar->offset = RD_KAFKA_OFFSET_STORED;
