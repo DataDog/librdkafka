@@ -141,6 +141,7 @@ set(
     0150-telemetry_mock.c
     0151-purge-brokers.c
     0152-rebootstrap.c
+    0153-offset_fetch_not_coordinator.c
     0200-multibatch_benchmark.c
     0201-multibatch_limits_mock.c
     0202-adaptive_batching_baseline.c

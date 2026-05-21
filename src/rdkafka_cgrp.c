@@ -6742,9 +6742,25 @@ static rd_kafka_op_res_t rd_kafka_cgrp_op_serve(rd_kafka_t *rk,
                 break;
 
         case RD_KAFKA_OP_COORD_QUERY:
-                rd_kafka_cgrp_coord_query(
-                    rkcg,
-                    rko->rko_err ? rd_kafka_err2str(rko->rko_err) : "from op");
+                /* If the triggering error explicitly indicates that the
+                 * current broker is no longer the coordinator, mark the
+                 * coordinator dead so the cgrp leaves the UP state and
+                 * re-discovers from scratch (clearing curr_coord, forcing a
+                 * reconnect once the new coord broker is set, and calling
+                 * rd_kafka_assignment_serve() on the UP transition).
+                 * For other errors a soft re-query is sufficient. */
+                if (rko->rko_err == RD_KAFKA_RESP_ERR_NOT_COORDINATOR ||
+                    rko->rko_err ==
+                        RD_KAFKA_RESP_ERR_COORDINATOR_NOT_AVAILABLE)
+                        rd_kafka_cgrp_coord_dead(
+                            rkcg, rko->rko_err,
+                            rd_kafka_err2str(rko->rko_err));
+                else
+                        rd_kafka_cgrp_coord_query(rkcg,
+                                                  rko->rko_err
+                                                      ? rd_kafka_err2str(
+                                                            rko->rko_err)
+                                                      : "from op");
                 break;
 
         case RD_KAFKA_OP_SUBSCRIBE: {
