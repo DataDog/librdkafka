@@ -33,7 +33,8 @@
 
 static void assert_offset_fetch_retries_require_coord_query(
     rd_kafka_mock_cluster_t *mcluster,
-    int num_errs) {
+    int num_errs,
+    int32_t expected_coord_id) {
         rd_kafka_mock_request_t **requests;
         size_t request_cnt;
         int offset_fetch_cnt          = 0;
@@ -48,14 +49,18 @@ static void assert_offset_fetch_retries_require_coord_query(
         TEST_SAY("Relevant request sequence after assign:");
         for (i = 0; i < request_cnt; i++) {
                 int16_t api_key = rd_kafka_mock_request_api_key(requests[i]);
+                int32_t broker_id;
 
                 if (api_key != RD_KAFKAP_OffsetFetch &&
                     api_key != RD_KAFKAP_FindCoordinator)
                         continue;
 
-                TEST_SAY("%s%s", relevant_req_logged ? " -> " : " ",
+                broker_id = rd_kafka_mock_request_id(requests[i]);
+                TEST_SAY("%s%s(b%" PRId32 ")",
+                         relevant_req_logged ? " -> " : " ",
                          api_key == RD_KAFKAP_OffsetFetch ? "OffsetFetch"
-                                                           : "FindCoordinator");
+                                                          : "FindCoordinator",
+                         broker_id);
                 relevant_req_logged = rd_true;
 
                 if (api_key == RD_KAFKAP_FindCoordinator) {
@@ -64,6 +69,18 @@ static void assert_offset_fetch_retries_require_coord_query(
                                 finds_since_offset_fetch++;
                         continue;
                 }
+
+                /* Every OffsetFetch must hit the configured group coordinator.
+                 * This locks in the precise regression: the mock returns the
+                 * same broker for every FindCoordinator, so rd_kafka_cgrp_-
+                 * coord_update() would short-circuit on
+                 * `rkcg_coord_id == coord_id` if the fix hadn't first cleared
+                 * coord_id via coord_dead(). */
+                TEST_ASSERT(broker_id == expected_coord_id,
+                            "OffsetFetch #%d went to broker %" PRId32
+                            ", expected coordinator broker %" PRId32,
+                            offset_fetch_cnt + 1, broker_id,
+                            expected_coord_id);
 
                 offset_fetch_cnt++;
                 if (seen_offset_fetch) {
@@ -123,6 +140,7 @@ static void do_test_static_assign_with_stored_offset(
         const char *groupid = "g-not-coord";
         const int msgcnt    = 100;
         const int64_t committed_offset = msgcnt / 2;
+        const int32_t coord_broker_id  = 1;
         rd_kafka_topic_partition_list_t *commit_offsets;
         int received = 0;
         int64_t first_offset = -1;
@@ -133,7 +151,8 @@ static void do_test_static_assign_with_stored_offset(
                        num_errs);
 
         mcluster = test_mock_cluster_new(3, &bootstraps);
-        rd_kafka_mock_coordinator_set(mcluster, "group", groupid, 1);
+        rd_kafka_mock_coordinator_set(mcluster, "group", groupid,
+                                      coord_broker_id);
 
         /* Seed the topic with messages */
         test_produce_msgs_easy_v(topic, 0, 0, 0, msgcnt, 10,
@@ -215,7 +234,8 @@ static void do_test_static_assign_with_stored_offset(
                     " (the committed offset), got %" PRId64,
                     committed_offset, first_offset);
 
-        assert_offset_fetch_retries_require_coord_query(mcluster, num_errs);
+        assert_offset_fetch_retries_require_coord_query(mcluster, num_errs,
+                                                        coord_broker_id);
 
         rd_kafka_consumer_close(c);
         rd_kafka_destroy(c);

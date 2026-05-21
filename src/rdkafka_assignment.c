@@ -311,6 +311,56 @@ static void rd_kafka_assignment_handle_OffsetFetch(rd_kafka_t *rk,
                         rd_kafka_cgrp_consumer_expedite_next_heartbeat(
                             rk->rk_cgrp, "OffsetFetch error: Unknown member");
                         break;
+                case RD_KAFKA_RESP_ERR_NOT_COORDINATOR:
+                case RD_KAFKA_RESP_ERR_COORDINATOR_NOT_AVAILABLE:
+                        /* Request-level coordinator errors do not provide
+                         * usable per-partition offsets. Move the queried
+                         * partitions back to .pending so the next
+                         * assignment_serve_pending(), triggered when the cgrp
+                         * re-enters STATE_UP via the
+                         * rd_kafka_cgrp_coord_dead() path scheduled from
+                         * rd_kafka_handle_OffsetFetch(), re-issues the
+                         * OffsetFetch.
+                         *
+                         * Return without calling apply_offsets(): the broker
+                         * may include partition entries alongside a
+                         * request-level error, in which case apply_offsets()
+                         * would invoke rd_kafka_assignment_serve() before
+                         * the queued COORD_QUERY op has run — re-issuing
+                         * the OffsetFetch to the still-stale coordinator
+                         * and looping until coord_dead finally executes. */
+                        if (rk->rk_consumer.assignment.queried->cnt > 0) {
+                                rd_kafka_topic_partition_t *rktpar_q;
+                                rd_kafka_log(
+                                    rk, LOG_WARNING, "OFFSETFETCH",
+                                    "Re-pending %d partition(s) from "
+                                    ".queried due to request-level retriable "
+                                    "error: %s",
+                                    rk->rk_consumer.assignment.queried->cnt,
+                                    rd_kafka_err2str(err));
+                                /* serve_pending() only moves OFFSET_STORED
+                                 * partitions onto .queried, so the reset
+                                 * below is a no-op today; we set it
+                                 * explicitly to keep serve_pending()'s
+                                 * "needs offset query" precondition
+                                 * obvious on re-entry. */
+                                RD_KAFKA_TPLIST_FOREACH(
+                                    rktpar_q,
+                                    rk->rk_consumer.assignment.queried) {
+                                        rd_kafka_topic_partition_t
+                                            *rktpar_copy =
+                                                rd_kafka_topic_partition_list_add_copy(
+                                                    rk->rk_consumer.assignment
+                                                        .pending,
+                                                    rktpar_q);
+                                        rktpar_copy->offset =
+                                            RD_KAFKA_OFFSET_STORED;
+                                }
+                                rd_kafka_topic_partition_list_clear(
+                                    rk->rk_consumer.assignment.queried);
+                        }
+                        rd_kafka_topic_partition_list_destroy(offsets);
+                        return;
                 default:
                         rd_kafka_dbg(
                             rk, CGRP, "OFFSET",
@@ -324,37 +374,6 @@ static void rd_kafka_assignment_handle_OffsetFetch(rd_kafka_t *rk,
                             offsets->cnt, rk->rk_group_id->str,
                             rd_kafka_err2str(err));
                 }
-        }
-
-        /* Request-level coordinator errors do not provide usable
-         * per-partition offsets. Move the queried partitions back to .pending
-         * so the next assignment_serve_pending(), triggered when the cgrp
-         * re-enters STATE_UP via the rd_kafka_cgrp_coord_dead() path scheduled
-         * from rd_kafka_handle_OffsetFetch(), re-issues the OffsetFetch.
-         *
-         * Do not fall through to apply_offsets(): a response may still contain
-         * partition entries with the request-level error, which would make
-         * apply_offsets() serve the assignment immediately while the stale
-         * coordinator is still UP. */
-        if ((err == RD_KAFKA_RESP_ERR_NOT_COORDINATOR ||
-             err == RD_KAFKA_RESP_ERR_COORDINATOR_NOT_AVAILABLE) &&
-            rk->rk_consumer.assignment.queried->cnt > 0) {
-                rd_kafka_topic_partition_t *rktpar_q;
-                rd_kafka_dbg(rk, CGRP, "OFFSETFETCH",
-                             "Re-pending %d partition(s) from .queried due to "
-                             "request-level retriable error: %s",
-                             rk->rk_consumer.assignment.queried->cnt,
-                             rd_kafka_err2str(err));
-                RD_KAFKA_TPLIST_FOREACH(
-                    rktpar_q, rk->rk_consumer.assignment.queried) {
-                        rktpar_q->offset = RD_KAFKA_OFFSET_STORED;
-                        rd_kafka_topic_partition_list_add_copy(
-                            rk->rk_consumer.assignment.pending, rktpar_q);
-                }
-                rd_kafka_topic_partition_list_clear(
-                    rk->rk_consumer.assignment.queried);
-                rd_kafka_topic_partition_list_destroy(offsets);
-                return;
         }
 
         /* Apply the fetched offsets to the assignment */
