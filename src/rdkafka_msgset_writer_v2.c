@@ -755,10 +755,10 @@ static int rd_kafka_msgset_writer_write_msgq_mbv2(rd_kafka_msgset_writer_t *mset
                                              rd_kafka_msgq_t *rkmq) {
         rd_kafka_toppar_t *rktp = msetw->msetw_rktp;
         rd_kafka_broker_t *rkb  = msetw->msetw_rkb;
-        size_t len              = rd_buf_len(&msetw->msetw_rkbuf->rkbuf_buf);
-        size_t max_msg_size =
-            RD_MIN((size_t)msetw->msetw_rkb->rkb_rk->rk_conf.max_msg_size,
-                   (size_t)msetw->msetw_rkb->rkb_rk->rk_conf.batch_size);
+        size_t message_set_size = msetw->msetw_MessageSetSize;
+        size_t request_size     = rd_buf_len(&msetw->msetw_rkbuf->rkbuf_buf);
+        size_t max_msg_size     = (size_t)rkb->rkb_rk->rk_conf.max_msg_size;
+        size_t batch_size       = (size_t)rkb->rkb_rk->rk_conf.batch_size;
         rd_ts_t int_latency_base;
         rd_ts_t MaxTimestamp = 0;
         rd_kafka_msg_t *rkm;
@@ -799,19 +799,24 @@ static int rd_kafka_msgset_writer_write_msgq_mbv2(rd_kafka_msgset_writer_t *mset
                         break;
                 }
 
-                /* Check if there is enough space in the current messageset
-                 * to add this message.
-                 * Since calculating the total size of a request at produce()
-                 * time is tricky (we don't know the protocol version or
-                 * MsgVersion that will be used), we allow a messageset to
-                 * overshoot the message.max.bytes limit by one message to
-                 * avoid getting stuck here.
-                 * The actual messageset size is enforced by the broker. */
+                size_t msg_wire_size =
+                    rd_kafka_msg_wire_size(rkm, msetw->msetw_MsgVersion);
+
+                /* Check if there is enough space to add this message.
+                 * In mbv2 the rkbuf is shared by multiple partitions:
+                 * batch.size applies to the current partition's MessageSet,
+                 * while message.max.bytes applies to the full ProduceRequest.
+                 *
+                 * Since calculating the final MessageSet size at produce()
+                 * time is tricky, we allow a MessageSet to overshoot the
+                 * configured limit by one message to avoid getting stuck here.
+                 * The actual MessageSet size is enforced by the broker. */
                 if (unlikely(
                         msgcnt == msetw->msetw_msgcntmax ||
-                        (msgcnt > 0 && len + rd_kafka_msg_wire_size(
-                                                 rkm, msetw->msetw_MsgVersion) >
-                                           max_msg_size))) {
+                        (msgcnt > 0 &&
+                         message_set_size + msg_wire_size > batch_size) ||
+                        (msgcnt > 0 &&
+                         request_size + msg_wire_size > max_msg_size))) {
                         break;
                 }
 
@@ -841,8 +846,10 @@ static int rd_kafka_msgset_writer_write_msgq_mbv2(rd_kafka_msgset_writer_t *mset
                         MaxTimestamp = rkm->rkm_timestamp;
 
                 /* Write message to buffer */
-                len += rd_kafka_msgset_writer_write_msg(msetw, rkm, msgcnt, 0,
-                                                        NULL);
+                size_t msglen = rd_kafka_msgset_writer_write_msg(
+                    msetw, rkm, msgcnt, 0, NULL);
+                message_set_size += msglen;
+                request_size += msglen;
 
                 msgcnt++;
 
