@@ -284,11 +284,79 @@ static void test_per_partition_limits_with_multibatch(void) {
         SUB_TEST_PASS();
 }
 
+static void test_batch_size_does_not_cap_multibatch_request(void) {
+        SUB_TEST("batch.size does not cap the whole multibatch request");
+
+        rd_kafka_conf_t *conf;
+        rd_kafka_t *rk;
+        const int part_cnt   = 4;
+        const int msgs_per_p = 100;
+        int inflight         = part_cnt * msgs_per_p;
+        char payload[5000];
+        const char *topic = "0201-batch-size-not-request-cap";
+
+        memset(payload, 'E', sizeof(payload));
+
+        test_conf_init(&conf, NULL, 10);
+        test_conf_set(conf, "test.mock.num.brokers", "1");
+        test_conf_set(conf, "linger.ms", "500");
+        test_conf_set(conf, "broker.linger.ms", "500");
+        test_conf_set(conf, "broker.batch.max.bytes", "-1");
+        test_conf_set(conf, "compression.type", "none");
+        test_conf_set(conf, "batch.num.messages", "10000");
+        test_conf_set(conf, "batch.size", "512000");
+        test_conf_set(conf, "produce.engine", "v2");
+        test_conf_set(conf, "produce.request.max.partitions", "10");
+        test_conf_set(conf, "message.max.bytes", "3000000");
+        test_conf_set(conf, "message.timeout.ms", "10000");
+        rd_kafka_conf_set_dr_msg_cb(conf, test_dr_msg_cb);
+
+        rk = test_create_handle(RD_KAFKA_PRODUCER, conf);
+        rd_kafka_mock_cluster_t *mcluster = rd_kafka_handle_mock_cluster(rk);
+        rd_kafka_mock_topic_create(mcluster, topic, part_cnt, 1);
+        rd_kafka_mock_start_request_tracking(mcluster);
+
+        for (int p = 0; p < part_cnt; p++) {
+                for (int i = 0; i < msgs_per_p; i++) {
+                        rd_kafka_resp_err_t err = rd_kafka_producev(
+                            rk, RD_KAFKA_V_TOPIC(topic), RD_KAFKA_V_PARTITION(p),
+                            RD_KAFKA_V_VALUE(payload, sizeof(payload)),
+                            RD_KAFKA_V_OPAQUE(&inflight), RD_KAFKA_V_END);
+                        TEST_ASSERT(!err, "producev failed: %s",
+                                    rd_kafka_err2str(err));
+                }
+        }
+
+        while (inflight > 0)
+                rd_kafka_poll(rk, 50);
+
+        size_t reqcnt                      = 0;
+        int64_t produce_reqcnt             = 0;
+        rd_kafka_mock_request_t **requests =
+            rd_kafka_mock_get_requests(mcluster, &reqcnt);
+        for (size_t j = 0; j < reqcnt; j++)
+                if (rd_kafka_mock_request_api_key(requests[j]) ==
+                    RD_KAFKAP_Produce)
+                        produce_reqcnt++;
+        rd_kafka_mock_request_destroy_array(requests, reqcnt);
+
+        rd_kafka_destroy(rk);
+
+        TEST_ASSERT(
+            produce_reqcnt == 1,
+            "expected batch.size to apply per partition and allow one "
+            "multi-partition ProduceRequest, got %" PRId64,
+            produce_reqcnt);
+
+        SUB_TEST_PASS();
+}
+
 int main_0201_multibatch_limits_mock(int argc, char **argv) {
         test_batch_num_messages();
         test_batch_size();
         test_envelope_max_bytes();
         test_envelope_max_partitions();
         test_per_partition_limits_with_multibatch();
+        test_batch_size_does_not_cap_multibatch_request();
         return 0;
 }
