@@ -406,6 +406,13 @@ struct rd_kafka_broker_s { /* rd_kafka_broker_t */
         /* Track the last valid pid used when generating produce requests. */
         rd_kafka_pid_t rkb_produce_pid;
 
+        /** Pooled ZSTD compression context, lazily created on first use.
+         *  Owned exclusively by the broker I/O thread — no locking needed.
+         *  Freed in rd_kafka_broker_destroy(). */
+        void *rkb_zstd_cctx;
+        /** Compression level last used with rkb_zstd_cctx. If the level
+         *  changes between calls we must reconfigure the context. */
+        int rkb_zstd_comp_level;
 };
 
 #define rd_kafka_broker_keep(rkb) rd_refcnt_add(&(rkb)->rkb_refcnt)

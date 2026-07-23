@@ -117,6 +117,54 @@ rd_kafka_resp_err_t rd_kafka_zstd_decompress(rd_kafka_broker_t *rkb,
 }
 
 
+/**
+ * @brief Retrieve or lazily create the broker's pooled ZSTD compression
+ *        context.  Called only from the broker I/O thread — no locking.
+ */
+static ZSTD_CStream *rd_kafka_broker_get_zstd_cctx(rd_kafka_broker_t *rkb,
+                                                    int comp_level) {
+        ZSTD_CStream *cctx = (ZSTD_CStream *)rkb->rkb_zstd_cctx;
+
+        if (likely(cctx != NULL)) {
+                /* Reset session state only — keeps internal workspace buffers
+                 * (hash tables, window, etc.) allocated from the previous
+                 * call, which is the entire point of pooling. */
+                ZSTD_CCtx_reset(cctx, ZSTD_reset_session_only);
+
+                /* Re-set compression level only if it changed */
+                if (unlikely(comp_level != rkb->rkb_zstd_comp_level)) {
+                        ZSTD_CCtx_setParameter(cctx,
+                                               ZSTD_c_compressionLevel,
+                                               comp_level);
+                        rkb->rkb_zstd_comp_level = comp_level;
+                }
+                return cctx;
+        }
+
+        /* First call: create the context */
+        cctx = ZSTD_createCStream();
+        if (!cctx)
+                return NULL;
+
+        ZSTD_CCtx_setParameter(cctx, ZSTD_c_compressionLevel, comp_level);
+        rkb->rkb_zstd_cctx       = cctx;
+        rkb->rkb_zstd_comp_level = comp_level;
+        return cctx;
+}
+
+
+/**
+ * @brief Free the broker's pooled ZSTD compression context.
+ *        Call from broker destroy path.
+ */
+void rd_kafka_zstd_broker_term(rd_kafka_broker_t *rkb) {
+        if (rkb->rkb_zstd_cctx) {
+                ZSTD_freeCStream((ZSTD_CStream *)rkb->rkb_zstd_cctx);
+                rkb->rkb_zstd_cctx = NULL;
+        }
+}
+
+
 rd_kafka_resp_err_t rd_kafka_zstd_compress(rd_kafka_broker_t *rkb,
                                            int comp_level,
                                            rd_slice_t *slice,
@@ -141,8 +189,7 @@ rd_kafka_resp_err_t rd_kafka_zstd_compress(rd_kafka_broker_t *rkb,
                 return RD_KAFKA_RESP_ERR__CRIT_SYS_RESOURCE;
         }
 
-
-        cctx = ZSTD_createCStream();
+        cctx = rd_kafka_broker_get_zstd_cctx(rkb, comp_level);
         if (!cctx) {
                 rd_rkb_dbg(rkb, MSG, "ZSTDCOMPR",
                            "Unable to create ZSTD compression context");
@@ -152,25 +199,13 @@ rd_kafka_resp_err_t rd_kafka_zstd_compress(rd_kafka_broker_t *rkb,
 
 #if defined(WITH_ZSTD_STATIC) &&                                               \
     ZSTD_VERSION_NUMBER >= (1 * 100 * 100 + 2 * 100 + 1) /* v1.2.1 */
-        r = ZSTD_initCStream_srcSize(cctx, comp_level, len);
-#else
-        /* libzstd not linked statically (or zstd version < 1.2.1):
-         * decompression in consumer may be more costly due to
-         * decompressed size not included in header by librdkafka producer */
-        r = ZSTD_initCStream(cctx, comp_level);
+        /* Hint the source size for better frame headers */
+        ZSTD_CCtx_setPledgedSrcSize(cctx, len);
 #endif
-        if (ZSTD_isError(r)) {
-                rd_rkb_dbg(rkb, MSG, "ZSTDCOMPR",
-                           "Unable to begin ZSTD compression "
-                           "(out buffer is %" PRIusz " bytes): %s",
-                           out.size, ZSTD_getErrorName(r));
-                err = RD_KAFKA_RESP_ERR__BAD_COMPRESSION;
-                goto done;
-        }
 
         while ((in.size = rd_slice_reader(slice, &in.src))) {
                 in.pos = 0;
-                r      = ZSTD_compressStream(cctx, &out, &in);
+                r      = ZSTD_compressStream2(cctx, &out, &in, ZSTD_e_continue);
                 if (unlikely(ZSTD_isError(r))) {
                         rd_rkb_dbg(rkb, MSG, "ZSTDCOMPR",
                                    "ZSTD compression failed "
@@ -202,7 +237,11 @@ rd_kafka_resp_err_t rd_kafka_zstd_compress(rd_kafka_broker_t *rkb,
                 goto done;
         }
 
-        r = ZSTD_endStream(cctx, &out);
+        /* Flush and close frame (ZSTD_e_end equivalent of old endStream) */
+        in.src  = NULL;
+        in.size = 0;
+        in.pos  = 0;
+        r = ZSTD_compressStream2(cctx, &out, &in, ZSTD_e_end);
         if (unlikely(ZSTD_isError(r) || r > 0)) {
                 rd_rkb_dbg(rkb, MSG, "ZSTDCOMPR",
                            "Failed to finalize ZSTD compression "
@@ -216,8 +255,7 @@ rd_kafka_resp_err_t rd_kafka_zstd_compress(rd_kafka_broker_t *rkb,
         *outlenp = out.pos;
 
 done:
-        if (cctx)
-                ZSTD_freeCStream(cctx);
+        /* Context is NOT freed — it's pooled on the broker for reuse */
 
         if (err)
                 rd_free(out.dst);

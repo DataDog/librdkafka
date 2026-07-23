@@ -54,4 +54,10 @@ rd_kafka_resp_err_t rd_kafka_zstd_compress(rd_kafka_broker_t *rkb,
                                            void **outbuf,
                                            size_t *outlenp);
 
+/**
+ * @brief Free the broker's pooled ZSTD compression context.
+ *        Called from rd_kafka_broker_destroy_final().
+ */
+void rd_kafka_zstd_broker_term(rd_kafka_broker_t *rkb);
+
 #endif /* _RDZSTD_H_ */
