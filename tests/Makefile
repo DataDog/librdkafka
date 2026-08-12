@@ -3,6 +3,7 @@ TESTSRCS_CXX= $(wildcard [08]*-*.cpp)
 OBJS	  = $(TESTSRCS_C:%.c=%.o) $(TESTSRCS_CXX:%.cpp=%.o)
 
 BIN	  = test-runner
+ZSTD_BENCH_BIN = zstd_context_benchmark
 LIBS	 += -lrdkafka++ -lrdkafka
 OBJS	 += test.o rusage.o testcpp.o \
 		tinycthread.o tinycthread_extra.o rdlist.o sockem.o \
@@ -103,6 +104,18 @@ delete_topics:
 
 build: $(BIN) interceptor_test
 
+ifeq ($(WITH_ZSTD),y)
+$(ZSTD_BENCH_BIN): ../src/librdkafka.a $(ZSTD_BENCH_BIN).c
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(ZSTD_BENCH_BIN).c -o $@ $(LDFLAGS) \
+		-Wl,--wrap=ZSTD_createCStream \
+		-Wl,--wrap=ZSTD_freeCStream \
+		../src/librdkafka.a $(LIBS)
+else
+$(ZSTD_BENCH_BIN):
+	@echo "zstd support is required to build $(ZSTD_BENCH_BIN)" >&2
+	@false
+endif
+
 test.o: ../src/librdkafka.a ../src-cpp/librdkafka++.a interceptor_test
 
 
@@ -128,7 +141,7 @@ rdlist.o: ../src/rdlist.c
 
 
 clean:
-	rm -f *.test $(OBJS) $(BIN)
+	rm -f *.test $(OBJS) $(BIN) $(ZSTD_BENCH_BIN)
 	$(MAKE) -C interceptor_test clean
 
 # Remove test reports, temporary test files, crash dumps, etc.
