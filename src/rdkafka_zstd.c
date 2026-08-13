@@ -117,6 +117,14 @@ rd_kafka_resp_err_t rd_kafka_zstd_decompress(rd_kafka_broker_t *rkb,
 }
 
 
+void rd_kafka_zstd_broker_term(rd_kafka_broker_t *rkb) {
+        if (rkb->rkb_zstd_cctx) {
+                ZSTD_freeCStream((ZSTD_CStream *)rkb->rkb_zstd_cctx);
+                rkb->rkb_zstd_cctx = NULL;
+        }
+}
+
+
 rd_kafka_resp_err_t rd_kafka_zstd_compress(rd_kafka_broker_t *rkb,
                                            int comp_level,
                                            rd_slice_t *slice,
@@ -126,6 +134,7 @@ rd_kafka_resp_err_t rd_kafka_zstd_compress(rd_kafka_broker_t *rkb,
         size_t r;
         rd_kafka_resp_err_t err = RD_KAFKA_RESP_ERR_NO_ERROR;
         size_t len              = rd_slice_remains(slice);
+        rd_bool_t use_pooled_cctx = thrd_is_current(rkb->rkb_thread);
         ZSTD_outBuffer out;
         ZSTD_inBuffer in;
 
@@ -142,7 +151,19 @@ rd_kafka_resp_err_t rd_kafka_zstd_compress(rd_kafka_broker_t *rkb,
         }
 
 
-        cctx = ZSTD_createCStream();
+        /* Reuse the broker's cached ZSTD_CStream when called from the
+         * broker I/O thread (the hot producer path).  Off-thread callers
+         * (e.g. telemetry) create and free their own context. */
+        if (use_pooled_cctx) {
+                cctx = (ZSTD_CStream *)rkb->rkb_zstd_cctx;
+                if (!cctx) {
+                        cctx = ZSTD_createCStream();
+                        if (cctx)
+                                rkb->rkb_zstd_cctx = cctx;
+                }
+        } else {
+                cctx = ZSTD_createCStream();
+        }
         if (!cctx) {
                 rd_rkb_dbg(rkb, MSG, "ZSTDCOMPR",
                            "Unable to create ZSTD compression context");
@@ -216,8 +237,16 @@ rd_kafka_resp_err_t rd_kafka_zstd_compress(rd_kafka_broker_t *rkb,
         *outlenp = out.pos;
 
 done:
-        if (cctx)
+        if (cctx && use_pooled_cctx) {
+                /* Evict the cached context on any error — it may be in
+                 * an undefined state after a compression failure. */
+                if (err) {
+                        ZSTD_freeCStream(cctx);
+                        rkb->rkb_zstd_cctx = NULL;
+                }
+        } else if (cctx) {
                 ZSTD_freeCStream(cctx);
+        }
 
         if (err)
                 rd_free(out.dst);
