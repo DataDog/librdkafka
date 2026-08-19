@@ -43,6 +43,10 @@ rd_kafka_resp_err_t rd_kafka_zstd_decompress(rd_kafka_broker_t *rkb,
                                              void **outbuf,
                                              size_t *outlenp) {
         unsigned long long out_bufsize = ZSTD_getFrameContentSize(inbuf, inlen);
+        ZSTD_DCtx *dctx;
+        rd_bool_t use_pooled_dctx = thrd_is_current(rkb->rkb_thread);
+        rd_bool_t evict_dctx      = rd_false;
+        rd_kafka_resp_err_t err;
 
         switch (out_bufsize) {
         case ZSTD_CONTENTSIZE_UNKNOWN:
@@ -60,6 +64,22 @@ rd_kafka_resp_err_t rd_kafka_zstd_decompress(rd_kafka_broker_t *rkb,
                 break;
         }
 
+        if (use_pooled_dctx) {
+                dctx = (ZSTD_DCtx *)rkb->rkb_zstd_dctx;
+                if (!dctx) {
+                        dctx = ZSTD_createDCtx();
+                        if (dctx)
+                                rkb->rkb_zstd_dctx = dctx;
+                }
+        } else {
+                dctx = ZSTD_createDCtx();
+        }
+        if (!dctx) {
+                rd_rkb_dbg(rkb, MSG, "ZSTD",
+                           "Unable to create ZSTD decompression context");
+                return RD_KAFKA_RESP_ERR__CRIT_SYS_RESOURCE;
+        }
+
         /* Increase output buffer until it can fit the entire result,
          * capped by message.max.bytes */
         while (out_bufsize <=
@@ -74,16 +94,18 @@ rd_kafka_resp_err_t rd_kafka_zstd_decompress(rd_kafka_broker_t *rkb,
                                    "(%llu bytes for %" PRIusz
                                    " compressed bytes): %s",
                                    out_bufsize, inlen, rd_strerror(errno));
-                        return RD_KAFKA_RESP_ERR__CRIT_SYS_RESOURCE;
+                        err = RD_KAFKA_RESP_ERR__CRIT_SYS_RESOURCE;
+                        goto done;
                 }
 
 
-                ret = ZSTD_decompress(decompressed, (size_t)out_bufsize, inbuf,
-                                      inlen);
+                ret = ZSTD_decompressDCtx(dctx, decompressed,
+                                          (size_t)out_bufsize, inbuf, inlen);
                 if (!ZSTD_isError(ret)) {
                         *outlenp = ret;
                         *outbuf  = decompressed;
-                        return RD_KAFKA_RESP_ERR_NO_ERROR;
+                        err      = RD_KAFKA_RESP_ERR_NO_ERROR;
+                        goto done;
                 }
 
                 rd_free(decompressed);
@@ -102,7 +124,9 @@ rd_kafka_resp_err_t rd_kafka_zstd_decompress(rd_kafka_broker_t *rkb,
                                    "Unable to begin ZSTD decompression "
                                    "(out buffer is %llu bytes): %s",
                                    out_bufsize, ZSTD_getErrorName(ret));
-                        return RD_KAFKA_RESP_ERR__BAD_COMPRESSION;
+                        evict_dctx = rd_true;
+                        err        = RD_KAFKA_RESP_ERR__BAD_COMPRESSION;
+                        goto done;
                 }
         }
 
@@ -113,7 +137,19 @@ rd_kafka_resp_err_t rd_kafka_zstd_decompress(rd_kafka_broker_t *rkb,
                    "output would exceed message.max.bytes (%d)",
                    inlen, out_bufsize, rkb->rkb_rk->rk_conf.max_msg_size);
 
-        return RD_KAFKA_RESP_ERR__BAD_COMPRESSION;
+        err = RD_KAFKA_RESP_ERR__BAD_COMPRESSION;
+
+done:
+        if (use_pooled_dctx) {
+                if (evict_dctx) {
+                        ZSTD_freeDCtx(dctx);
+                        rkb->rkb_zstd_dctx = NULL;
+                }
+        } else {
+                ZSTD_freeDCtx(dctx);
+        }
+
+        return err;
 }
 
 
@@ -121,6 +157,10 @@ void rd_kafka_zstd_broker_term(rd_kafka_broker_t *rkb) {
         if (rkb->rkb_zstd_cctx) {
                 ZSTD_freeCStream((ZSTD_CStream *)rkb->rkb_zstd_cctx);
                 rkb->rkb_zstd_cctx = NULL;
+        }
+        if (rkb->rkb_zstd_dctx) {
+                ZSTD_freeDCtx((ZSTD_DCtx *)rkb->rkb_zstd_dctx);
+                rkb->rkb_zstd_dctx = NULL;
         }
 }
 

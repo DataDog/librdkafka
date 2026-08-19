@@ -55,7 +55,7 @@ rd_kafka_resp_err_t rd_kafka_zstd_compress(rd_kafka_broker_t *rkb,
                                            size_t *outlenp);
 
 /**
- * @brief Free the broker's cached ZSTD compression context.
+ * @brief Free the broker's cached ZSTD compression and decompression contexts.
  */
 void rd_kafka_zstd_broker_term(rd_kafka_broker_t *rkb);
 

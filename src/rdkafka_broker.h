@@ -409,6 +409,8 @@ struct rd_kafka_broker_s { /* rd_kafka_broker_t */
         /** Pooled ZSTD compression context for the broker I/O thread.
          *  Lazily created on first use, freed in broker destroy. */
         void *rkb_zstd_cctx;
+        /** Pooled ZSTD decompression context for the broker I/O thread. */
+        void *rkb_zstd_dctx;
 };
 
 #define rd_kafka_broker_keep(rkb) rd_refcnt_add(&(rkb)->rkb_refcnt)
