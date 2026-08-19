@@ -43,6 +43,10 @@ rd_kafka_resp_err_t rd_kafka_zstd_decompress(rd_kafka_broker_t *rkb,
                                              void **outbuf,
                                              size_t *outlenp) {
         unsigned long long out_bufsize = ZSTD_getFrameContentSize(inbuf, inlen);
+        ZSTD_DCtx *dctx;
+        rd_bool_t use_pooled_dctx = thrd_is_current(rkb->rkb_thread);
+        rd_bool_t evict_dctx      = rd_false;
+        rd_kafka_resp_err_t err;
 
         switch (out_bufsize) {
         case ZSTD_CONTENTSIZE_UNKNOWN:
@@ -60,6 +64,22 @@ rd_kafka_resp_err_t rd_kafka_zstd_decompress(rd_kafka_broker_t *rkb,
                 break;
         }
 
+        if (use_pooled_dctx) {
+                dctx = (ZSTD_DCtx *)rkb->rkb_zstd_dctx;
+                if (!dctx) {
+                        dctx = ZSTD_createDCtx();
+                        if (dctx)
+                                rkb->rkb_zstd_dctx = dctx;
+                }
+        } else {
+                dctx = ZSTD_createDCtx();
+        }
+        if (!dctx) {
+                rd_rkb_dbg(rkb, MSG, "ZSTD",
+                           "Unable to create ZSTD decompression context");
+                return RD_KAFKA_RESP_ERR__CRIT_SYS_RESOURCE;
+        }
+
         /* Increase output buffer until it can fit the entire result,
          * capped by message.max.bytes */
         while (out_bufsize <=
@@ -74,16 +94,18 @@ rd_kafka_resp_err_t rd_kafka_zstd_decompress(rd_kafka_broker_t *rkb,
                                    "(%llu bytes for %" PRIusz
                                    " compressed bytes): %s",
                                    out_bufsize, inlen, rd_strerror(errno));
-                        return RD_KAFKA_RESP_ERR__CRIT_SYS_RESOURCE;
+                        err = RD_KAFKA_RESP_ERR__CRIT_SYS_RESOURCE;
+                        goto done;
                 }
 
 
-                ret = ZSTD_decompress(decompressed, (size_t)out_bufsize, inbuf,
-                                      inlen);
+                ret = ZSTD_decompressDCtx(dctx, decompressed,
+                                          (size_t)out_bufsize, inbuf, inlen);
                 if (!ZSTD_isError(ret)) {
                         *outlenp = ret;
                         *outbuf  = decompressed;
-                        return RD_KAFKA_RESP_ERR_NO_ERROR;
+                        err      = RD_KAFKA_RESP_ERR_NO_ERROR;
+                        goto done;
                 }
 
                 rd_free(decompressed);
@@ -102,7 +124,9 @@ rd_kafka_resp_err_t rd_kafka_zstd_decompress(rd_kafka_broker_t *rkb,
                                    "Unable to begin ZSTD decompression "
                                    "(out buffer is %llu bytes): %s",
                                    out_bufsize, ZSTD_getErrorName(ret));
-                        return RD_KAFKA_RESP_ERR__BAD_COMPRESSION;
+                        evict_dctx = rd_true;
+                        err        = RD_KAFKA_RESP_ERR__BAD_COMPRESSION;
+                        goto done;
                 }
         }
 
@@ -113,7 +137,31 @@ rd_kafka_resp_err_t rd_kafka_zstd_decompress(rd_kafka_broker_t *rkb,
                    "output would exceed message.max.bytes (%d)",
                    inlen, out_bufsize, rkb->rkb_rk->rk_conf.max_msg_size);
 
-        return RD_KAFKA_RESP_ERR__BAD_COMPRESSION;
+        err = RD_KAFKA_RESP_ERR__BAD_COMPRESSION;
+
+done:
+        if (use_pooled_dctx) {
+                if (evict_dctx) {
+                        ZSTD_freeDCtx(dctx);
+                        rkb->rkb_zstd_dctx = NULL;
+                }
+        } else {
+                ZSTD_freeDCtx(dctx);
+        }
+
+        return err;
+}
+
+
+void rd_kafka_zstd_broker_term(rd_kafka_broker_t *rkb) {
+        if (rkb->rkb_zstd_cctx) {
+                ZSTD_freeCStream((ZSTD_CStream *)rkb->rkb_zstd_cctx);
+                rkb->rkb_zstd_cctx = NULL;
+        }
+        if (rkb->rkb_zstd_dctx) {
+                ZSTD_freeDCtx((ZSTD_DCtx *)rkb->rkb_zstd_dctx);
+                rkb->rkb_zstd_dctx = NULL;
+        }
 }
 
 
@@ -126,6 +174,7 @@ rd_kafka_resp_err_t rd_kafka_zstd_compress(rd_kafka_broker_t *rkb,
         size_t r;
         rd_kafka_resp_err_t err = RD_KAFKA_RESP_ERR_NO_ERROR;
         size_t len              = rd_slice_remains(slice);
+        rd_bool_t use_pooled_cctx = thrd_is_current(rkb->rkb_thread);
         ZSTD_outBuffer out;
         ZSTD_inBuffer in;
 
@@ -142,7 +191,19 @@ rd_kafka_resp_err_t rd_kafka_zstd_compress(rd_kafka_broker_t *rkb,
         }
 
 
-        cctx = ZSTD_createCStream();
+        /* Reuse the broker's cached ZSTD_CStream when called from the
+         * broker I/O thread (the hot producer path).  Off-thread callers
+         * (e.g. telemetry) create and free their own context. */
+        if (use_pooled_cctx) {
+                cctx = (ZSTD_CStream *)rkb->rkb_zstd_cctx;
+                if (!cctx) {
+                        cctx = ZSTD_createCStream();
+                        if (cctx)
+                                rkb->rkb_zstd_cctx = cctx;
+                }
+        } else {
+                cctx = ZSTD_createCStream();
+        }
         if (!cctx) {
                 rd_rkb_dbg(rkb, MSG, "ZSTDCOMPR",
                            "Unable to create ZSTD compression context");
@@ -154,10 +215,18 @@ rd_kafka_resp_err_t rd_kafka_zstd_compress(rd_kafka_broker_t *rkb,
     ZSTD_VERSION_NUMBER >= (1 * 100 * 100 + 2 * 100 + 1) /* v1.2.1 */
         r = ZSTD_initCStream_srcSize(cctx, comp_level, len);
 #else
-        /* libzstd not linked statically (or zstd version < 1.2.1):
-         * decompression in consumer may be more costly due to
-         * decompressed size not included in header by librdkafka producer */
         r = ZSTD_initCStream(cctx, comp_level);
+#if ZSTD_VERSION_NUMBER >= (1 * 100 * 100 + 4 * 100) /* v1.4.0 */
+        /* Include the uncompressed batch size in dynamically linked zstd
+         * frames.  Besides allowing consumers to allocate the exact output
+         * size, zstd uses this value when selecting compression parameters. */
+        if (!ZSTD_isError(r))
+                r = ZSTD_CCtx_setPledgedSrcSize(cctx, len);
+#else
+        /* zstd < 1.4.0 has no stable public pledged-size setter for
+         * dynamically linked builds.  The resulting frame omits the
+         * decompressed size, which may make consumer decompression costlier. */
+#endif
 #endif
         if (ZSTD_isError(r)) {
                 rd_rkb_dbg(rkb, MSG, "ZSTDCOMPR",
@@ -216,8 +285,16 @@ rd_kafka_resp_err_t rd_kafka_zstd_compress(rd_kafka_broker_t *rkb,
         *outlenp = out.pos;
 
 done:
-        if (cctx)
+        if (cctx && use_pooled_cctx) {
+                /* Evict the cached context on any error — it may be in
+                 * an undefined state after a compression failure. */
+                if (err) {
+                        ZSTD_freeCStream(cctx);
+                        rkb->rkb_zstd_cctx = NULL;
+                }
+        } else if (cctx) {
                 ZSTD_freeCStream(cctx);
+        }
 
         if (err)
                 rd_free(out.dst);
