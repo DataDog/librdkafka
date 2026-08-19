@@ -175,10 +175,18 @@ rd_kafka_resp_err_t rd_kafka_zstd_compress(rd_kafka_broker_t *rkb,
     ZSTD_VERSION_NUMBER >= (1 * 100 * 100 + 2 * 100 + 1) /* v1.2.1 */
         r = ZSTD_initCStream_srcSize(cctx, comp_level, len);
 #else
-        /* libzstd not linked statically (or zstd version < 1.2.1):
-         * decompression in consumer may be more costly due to
-         * decompressed size not included in header by librdkafka producer */
         r = ZSTD_initCStream(cctx, comp_level);
+#if ZSTD_VERSION_NUMBER >= (1 * 100 * 100 + 4 * 100) /* v1.4.0 */
+        /* Include the uncompressed batch size in dynamically linked zstd
+         * frames.  Besides allowing consumers to allocate the exact output
+         * size, zstd uses this value when selecting compression parameters. */
+        if (!ZSTD_isError(r))
+                r = ZSTD_CCtx_setPledgedSrcSize(cctx, len);
+#else
+        /* zstd < 1.4.0 has no stable public pledged-size setter for
+         * dynamically linked builds.  The resulting frame omits the
+         * decompressed size, which may make consumer decompression costlier. */
+#endif
 #endif
         if (ZSTD_isError(r)) {
                 rd_rkb_dbg(rkb, MSG, "ZSTDCOMPR",
