@@ -937,6 +937,8 @@ static void rd_kafka_toppar_handle_OffsetForLeaderEpoch(rd_kafka_t *rk,
         rd_kafka_topic_partition_t *rktpar;
         int64_t end_offset;
         int32_t end_offset_leader_epoch;
+        rd_bool_t refresh_metadata = rd_false;
+        rd_bool_t retry_validation = rd_false;
         rd_kafka_toppar_lock(rktp);
         rktp->rktp_flags &= ~RD_KAFKA_TOPPAR_F_VALIDATING;
         rd_kafka_toppar_unlock(rktp);
@@ -1002,19 +1004,9 @@ static void rd_kafka_toppar_handle_OffsetForLeaderEpoch(rd_kafka_t *rk,
 
 
                 if (actions & RD_KAFKA_ERR_ACTION_REFRESH)
-                        /* Metadata refresh is ongoing, so force it */
-                        rd_kafka_topic_leader_query0(rk, rktp->rktp_rkt, 1,
-                                                     rd_true /* force */);
+                        refresh_metadata = rd_true;
 
-                /* No need for refcnt on rktp for timer opaque
-                 * since the timer resides on the rktp and will be
-                 * stopped on toppar remove.
-                 * Retries the validation with a new call even in
-                 * case of permanent error. */
-                rd_kafka_timer_start_oneshot(
-                    &rk->rk_timers, &rktp->rktp_validate_tmr, rd_false,
-                    500 * 1000 /* 500ms */, rd_kafka_offset_validate_tmr_cb,
-                    rktp);
+                retry_validation = rd_true;
                 goto done;
         }
 
@@ -1088,6 +1080,24 @@ static void rd_kafka_toppar_handle_OffsetForLeaderEpoch(rd_kafka_t *rk,
 
 done:
         rd_kafka_toppar_unlock(rktp);
+
+        /* Broker teardown may acquire rk_lock before rktp_lock, so metadata
+         * refresh must not take rk_lock while this partition is locked. */
+        if (refresh_metadata)
+                rd_kafka_topic_leader_query0(rk, rktp->rktp_rkt, 1,
+                                             rd_true /* force */);
+
+        if (retry_validation) {
+                /* No need for refcnt on rktp for timer opaque
+                 * since the timer resides on the rktp and will be
+                 * stopped on toppar remove.
+                 * Retries the validation with a new call even in
+                 * case of permanent error. */
+                rd_kafka_timer_start_oneshot(
+                    &rk->rk_timers, &rktp->rktp_validate_tmr, rd_false,
+                    500 * 1000 /* 500ms */, rd_kafka_offset_validate_tmr_cb,
+                    rktp);
+        }
 
         if (parts)
                 rd_kafka_topic_partition_list_destroy(parts);
