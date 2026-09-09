@@ -28,6 +28,7 @@
 
 #include "test.h"
 
+#include "../src/rdkafka_int.h"
 #include "../src/rdkafka_proto.h"
 
 
@@ -37,6 +38,22 @@ struct _produce_args {
         rd_kafka_conf_t *conf;
 };
 static const char *produce_engine_name = "v1";
+
+struct offset_validation_lock_order_state {
+        mtx_t lock;
+        cnd_t cnd;
+        rd_bool_t response_handler_waiting;
+        rd_bool_t release_response_handler;
+        rd_bool_t response_handler_timed_out;
+};
+
+static struct offset_validation_lock_order_state
+    *active_offset_validation_lock_order_state;
+
+static void offset_validation_lock_order_log_cb(const rd_kafka_t *rk,
+                                                int level,
+                                                const char *fac,
+                                                const char *buf);
 
 static int produce_concurrent_thread(void *args) {
         rd_kafka_t *p1;
@@ -129,7 +146,8 @@ static void do_test_no_duplicates_during_offset_validation(void) {
          * and exactly one post-initial message. */
         abs_timeout = test_clock() + (30 * 1000 * 1000);
         while ((!saw_eof || post_msg_count < 1) && test_clock() < abs_timeout) {
-                rd_kafka_message_t *rkmessage = rd_kafka_consumer_poll(c1, 1000);
+                rd_kafka_message_t *rkmessage =
+                    rd_kafka_consumer_poll(c1, 1000);
                 if (!rkmessage)
                         continue;
 
@@ -149,9 +167,10 @@ static void do_test_no_duplicates_during_offset_validation(void) {
                 rd_kafka_message_destroy(rkmessage);
         }
         TEST_ASSERT(saw_eof, "Expected EOF after initial messages");
-        TEST_ASSERT(post_msg_count == 1,
-                    "Expected one concurrent message after initial batch, got %d",
-                    post_msg_count);
+        TEST_ASSERT(
+            post_msg_count == 1,
+            "Expected one concurrent message after initial batch, got %d",
+            post_msg_count);
 
         /* Only an EOF, not a duplicate message */
         test_consumer_poll("MSG_EOF2", c1, testid, 1, initial_msg_count, 0,
@@ -239,6 +258,165 @@ static void do_test_permanent_error_retried(rd_kafka_resp_err_t err) {
 
         TEST_LATER_CHECK();
         SUB_TEST_PASS();
+}
+
+
+/**
+ * @brief Verify metadata refresh releases the partition lock before taking
+ *        the global handle lock.
+ */
+static void do_test_metadata_refresh_lock_order(void) {
+        const char *topic      = test_mk_topic_name(__FUNCTION__, 1);
+        const char *c1_groupid = topic;
+        const char *bootstraps;
+        const char *debug_contexts[] = {"fetch", NULL};
+        rd_kafka_mock_cluster_t *mcluster;
+        rd_kafka_conf_t *conf;
+        rd_kafka_t *c1;
+        rd_kafka_topic_partition_list_t *assignment;
+        rd_kafka_topic_partition_t *assigned_partition;
+        rd_kafka_toppar_t *rktp;
+        test_conf_log_interceptor_t *log_interceptor;
+        struct offset_validation_lock_order_state state = RD_ZERO_INIT;
+        uint64_t testid                                 = test_id_generate();
+        rd_ts_t lock_timeout;
+        int wait_result = thrd_success;
+        int lock_result = thrd_busy;
+        rd_bool_t response_handler_waiting;
+        rd_bool_t response_handler_timed_out;
+        rd_bool_t partition_unlocked = rd_false;
+
+        SUB_TEST_QUICK();
+
+        TEST_ASSERT(mtx_init(&state.lock, mtx_plain) == thrd_success,
+                    "Failed to initialize lock-order mutex");
+        TEST_ASSERT(cnd_init(&state.cnd) == thrd_success,
+                    "Failed to initialize lock-order condition");
+        mcluster = test_mock_cluster_new(2, &bootstraps);
+        rd_kafka_mock_topic_create(mcluster, topic, 1, 2);
+        rd_kafka_mock_partition_set_leader(mcluster, topic, 0, 1);
+
+        test_produce_msgs_easy_v(topic, testid, 0, 0, 5, 10,
+                                 "bootstrap.servers", bootstraps,
+                                 "batch.num.messages", "1", NULL);
+
+        test_conf_init(&conf, NULL, 60);
+        test_conf_set(conf, "bootstrap.servers", bootstraps);
+        test_conf_set(conf, "auto.offset.reset", "earliest");
+        test_conf_set(conf, "fetch.error.backoff.ms", "10");
+        test_conf_set(conf, "fetch.wait.max.ms", "10");
+        test_conf_set(conf, "topic.metadata.refresh.interval.ms", "60000");
+        log_interceptor = test_conf_set_log_interceptor(
+            conf, offset_validation_lock_order_log_cb, debug_contexts);
+
+        active_offset_validation_lock_order_state = &state;
+        c1 = test_create_consumer(c1_groupid, NULL, conf, NULL);
+        test_consumer_subscribe(c1, topic);
+        test_consumer_poll("MSG_INIT", c1, testid, 0, 0, 5, NULL);
+
+        TEST_CALL_ERR__(rd_kafka_assignment(c1, &assignment));
+        assigned_partition =
+            rd_kafka_topic_partition_list_find(assignment, topic, 0);
+        TEST_ASSERT(assigned_partition != NULL,
+                    "Partition %s [0] is not assigned", topic);
+        rktp = rd_kafka_topic_partition_toppar(c1, assigned_partition);
+        TEST_ASSERT(rktp != NULL, "Failed to resolve partition %s [0]", topic);
+
+        TEST_CALL_ERR__(rd_kafka_mock_broker_push_request_error_rtts(
+            mcluster, 2, RD_KAFKAP_OffsetForLeaderEpoch, 1,
+            RD_KAFKA_RESP_ERR_KAFKA_STORAGE_ERROR, 0));
+        rd_kafka_mock_partition_set_leader(mcluster, topic, 0, 2);
+
+        mtx_lock(&state.lock);
+        while (!state.response_handler_waiting && wait_result == thrd_success)
+                wait_result = cnd_timedwait_ms(&state.cnd, &state.lock,
+                                               tmout_multip(15000));
+        response_handler_waiting = state.response_handler_waiting;
+        mtx_unlock(&state.lock);
+
+        if (response_handler_waiting)
+                rd_kafka_rdlock(c1);
+
+        mtx_lock(&state.lock);
+        state.release_response_handler = rd_true;
+        cnd_broadcast(&state.cnd);
+        mtx_unlock(&state.lock);
+
+        if (response_handler_waiting) {
+                lock_timeout = test_clock() + tmout_multip(3000) * 1000;
+                do {
+                        lock_result = mtx_trylock(&rktp->rktp_lock);
+                        if (lock_result == thrd_success) {
+                                partition_unlocked = rd_true;
+                                mtx_unlock(&rktp->rktp_lock);
+                                break;
+                        }
+                        if (lock_result != thrd_busy)
+                                break;
+                        rd_usleep(10 * 1000, 0);
+                } while (test_clock() < lock_timeout);
+
+                rd_kafka_rdunlock(c1);
+        }
+
+        test_consumer_close(c1);
+        rd_kafka_topic_partition_list_destroy(assignment);
+        rd_kafka_destroy(c1);
+        active_offset_validation_lock_order_state = NULL;
+        response_handler_timed_out = state.response_handler_timed_out;
+        rd_free(log_interceptor);
+        test_mock_cluster_destroy(mcluster);
+        cnd_destroy(&state.cnd);
+        mtx_destroy(&state.lock);
+
+        TEST_ASSERT_LATER(response_handler_waiting,
+                          "OffsetForLeaderEpoch error handler was not reached");
+        TEST_ASSERT_LATER(!response_handler_timed_out,
+                          "Timed out waiting to release the response handler");
+        TEST_ASSERT_LATER(
+            partition_unlocked,
+            "Partition lock remained held while metadata refresh waited for "
+            "the global lock (trylock result %d)",
+            lock_result);
+        TEST_LATER_CHECK();
+        SUB_TEST_PASS();
+}
+
+
+static void offset_validation_lock_order_log_cb(const rd_kafka_t *rk,
+                                                int level,
+                                                const char *fac,
+                                                const char *buf) {
+        struct offset_validation_lock_order_state *state =
+            active_offset_validation_lock_order_state;
+        int wait_result = thrd_success;
+
+        (void)rk;
+        (void)level;
+
+        if (!state)
+                return;
+
+        if (!strcmp(fac, "OFFSETVALID") &&
+            strstr(buf,
+                   "OffsetForLeaderEpoch requested failed: Broker: Disk "
+                   "error when trying to access log file on disk")) {
+                mtx_lock(&state->lock);
+                if (!state->response_handler_waiting) {
+                        state->response_handler_waiting = rd_true;
+                        cnd_broadcast(&state->cnd);
+                        while (!state->release_response_handler &&
+                               wait_result == thrd_success)
+                                wait_result =
+                                    cnd_timedwait_ms(&state->cnd, &state->lock,
+                                                     tmout_multip(20000));
+                        if (!state->release_response_handler) {
+                                state->response_handler_timed_out = rd_true;
+                                cnd_broadcast(&state->cnd);
+                        }
+                }
+                mtx_unlock(&state->lock);
+        }
 }
 
 
@@ -965,9 +1143,12 @@ int main_0139_offset_validation_mock(int argc, char **argv) {
 
         TEST_SKIP_MOCK_CLUSTER(0);
 
+        do_test_metadata_refresh_lock_order();
+
         for (i = 0; i < RD_ARRAYSIZE(engine_names); i++) {
-                TEST_SAY("Running offset_validation_mock with produce.engine=%s\n",
-                         engine_names[i]);
+                TEST_SAY(
+                    "Running offset_validation_mock with produce.engine=%s\n",
+                    engine_names[i]);
                 produce_engine_name = engine_names[i];
 
                 do_test_no_duplicates_during_offset_validation();
