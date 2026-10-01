@@ -432,6 +432,9 @@ extern int unittest_sasl_oauthbearer_oidc(void);
 #endif
 extern int unittest_telemetry(void);
 extern int unittest_telemetry_decode(void);
+#if WITH_ZSTD
+extern int unittest_zstd(void);
+#endif
 
 int rd_unittest(void) {
         int fails = 0;
@@ -476,6 +479,9 @@ int rd_unittest(void) {
 #endif
             {"telemetry", unittest_telemetry},
             {"telemetry_decode", unittest_telemetry_decode},
+#if WITH_ZSTD
+            {"zstd", unittest_zstd},
+#endif
             {NULL}};
         int i;
         const char *match = rd_getenv("RD_UT_TEST", NULL);

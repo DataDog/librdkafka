@@ -58,6 +58,9 @@
 #include "rdkafka_idempotence.h"
 #include "rdkafka_sasl_oauthbearer.h"
 #include "rdkafka_stats.h"
+#if WITH_ZSTD
+#include "rdkafka_zstd.h"
+#endif
 
 #if WITH_OAUTHBEARER_OIDC
 #include "rdkafka_sasl_oauthbearer_oidc.h"
@@ -1048,6 +1051,10 @@ void rd_kafka_destroy_final(rd_kafka_t *rk) {
         cnd_destroy(&rk->rk_init_cnd);
         mtx_destroy(&rk->rk_init_lock);
 
+#if WITH_ZSTD
+        rd_kafka_zstd_pool_destroy(&rk->rk_zstd_pool);
+#endif
+
 
         rd_kafkap_str_destroy(rk->rk_client_id);
         rd_kafkap_str_destroy(rk->rk_group_id);
@@ -1736,6 +1743,7 @@ static void rd_kafka_stats_emit_all(rd_kafka_t *rk) {
         rd_bool_t need_json;
         rd_bool_t need_typed;
         rd_kafka_stats_t *typed_stats = NULL;
+        rd_kafka_zstd_ctx_stats_t zstd_cctx, zstd_dctx;
 
         /* Determine what stats formats are needed.
          * - JSON: if JSON callback is set OR events include STATS
@@ -1748,11 +1756,25 @@ static void rd_kafka_stats_emit_all(rd_kafka_t *rk) {
         if (!need_json && !need_typed)
                 return;
 
+        /* One snapshot for both formats: it restarts the in_use_max
+         * interval. */
+#if WITH_ZSTD
+        rd_kafka_zstd_pool_stats(&rk->rk_zstd_pool, &zstd_cctx, &zstd_dctx);
+#else
+        memset(&zstd_cctx, 0, sizeof(zstd_cctx));
+        memset(&zstd_dctx, 0, sizeof(zstd_dctx));
+#endif
+
         /* Generate typed stats first (if needed) - has its own locking */
         if (need_typed) {
                 ts_typed_start = rd_clock();
                 typed_stats    = rd_kafka_stats_new(rk);
-                ts_typed_end   = rd_clock();
+                if (typed_stats) {
+                        typed_stats->zstd_ctx_pool_size = rk->rk_zstd_pool.max;
+                        typed_stats->zstd_cctx          = zstd_cctx;
+                        typed_stats->zstd_dctx          = zstd_dctx;
+                }
+                ts_typed_end = rd_clock();
         }
 
         /* Generate JSON stats (if needed) */
@@ -1791,13 +1813,27 @@ static void rd_kafka_stats_emit_all(rd_kafka_t *rk) {
             ", "
             "\"simple_cnt\":%i, "
             "\"metadata_cache_cnt\":%i, "
+            "\"zstd_ctx\":{ "
+            "\"pool_size\":%i, "
+            "\"compress\":{ \"created\":%" PRId64 ", \"reused\":%" PRId64
+            ", \"in_use\":%" PRId32 ", \"in_use_max\":%" PRId32
+            ", \"retained\":%" PRId32 ", \"retained_bytes\":%" PRId64
+            " }, "
+            "\"decompress\":{ \"created\":%" PRId64 ", \"reused\":%" PRId64
+            ", \"in_use\":%" PRId32 ", \"in_use_max\":%" PRId32
+            ", \"retained\":%" PRId32 ", \"retained_bytes\":%" PRId64
+            " } }, "
             "\"brokers\":{ " /*open brokers*/,
             rk->rk_name, rk->rk_conf.client_id_str,
             rd_kafka_type2str(rk->rk_type), now, (signed long long)time(NULL),
             now - rk->rk_ts_created, rd_kafka_q_len(rk->rk_rep), tot_cnt,
             tot_size, rk->rk_curr_msgs.max_cnt, rk->rk_curr_msgs.max_size,
-            rd_atomic32_get(&rk->rk_simple_cnt),
-            rk->rk_metadata_cache.rkmc_cnt);
+            rd_atomic32_get(&rk->rk_simple_cnt), rk->rk_metadata_cache.rkmc_cnt,
+            rk->rk_zstd_pool.max, zstd_cctx.created, zstd_cctx.reused,
+            zstd_cctx.in_use, zstd_cctx.in_use_max, zstd_cctx.retained,
+            zstd_cctx.retained_bytes, zstd_dctx.created, zstd_dctx.reused,
+            zstd_dctx.in_use, zstd_dctx.in_use_max, zstd_dctx.retained,
+            zstd_dctx.retained_bytes);
 
 
         TAILQ_FOREACH(rkb, &rk->rk_brokers, rkb_link) {
@@ -2444,6 +2480,12 @@ rd_kafka_t *rd_kafka_new(rd_kafka_type_t type,
 
         mtx_init(&rk->rk_telemetry.lock, mtx_plain);
         cnd_init(&rk->rk_telemetry.termination_cnd);
+
+#if WITH_ZSTD
+        rd_kafka_zstd_pool_init(
+            &rk->rk_zstd_pool,
+            rk->rk_conf.zstd_ctx_reuse ? rk->rk_conf.zstd_ctx_pool_size : 0);
+#endif
 
         rd_atomic64_init(&rk->rk_ts_last_poll, rk->rk_ts_created);
         rd_atomic32_init(&rk->rk_flushing, 0);

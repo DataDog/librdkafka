@@ -283,6 +283,38 @@ static RD_UNUSED const char *rd_kafka_type2str(rd_kafka_type_t type) {
 }
 
 /**
+ * @brief Per-kind (compression or decompression) state of a ZSTD context pool.
+ */
+typedef struct rd_kafka_zstd_pool_kind_s {
+        void **retained;  /**< Retained contexts [max], used as a stack. */
+        int retained_cnt; /**< Number of contexts in retained. */
+        int in_use;       /**< Contexts currently borrowed. */
+        int in_use_max;   /**< Max of in_use since the last stats snapshot. */
+        int64_t created;  /**< Borrows that had to create a context. */
+        int64_t reused;   /**< Borrows served by a retained context. */
+} rd_kafka_zstd_pool_kind_t;
+
+/**
+ * @brief ZSTD contexts shared by all threads of an rd_kafka_t,
+ *        see `compression.zstd.context.reuse`.
+ *
+ * Contexts are borrowed for the duration of a single (de)compression and
+ * returned afterwards, so a context is never used by two threads at once.
+ * Up to max returned contexts of each kind are retained for reuse, others
+ * are freed. With reuse disabled max is 0: nothing is retained, but borrows
+ * are still counted for statistics.
+ */
+typedef struct rd_kafka_zstd_pool_s {
+        mtx_t lock;
+        rd_bool_t enabled; /**< Initialized: lock is valid and borrows are
+                            *   counted. A zeroed pool (unit tests) creates
+                            *   and frees a context per use. */
+        int max;           /**< Contexts retained per kind, 0 = no reuse. */
+        rd_kafka_zstd_pool_kind_t cctx; /**< ZSTD_CStream */
+        rd_kafka_zstd_pool_kind_t dctx; /**< ZSTD_DCtx */
+} rd_kafka_zstd_pool_t;
+
+/**
  * Kafka handle, internal representation of the application's rd_kafka_t.
  */
 
@@ -761,6 +793,8 @@ struct rd_kafka_s {
                 } rd_avg_rollover;
 
         } rk_telemetry;
+
+        rd_kafka_zstd_pool_t rk_zstd_pool; /**< ZSTD contexts */
 
         /* Test mocks */
         struct {

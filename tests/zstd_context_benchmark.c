@@ -31,20 +31,19 @@
  *
  * The benchmark deliberately bypasses producer queueing and broker I/O so that
  * the measured interval contains only slice traversal, output allocation, and
- * zstd compression.  rkb_thread is set to the current thread to match the
- * producer hot path.
+ * zstd compression.  `--reuse 1` enables the client's ZSTD context pool
+ * (`compression.zstd.context.reuse=true`), `--reuse 0` creates and frees a
+ * context per compression, so both behaviors run from the same binary.
  *
  * The Makefile links with --wrap for ZSTD_createCStream() and
  * ZSTD_freeCStream(), providing exact context lifecycle counts without relying
  * on a particular allocator or zstd implementation.  This makes the expected
  * change easy to verify:
  *
- *   baseline:  context_creates == iterations, context_frees == iterations
- *   reuse:     context_creates == 0 after warmup, context_frees == 0
+ *   --reuse 0: context_creates == iterations, context_frees == iterations
+ *   --reuse 1: context_creates == 0 after warmup, context_frees == 0
  *
- * The candidate implementation frees the warmed context after the measured
- * interval.  Keep that teardown outside the timer so it does not affect the
- * throughput comparison.
+ * The pooled context is freed after the measured interval, outside the timer.
  *
  * Build:
  *   make -C tests zstd_context_benchmark
@@ -52,7 +51,7 @@
  * Example:
  *   taskset -c 2 ./tests/zstd_context_benchmark \
  *       --size 262144 --segment-size 4096 --iterations 10000 \
- *       --warmup 1000 --level 3 --pattern records
+ *       --warmup 1000 --level 3 --pattern records --reuse 1
  */
 
 #include "../src/rdkafka_int.h"
@@ -68,15 +67,6 @@
 #include <zstd.h>
 
 
-/* The baseline commit does not provide this function.  A weak reference lets
- * the exact same benchmark source run there, while the candidate can release
- * its cached context after the timed interval. */
-#if defined(__GNUC__) && !defined(_WIN32)
-extern void rd_kafka_zstd_broker_term(rd_kafka_broker_t *rkb)
-    __attribute__((weak));
-#endif
-
-
 typedef enum {
         PAYLOAD_ZEROS,
         PAYLOAD_RECORDS,
@@ -90,6 +80,7 @@ typedef struct {
         uint64_t warmup_iterations;
         int compression_level;
         payload_pattern_t pattern;
+        rd_bool_t reuse;
 } benchmark_config_t;
 
 typedef struct {
@@ -138,6 +129,8 @@ static void usage(const char *argv0) {
                 "(default: 3)\n"
                 "  --pattern NAME        zeros, records, or random "
                 "(default: records)\n"
+                "  --reuse 0|1           Reuse the zstd context "
+                "(default: 1)\n"
                 "  --help                Show this help\n",
                 argv0);
 }
@@ -214,6 +207,7 @@ static benchmark_config_t parse_args(int argc, char **argv) {
             .warmup_iterations = 1000,
             .compression_level = 3,
             .pattern           = PAYLOAD_RECORDS,
+            .reuse             = rd_true,
         };
         int i;
 
@@ -248,6 +242,9 @@ static benchmark_config_t parse_args(int argc, char **argv) {
                             parse_int(option, argv[++i], -131072, 22);
                 } else if (!strcmp(option, "--pattern")) {
                         config.pattern = parse_pattern(argv[++i]);
+                } else if (!strcmp(option, "--reuse")) {
+                        config.reuse =
+                            (rd_bool_t)parse_u64(option, argv[++i], 0, 1);
                 } else {
                         fprintf(stderr, "Unknown option: %s\n", option);
                         usage(argv[0]);
@@ -407,6 +404,7 @@ static void print_result(const benchmark_config_t *config,
                    config->segment_size);
         printf("pattern=%s\n", pattern_name(config->pattern));
         printf("compression_level=%d\n", config->compression_level);
+        printf("reuse=%d\n", (int)config->reuse);
         printf("warmup_iterations=%" PRIu64 "\n", config->warmup_iterations);
         printf("iterations=%" PRIu64 "\n", result->iterations);
         printf("elapsed_seconds=%.9f\n", result->elapsed_sec);
@@ -437,18 +435,14 @@ int main(int argc, char **argv) {
         fill_payload(payload, config.size, config.pattern);
         init_input(&input, payload, config.size, config.segment_size);
 
-        /* Match rd_kafka_msgset_writer_compress_zstd() locality. */
-        rkb.rkb_rk     = &rk;
-        rkb.rkb_thread = thrd_current();
+        rkb.rkb_rk = &rk;
+        rd_kafka_zstd_pool_init(&rk.rk_zstd_pool, config.reuse ? 1 : 0);
 
         (void)run_phase(&rkb, &input, &config, config.warmup_iterations,
                         rd_false);
         result = run_phase(&rkb, &input, &config, config.iterations, rd_true);
 
-#if defined(__GNUC__) && !defined(_WIN32)
-        if (rd_kafka_zstd_broker_term)
-                rd_kafka_zstd_broker_term(&rkb);
-#endif
+        rd_kafka_zstd_pool_destroy(&rk.rk_zstd_pool);
 
         print_result(&config, &result);
 
