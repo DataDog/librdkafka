@@ -263,6 +263,22 @@ typedef struct rd_kafka_eos_stats_s {
 } rd_kafka_eos_stats_t;
 
 /**
+ * @brief ZSTD compression or decompression context statistics,
+ *        see `compression.zstd.context.reuse`.
+ */
+typedef struct rd_kafka_zstd_ctx_stats_s {
+        int64_t created;        /**< Contexts created (cumulative) */
+        int64_t reused;         /**< Uses served by a retained context
+                                 *   (cumulative) */
+        int32_t in_use;         /**< Contexts in use now */
+        int32_t in_use_max;     /**< Max contexts in use at once since the
+                                 *   previous statistics */
+        int32_t retained;       /**< Contexts retained for reuse now */
+        int32_t _pad;
+        int64_t retained_bytes; /**< Memory held by retained contexts */
+} rd_kafka_zstd_ctx_stats_t;
+
+/**
  * @brief Top-level statistics structure.
  *
  * This is the main structure passed to the statistics callback.
@@ -327,6 +343,13 @@ typedef struct rd_kafka_stats_s {
         char fatal_reason[512];                       /**< Error reason string */
         int32_t fatal_cnt;                            /**< Fatal error count */
         int32_t _pad7;
+
+        /* ZSTD contexts (zeroed if built without ZSTD) */
+        int32_t zstd_ctx_pool_size; /**< Contexts retained per kind at most,
+                                     *   0 = reuse disabled */
+        int32_t _pad8;
+        rd_kafka_zstd_ctx_stats_t zstd_cctx; /**< Compression contexts */
+        rd_kafka_zstd_ctx_stats_t zstd_dctx; /**< Decompression contexts */
 } rd_kafka_stats_t;
 
 #endif /* _RDKAFKA_STATS_H_ */

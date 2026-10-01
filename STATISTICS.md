@@ -70,10 +70,35 @@ rxmsgs | int | | Total number of messages consumed, not including ignored messag
 rxmsg_bytes | int | | Total number of message bytes (including framing) received from Kafka brokers
 simple_cnt | int gauge | | Internal tracking of legacy vs new consumer API state
 metadata_cache_cnt | int gauge | | Number of topics in the metadata cache.
+zstd_ctx | object | | ZSTD compression and decompression contexts. See **zstd_ctx** below
 brokers | object | | Dict of brokers, key is broker name, value is object. See **brokers** below
 topics | object | | Dict of topics, key is topic name, value is object. See **topics** below
 cgrp | object | | Consumer group metrics. See **cgrp** below
 eos | object | | EOS / Idempotent producer state and metrics. See **eos** below
+
+## zstd_ctx
+
+ZSTD contexts of this client instance, see `compression.zstd.context.reuse`
+and `compression.zstd.context.pool.size`. The counters are maintained with
+reuse disabled too, so `in_use_max` shows how many contexts a pool would need
+before reuse is enabled. Empty (all zero) if librdkafka was built without ZSTD.
+
+Field | Type | Example | Description
+----- | ---- | ------- | -----------
+pool_size | int | 10 | Maximum number of contexts of each kind retained for reuse, 0 if reuse is disabled
+compress | object | | Compression contexts. See **zstd_ctx.compress** below
+decompress | object | | Decompression contexts, same fields as **zstd_ctx.compress**
+
+## zstd_ctx.compress
+
+Field | Type | Example | Description
+----- | ---- | ------- | -----------
+created | int | | Contexts created, i.e. (de)compressions not served by a retained context
+reused | int | | (De)compressions served by a retained context
+in_use | int gauge | | Contexts in use right now
+in_use_max | int gauge | | Maximum number of contexts in use at the same time since the previous statistics. If it exceeds `pool_size`, the excess contexts were created and freed per use
+retained | int gauge | | Contexts retained for reuse right now, at most `pool_size`
+retained_bytes | int gauge | | Memory held by the retained contexts (bytes). A compression context grows to fit the largest message set it has compressed
 
 ## brokers
 
@@ -248,6 +273,25 @@ Note: this output is prettified using `jq .`, the JSON object emitted by librdka
   "msg_size_max": 1073741824,
   "simple_cnt": 0,
   "metadata_cache_cnt": 1,
+  "zstd_ctx": {
+    "pool_size": 10,
+    "compress": {
+      "created": 4,
+      "reused": 15880,
+      "in_use": 1,
+      "in_use_max": 3,
+      "retained": 3,
+      "retained_bytes": 7843840
+    },
+    "decompress": {
+      "created": 0,
+      "reused": 0,
+      "in_use": 0,
+      "in_use_max": 0,
+      "retained": 0,
+      "retained_bytes": 0
+    }
+  },
   "brokers": {
     "localhost:9092/2": {
       "name": "localhost:9092/2",

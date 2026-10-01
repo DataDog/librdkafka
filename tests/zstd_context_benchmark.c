@@ -436,8 +436,7 @@ int main(int argc, char **argv) {
         init_input(&input, payload, config.size, config.segment_size);
 
         rkb.rkb_rk = &rk;
-        if (config.reuse)
-                rd_kafka_zstd_pool_init(&rk.rk_zstd_pool, 1);
+        rd_kafka_zstd_pool_init(&rk.rk_zstd_pool, config.reuse ? 1 : 0);
 
         (void)run_phase(&rkb, &input, &config, config.warmup_iterations,
                         rd_false);

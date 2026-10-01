@@ -17,6 +17,11 @@ librdkafka v2.10.7 is a DataDog fork release.
   beyond the cap are created and freed per message set, as they were before
   v2.10.5. Retained memory therefore depends on the pool size, not on the
   number of brokers.
+* New `zstd_ctx` statistics (JSON and typed): contexts created and reused,
+  in use now and at most since the previous statistics (`in_use_max`), and
+  retained for reuse, with the memory they hold. They are also maintained
+  with reuse disabled, where `in_use_max` shows how many contexts a pool
+  would need. See STATISTICS.md.
 
 ## Upgrade considerations
 
