@@ -1532,6 +1532,17 @@ static const struct rd_kafka_property rd_kafka_properties[] = {
      "Whether to enable pushing of client metrics to the cluster, if the "
      "cluster has a client metrics subscription which matches this client",
      0, 1, 1},
+    {_RK_GLOBAL, "compression.zstd.context.reuse", _RK_C_BOOL,
+     _RK(zstd_ctx_reuse),
+     "Reuse ZSTD compression and decompression contexts across message "
+     "sets instead of creating and freeing one per message set. "
+     "Reuse saves the per-batch context setup cost, at the expense of "
+     "keeping one compression and one decompression context allocated per "
+     "broker. A compression context's size depends on the message set size "
+     "and `compression.level`: at the default level it is about 2.5 MiB for "
+     "1 MiB message sets and 3.5 MiB for 4 MiB or larger message sets. "
+     "A decompression context is about 100 KiB.",
+     0, 1, 0},
     {_RK_GLOBAL | _RK_PRODUCER, "multibatch", _RK_C_BOOL,
      _RK(multibatch), "Batch produce requests across multiple partitions. V1", 0,
      1, 1},

@@ -1,9 +1,9 @@
 # Zstd context reuse microbenchmark
 
-`zstd_context_benchmark` measures the exact code path changed by broker-owned
-zstd context reuse. It calls `rd_kafka_zstd_compress()` repeatedly with the
-current thread marked as the broker I/O thread, while excluding producer
-queueing, socket I/O, delivery callbacks, and mock-cluster bookkeeping.
+`zstd_context_benchmark` measures the code path affected by
+`compression.zstd.context.reuse`. It calls `rd_kafka_zstd_compress()`
+repeatedly, while excluding producer queueing, socket I/O, delivery callbacks,
+and mock-cluster bookkeeping.
 
 The benchmark reports:
 
@@ -27,20 +27,14 @@ make -C tests zstd_context_benchmark
 The target requires zstd and GNU ld's `--wrap` support. It is intended for the
 Linux benchmark host and is not part of the normal test build.
 
-## Compare baseline and candidate
+## Compare reuse and no reuse
 
-The branch contains the benchmark commit immediately before the context-reuse
-commit, so two worktrees provide source-identical benchmark runs against both
-implementations:
-
-```sh
-git worktree add ../librdkafka-zstd-baseline HEAD^
-git worktree add ../librdkafka-zstd-candidate HEAD
-```
-
-Configure and build both worktrees with the commands above. Run one benchmark
-at a time, pin it to the same otherwise-idle physical CPU, and alternate the
-order of baseline and candidate runs to reduce temperature and frequency bias.
+`--reuse 1` (the default) reuses the ZSTD context across compressions, as
+with `compression.zstd.context.reuse=true`. `--reuse 0` creates and
+frees a context per compression, as with the default configuration. Both
+behaviors therefore run from the same binary. Run one benchmark at a time,
+pin it to the same otherwise-idle physical CPU, and alternate the order of
+`--reuse 0` and `--reuse 1` runs to reduce temperature and frequency bias.
 
 ```sh
 taskset -c 2 ./tests/zstd_context_benchmark \
@@ -49,12 +43,13 @@ taskset -c 2 ./tests/zstd_context_benchmark \
   --iterations 10000 \
   --warmup 1000 \
   --level 3 \
-  --pattern records
+  --pattern records \
+  --reuse 1
 ```
 
-For the primary case, the baseline should report one context create and free
-per measured iteration. The candidate should report zero creates and frees
-after warmup. The checksum and compression ratio must match.
+`--reuse 0` should report one context create and free per measured
+iteration. `--reuse 1` should report zero creates and frees after warmup.
+The checksum and compression ratio must match.
 
 For CPU counters, run the same command under `perf stat`:
 
@@ -63,7 +58,7 @@ perf stat -r 10 \
   -e task-clock,cycles,instructions,cache-references,cache-misses,page-faults \
   taskset -c 2 ./tests/zstd_context_benchmark \
     --size 262144 --segment-size 4096 --iterations 10000 \
-    --warmup 1000 --level 3 --pattern records
+    --warmup 1000 --level 3 --pattern records --reuse 1
 ```
 
 ## Suggested matrix

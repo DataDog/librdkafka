@@ -44,7 +44,8 @@ rd_kafka_resp_err_t rd_kafka_zstd_decompress(rd_kafka_broker_t *rkb,
                                              size_t *outlenp) {
         unsigned long long out_bufsize = ZSTD_getFrameContentSize(inbuf, inlen);
         ZSTD_DCtx *dctx;
-        rd_bool_t use_pooled_dctx = thrd_is_current(rkb->rkb_thread);
+        rd_bool_t use_pooled_dctx = rkb->rkb_rk->rk_conf.zstd_ctx_reuse &&
+                                    thrd_is_current(rkb->rkb_thread);
         rd_bool_t evict_dctx      = rd_false;
         rd_kafka_resp_err_t err;
 
@@ -174,7 +175,8 @@ rd_kafka_resp_err_t rd_kafka_zstd_compress(rd_kafka_broker_t *rkb,
         size_t r;
         rd_kafka_resp_err_t err = RD_KAFKA_RESP_ERR_NO_ERROR;
         size_t len              = rd_slice_remains(slice);
-        rd_bool_t use_pooled_cctx = thrd_is_current(rkb->rkb_thread);
+        rd_bool_t use_pooled_cctx = rkb->rkb_rk->rk_conf.zstd_ctx_reuse &&
+                                    thrd_is_current(rkb->rkb_thread);
         ZSTD_outBuffer out;
         ZSTD_inBuffer in;
 
@@ -191,9 +193,10 @@ rd_kafka_resp_err_t rd_kafka_zstd_compress(rd_kafka_broker_t *rkb,
         }
 
 
-        /* Reuse the broker's cached ZSTD_CStream when called from the
-         * broker I/O thread (the hot producer path).  Off-thread callers
-         * (e.g. telemetry) create and free their own context. */
+        /* With compression.zstd.context.reuse, reuse the broker's cached
+         * ZSTD_CStream when called from the broker I/O thread (the hot
+         * producer path).  Off-thread callers (e.g. telemetry) create and
+         * free their own context. */
         if (use_pooled_cctx) {
                 cctx = (ZSTD_CStream *)rkb->rkb_zstd_cctx;
                 if (!cctx) {
