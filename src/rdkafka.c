@@ -1828,12 +1828,11 @@ static void rd_kafka_stats_emit_all(rd_kafka_t *rk) {
             rd_kafka_type2str(rk->rk_type), now, (signed long long)time(NULL),
             now - rk->rk_ts_created, rd_kafka_q_len(rk->rk_rep), tot_cnt,
             tot_size, rk->rk_curr_msgs.max_cnt, rk->rk_curr_msgs.max_size,
-            rd_atomic32_get(&rk->rk_simple_cnt),
-            rk->rk_metadata_cache.rkmc_cnt, rk->rk_zstd_pool.max,
-            zstd_cctx.created, zstd_cctx.reused, zstd_cctx.in_use,
-            zstd_cctx.in_use_max, zstd_cctx.retained, zstd_cctx.retained_bytes,
-            zstd_dctx.created, zstd_dctx.reused, zstd_dctx.in_use,
-            zstd_dctx.in_use_max, zstd_dctx.retained,
+            rd_atomic32_get(&rk->rk_simple_cnt), rk->rk_metadata_cache.rkmc_cnt,
+            rk->rk_zstd_pool.max, zstd_cctx.created, zstd_cctx.reused,
+            zstd_cctx.in_use, zstd_cctx.in_use_max, zstd_cctx.retained,
+            zstd_cctx.retained_bytes, zstd_dctx.created, zstd_dctx.reused,
+            zstd_dctx.in_use, zstd_dctx.in_use_max, zstd_dctx.retained,
             zstd_dctx.retained_bytes);
 
 
@@ -2483,10 +2482,9 @@ rd_kafka_t *rd_kafka_new(rd_kafka_type_t type,
         cnd_init(&rk->rk_telemetry.termination_cnd);
 
 #if WITH_ZSTD
-        rd_kafka_zstd_pool_init(&rk->rk_zstd_pool,
-                                rk->rk_conf.zstd_ctx_reuse
-                                    ? rk->rk_conf.zstd_ctx_pool_size
-                                    : 0);
+        rd_kafka_zstd_pool_init(
+            &rk->rk_zstd_pool,
+            rk->rk_conf.zstd_ctx_reuse ? rk->rk_conf.zstd_ctx_pool_size : 0);
 #endif
 
         rd_atomic64_init(&rk->rk_ts_last_poll, rk->rk_ts_created);

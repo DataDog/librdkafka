@@ -206,7 +206,7 @@ rd_kafka_resp_err_t rd_kafka_zstd_decompress(rd_kafka_broker_t *rkb,
                                              void **outbuf,
                                              size_t *outlenp) {
         unsigned long long out_bufsize = ZSTD_getFrameContentSize(inbuf, inlen);
-        rd_kafka_zstd_pool_t *pool = &rkb->rkb_rk->rk_zstd_pool;
+        rd_kafka_zstd_pool_t *pool     = &rkb->rkb_rk->rk_zstd_pool;
         ZSTD_DCtx *dctx;
         rd_bool_t reusable = rd_true;
         rd_kafka_resp_err_t err;
@@ -564,9 +564,9 @@ static int ut_zstd_pool_bounds(void) {
  *         reuse disabled nothing is retained but borrows are still counted;
  *         a never initialized pool still works. */
 static int ut_zstd_reuse(void) {
-        ut_zstd_client_t on   = ut_zstd_client_new(1);
-        ut_zstd_client_t off  = ut_zstd_client_new(0);
-        ut_zstd_client_t bare = ut_zstd_client_new(-1);
+        ut_zstd_client_t on        = ut_zstd_client_new(1);
+        ut_zstd_client_t off       = ut_zstd_client_new(0);
+        ut_zstd_client_t bare      = ut_zstd_client_new(-1);
         rd_kafka_zstd_pool_t *pool = &on.rk->rk_zstd_pool;
         rd_kafka_zstd_ctx_stats_t cs, ds;
         void *cctx, *dctx;
@@ -591,8 +591,8 @@ static int ut_zstd_reuse(void) {
         rd_kafka_zstd_pool_stats(pool, &cs, &ds);
         RD_UT_ASSERT(cs.created == 1 && cs.reused == 4 && ds.created == 1 &&
                          ds.reused == 4,
-                     "expected 1 created and 4 reused, got %" PRId64
-                     "/%" PRId64 " and %" PRId64 "/%" PRId64,
+                     "expected 1 created and 4 reused, got %" PRId64 "/%" PRId64
+                     " and %" PRId64 "/%" PRId64,
                      cs.created, cs.reused, ds.created, ds.reused);
 
         for (i = 0; i < 3; i++)
@@ -630,13 +630,13 @@ static int ut_zstd_evict_on_error(void) {
         rd_buf_init(&b, 1, 0);
         rd_buf_push(&b, payload, sizeof(payload), NULL);
         rd_slice_init_full(&slice, &b);
-        RD_UT_ASSERT(!rd_kafka_zstd_compress(c.rkb, 3, &slice, &comp,
-                                             &comp_len),
-                     "compression failed");
+        RD_UT_ASSERT(
+            !rd_kafka_zstd_compress(c.rkb, 3, &slice, &comp, &comp_len),
+            "compression failed");
 
-        RD_UT_ASSERT(!rd_kafka_zstd_decompress(c.rkb, comp, comp_len, &out,
-                                               &out_len),
-                     "decompression failed");
+        RD_UT_ASSERT(
+            !rd_kafka_zstd_decompress(c.rkb, comp, comp_len, &out, &out_len),
+            "decompression failed");
         rd_free(out);
         RD_UT_ASSERT(c.rk->rk_zstd_pool.dctx.retained_cnt == 1,
                      "expected retained dctx");
@@ -702,10 +702,9 @@ static int ut_zstd_concurrent(void) {
                          ds.created + ds.reused == 8 * 50,
                      "lost borrows: %" PRId64 " cctx, %" PRId64 " dctx",
                      cs.created + cs.reused, ds.created + ds.reused);
-        RD_UT_ASSERT(cs.in_use == 0 && ds.in_use == 0 &&
-                         cs.in_use_max >= 1 && cs.in_use_max <= 8,
-                     "unexpected in_use %d (max %d)", cs.in_use,
-                     cs.in_use_max);
+        RD_UT_ASSERT(cs.in_use == 0 && ds.in_use == 0 && cs.in_use_max >= 1 &&
+                         cs.in_use_max <= 8,
+                     "unexpected in_use %d (max %d)", cs.in_use, cs.in_use_max);
 
         ut_zstd_client_destroy(&c);
         RD_UT_PASS();

@@ -267,13 +267,13 @@ typedef struct rd_kafka_eos_stats_s {
  *        see `compression.zstd.context.reuse`.
  */
 typedef struct rd_kafka_zstd_ctx_stats_s {
-        int64_t created;        /**< Contexts created (cumulative) */
-        int64_t reused;         /**< Uses served by a retained context
-                                 *   (cumulative) */
-        int32_t in_use;         /**< Contexts in use now */
-        int32_t in_use_max;     /**< Max contexts in use at once since the
-                                 *   previous statistics */
-        int32_t retained;       /**< Contexts retained for reuse now */
+        int64_t created;    /**< Contexts created (cumulative) */
+        int64_t reused;     /**< Uses served by a retained context
+                             *   (cumulative) */
+        int32_t in_use;     /**< Contexts in use now */
+        int32_t in_use_max; /**< Max contexts in use at once since the
+                             *   previous statistics */
+        int32_t retained;   /**< Contexts retained for reuse now */
         int32_t _pad;
         int64_t retained_bytes; /**< Memory held by retained contexts */
 } rd_kafka_zstd_ctx_stats_t;
