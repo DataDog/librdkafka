@@ -1537,12 +1537,21 @@ static const struct rd_kafka_property rd_kafka_properties[] = {
      "Reuse ZSTD compression and decompression contexts across message "
      "sets instead of creating and freeing one per message set. "
      "Reuse saves the per-batch context setup cost, at the expense of "
-     "keeping one compression and one decompression context allocated per "
-     "broker. A compression context's size depends on the message set size "
-     "and `compression.level`: at the default level it is about 2.5 MiB for "
+     "keeping idle contexts allocated. Idle contexts are shared by all "
+     "brokers of this client instance and their number is capped by "
+     "`compression.zstd.context.pool.size`.",
+     0, 1, 0},
+    {_RK_GLOBAL, "compression.zstd.context.pool.size", _RK_C_INT,
+     _RK(zstd_ctx_pool_size),
+     "Maximum number of idle ZSTD compression contexts, and separately of "
+     "idle decompression contexts, retained by this client instance when "
+     "`compression.zstd.context.reuse` is enabled. Contexts in use beyond "
+     "this number are created and freed per message set. "
+     "A compression context's size depends on the message set size and "
+     "`compression.level`: at the default level it is about 2.5 MiB for "
      "1 MiB message sets and 3.5 MiB for 4 MiB or larger message sets. "
      "A decompression context is about 100 KiB.",
-     0, 1, 0},
+     1, 100000, 10},
     {_RK_GLOBAL | _RK_PRODUCER, "multibatch", _RK_C_BOOL,
      _RK(multibatch), "Batch produce requests across multiple partitions. V1", 0,
      1, 1},

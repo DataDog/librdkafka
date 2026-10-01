@@ -72,9 +72,6 @@
 #include "rdcrc32.h"
 #include "rdrand.h"
 #include "rdkafka_lz4.h"
-#if WITH_ZSTD
-#include "rdkafka_zstd.h"
-#endif
 #if WITH_SSL
 #include <openssl/err.h>
 #endif
@@ -6122,10 +6119,6 @@ void rd_kafka_broker_destroy_final(rd_kafka_broker_t *rkb) {
                  RD_KAFKA_PROTO_SASL_PLAINTEXT ||
              rkb->rkb_rk->rk_conf.security_protocol == RD_KAFKA_PROTO_SASL_SSL))
                 rd_kafka_sasl_broker_term(rkb);
-
-#if WITH_ZSTD
-        rd_kafka_zstd_broker_term(rkb);
-#endif
 
         if (rkb->rkb_wakeup_fd[0] != -1)
                 rd_socket_close(rkb->rkb_wakeup_fd[0]);

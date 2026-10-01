@@ -283,6 +283,24 @@ static RD_UNUSED const char *rd_kafka_type2str(rd_kafka_type_t type) {
 }
 
 /**
+ * @brief Idle ZSTD contexts shared by all threads of an rd_kafka_t,
+ *        see `compression.zstd.context.reuse`.
+ *
+ * Contexts are popped for the duration of a single (de)compression and
+ * pushed back afterwards, so a context is never used by two threads at once.
+ * Only idle contexts are bounded: a context returned to a full pool is freed.
+ */
+typedef struct rd_kafka_zstd_pool_s {
+        mtx_t lock;
+        int max;      /**< Idle contexts retained per kind,
+                       *   0 = reuse disabled, lock is not initialized. */
+        int cctx_cnt; /**< Idle compression contexts in cctx. */
+        int dctx_cnt; /**< Idle decompression contexts in dctx. */
+        void **cctx;  /**< ZSTD_CStream *[max], used as a stack. */
+        void **dctx;  /**< ZSTD_DCtx *[max], used as a stack. */
+} rd_kafka_zstd_pool_t;
+
+/**
  * Kafka handle, internal representation of the application's rd_kafka_t.
  */
 
@@ -761,6 +779,8 @@ struct rd_kafka_s {
                 } rd_avg_rollover;
 
         } rk_telemetry;
+
+        rd_kafka_zstd_pool_t rk_zstd_pool; /**< Idle ZSTD contexts */
 
         /* Test mocks */
         struct {

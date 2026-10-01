@@ -55,8 +55,17 @@ rd_kafka_resp_err_t rd_kafka_zstd_compress(rd_kafka_broker_t *rkb,
                                            size_t *outlenp);
 
 /**
- * @brief Free the broker's cached ZSTD compression and decompression contexts.
+ * @brief Enable \p pool, retaining up to \p max idle contexts of each kind.
  */
-void rd_kafka_zstd_broker_term(rd_kafka_broker_t *rkb);
+void rd_kafka_zstd_pool_init(rd_kafka_zstd_pool_t *pool, int max);
+
+/**
+ * @brief Free all idle contexts in \p pool. No-op if the pool is disabled.
+ *
+ * @locality Any thread, once no (de)compression can run on the pool.
+ */
+void rd_kafka_zstd_pool_destroy(rd_kafka_zstd_pool_t *pool);
+
+int unittest_zstd(void);
 
 #endif /* _RDZSTD_H_ */

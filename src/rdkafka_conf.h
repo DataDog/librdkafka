@@ -368,7 +368,8 @@ struct rd_kafka_conf_s {
         int max_poll_interval_ms;
         int enable_metrics_push;
 
-        int zstd_ctx_reuse; /**< compression.zstd.context.reuse */
+        int zstd_ctx_reuse;     /**< compression.zstd.context.reuse */
+        int zstd_ctx_pool_size; /**< compression.zstd.context.pool.size */
 
         int builtin_features;
         /*

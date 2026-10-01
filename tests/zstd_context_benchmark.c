@@ -31,10 +31,9 @@
  *
  * The benchmark deliberately bypasses producer queueing and broker I/O so that
  * the measured interval contains only slice traversal, output allocation, and
- * zstd compression.  rkb_thread is set to the current thread to match the
- * producer hot path.  `--reuse 1` sets `compression.zstd.context.reuse=true`,
- * `--reuse 0` creates and frees a context per compression, so both behaviors
- * run from the same binary.
+ * zstd compression.  `--reuse 1` enables the client's ZSTD context pool
+ * (`compression.zstd.context.reuse=true`), `--reuse 0` creates and frees a
+ * context per compression, so both behaviors run from the same binary.
  *
  * The Makefile links with --wrap for ZSTD_createCStream() and
  * ZSTD_freeCStream(), providing exact context lifecycle counts without relying
@@ -44,7 +43,7 @@
  *   --reuse 0: context_creates == iterations, context_frees == iterations
  *   --reuse 1: context_creates == 0 after warmup, context_frees == 0
  *
- * The cached context is freed after the measured interval, outside the timer.
+ * The pooled context is freed after the measured interval, outside the timer.
  *
  * Build:
  *   make -C tests zstd_context_benchmark
@@ -436,16 +435,15 @@ int main(int argc, char **argv) {
         fill_payload(payload, config.size, config.pattern);
         init_input(&input, payload, config.size, config.segment_size);
 
-        /* Match rd_kafka_msgset_writer_compress_zstd() locality. */
-        rkb.rkb_rk                 = &rk;
-        rkb.rkb_thread             = thrd_current();
-        rk.rk_conf.zstd_ctx_reuse = config.reuse;
+        rkb.rkb_rk = &rk;
+        if (config.reuse)
+                rd_kafka_zstd_pool_init(&rk.rk_zstd_pool, 1);
 
         (void)run_phase(&rkb, &input, &config, config.warmup_iterations,
                         rd_false);
         result = run_phase(&rkb, &input, &config, config.iterations, rd_true);
 
-        rd_kafka_zstd_broker_term(&rkb);
+        rd_kafka_zstd_pool_destroy(&rk.rk_zstd_pool);
 
         print_result(&config, &result);
 

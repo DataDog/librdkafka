@@ -58,6 +58,9 @@
 #include "rdkafka_idempotence.h"
 #include "rdkafka_sasl_oauthbearer.h"
 #include "rdkafka_stats.h"
+#if WITH_ZSTD
+#include "rdkafka_zstd.h"
+#endif
 
 #if WITH_OAUTHBEARER_OIDC
 #include "rdkafka_sasl_oauthbearer_oidc.h"
@@ -1047,6 +1050,10 @@ void rd_kafka_destroy_final(rd_kafka_t *rk) {
 
         cnd_destroy(&rk->rk_init_cnd);
         mtx_destroy(&rk->rk_init_lock);
+
+#if WITH_ZSTD
+        rd_kafka_zstd_pool_destroy(&rk->rk_zstd_pool);
+#endif
 
 
         rd_kafkap_str_destroy(rk->rk_client_id);
@@ -2444,6 +2451,12 @@ rd_kafka_t *rd_kafka_new(rd_kafka_type_t type,
 
         mtx_init(&rk->rk_telemetry.lock, mtx_plain);
         cnd_init(&rk->rk_telemetry.termination_cnd);
+
+#if WITH_ZSTD
+        if (rk->rk_conf.zstd_ctx_reuse)
+                rd_kafka_zstd_pool_init(&rk->rk_zstd_pool,
+                                        rk->rk_conf.zstd_ctx_pool_size);
+#endif
 
         rd_atomic64_init(&rk->rk_ts_last_poll, rk->rk_ts_created);
         rd_atomic32_init(&rk->rk_flushing, 0);
