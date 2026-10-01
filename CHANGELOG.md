@@ -1,3 +1,29 @@
+# librdkafka v2.10.7
+
+librdkafka v2.10.7 is a DataDog fork release.
+
+## Enhancements
+
+* ZSTD context reuse is now opt-in, through the new
+  `compression.zstd.context.reuse` property (default `false`). v2.10.5 and
+  v2.10.6 always cached one compression and one decompression context per
+  broker. That costs about 2.5 MiB per broker for 1 MiB message sets at the
+  default compression level, which adds up to gigabytes for clients connected
+  to hundreds of brokers.
+* With reuse enabled, idle contexts now live in one pool shared by all
+  brokers of a client instance, capped by the new
+  `compression.zstd.context.pool.size` property (default `10`, applied
+  separately to compression and decompression contexts). Contexts in use
+  beyond the cap are created and freed per message set, as they were before
+  v2.10.5. Retained memory therefore depends on the pool size, not on the
+  number of brokers.
+
+## Upgrade considerations
+
+* The default behavior goes back to that of v2.10.4: a ZSTD context is
+  created and freed per message set. To keep the reduced per-batch CPU cost
+  of v2.10.5 and v2.10.6, set `compression.zstd.context.reuse=true`.
+
 # librdkafka v2.10.3
 
 librdkafka v2.10.3 is a DataDog fork release with semantically significant producer-path changes.
